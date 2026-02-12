@@ -79,6 +79,13 @@ app.post("/webhook", async (req, res) => {
     const messages = value?.messages;
     if (!messages || !messages.length) return;
 
+    const metaPhoneId = value?.metadata?.phone_number_id;
+
+if (metaPhoneId !== process.env.PHONE_NUMBER_ID) {
+  console.log("Evento de teste ignorado (phone_number_id diferente):", metaPhoneId);
+  return;
+}
+    
     const msg = messages[0];
 
     // Evita responder coisas que não são texto (por enquanto)
