@@ -99,8 +99,7 @@ async function upstashCommand(commandArr) {
     return null;
   }
 
-  // Upstash REST API: envia comandos como array JSON, ex.: ["SET","chave","valor"]
-  const url = UPSTASH_REDIS_REST_URL; // já vem pronto do painel (HTTPS REST URL)
+  const url = UPSTASH_REDIS_REST_URL;
 
   const resp = await fetch(url, {
     method: "POST",
@@ -235,12 +234,9 @@ async function normalizeOnboardingStatus(waId, status) {
   ]);
   if (doNotNormalize.has(status)) return status;
 
-  // Se já tem nome e doc, não faz sentido voltar para WAIT_NAME/WAIT_DOC
   if (name && doc && (status === "WAIT_NAME" || status === "WAIT_NAME_VALUE" || status === "WAIT_DOC")) {
     return "ACTIVE";
   }
-
-  // Se tem nome mas não tem doc, garante WAIT_DOC
   if (name && !doc && (status === "WAIT_NAME" || status === "WAIT_NAME_VALUE")) return "WAIT_DOC";
 
   return status;
@@ -311,14 +307,12 @@ async function canUseByPlanNow(waId) {
   const planCode = await getPlanCode(waId);
   if (!planCode) return false;
 
-  // Pix precisa estar dentro de 30 dias (cartão não usa esse check)
   const subId = await redisGet(kAsaasSubscriptionId(waId));
   if (!subId) {
     const ok = await isActiveByPix(waId);
     if (!ok) return false;
   }
 
-  // quota mensal
   const ym = currentMonthKey();
   const savedYm = await getQuotaMonth(waId);
   if (savedYm !== ym) {
@@ -334,7 +328,6 @@ async function canUseByPlanNow(waId) {
 }
 
 async function consumeOneDescriptionOrBlock(waId) {
-  // Primeiro tenta plano ativo
   const planCode = await getPlanCode(waId);
   if (planCode) {
     const can = await canUseByPlanNow(waId);
@@ -343,7 +336,6 @@ async function consumeOneDescriptionOrBlock(waId) {
     return true;
   }
 
-  // Senão, trial
   const used = await getFreeUsed(waId);
   if (used >= FREE_DESCRIPTIONS_LIMIT) return false;
   await incFreeUsed(waId);
@@ -399,7 +391,6 @@ function looksLikeRefinement(text) {
   if (!t) return false;
   const low = t.toLowerCase();
 
-  // “OK” não é refino
   if (isOkToFinish(t) || isPositiveFeedbackLegacy(t)) return false;
 
   const keywords = [
@@ -417,7 +408,6 @@ function looksLikeRefinement(text) {
   ];
   if (keywords.some((k) => low.includes(k))) return true;
 
-  // feedback curto após uma descrição
   if (t.length <= 120) return true;
 
   return false;
@@ -454,7 +444,6 @@ function extractImprovementInstruction(text) {
   let t = String(text || "").trim();
   if (!t) return "";
 
-  // limpa prefixos comuns
   t = t.replace(/^((não\s+gostei|nao\s+gostei)\s*(do|da|de)?\s*)/i, "");
   t = t.replace(/^(melhore|melhorar|ajuste|ajustar|refaça|refaca|refazer|troque|substitua|mude|coloque)\s*[:\-]?\s*/i, "");
   return t.trim();
@@ -494,20 +483,13 @@ async function sendWhatsAppText(to, text) {
 function sanitizeWhatsAppMarkdown(text) {
   let t = String(text || "");
 
-  // Converte **negrito** -> *negrito* (WhatsApp)
   t = t.replace(/\*\*(.+?)\*\*/g, "*$1*");
-
-  // Remove padrões quebrados "* *"
   t = t.replace(/\*\s+\*/g, "*");
   t = t.replace(/\*{3,}/g, "*");
-
-  // Evita linhas vazias excessivas
   t = t.replace(/\n{3,}/g, "\n\n");
-
-  // Corrige casos comuns: "*Preço:* *R$ 10*" -> "*Preço:* R$ 10"
   t = t.replace(/\*(Preço|Preco|Valor)\:\*\s*\*/gi, "*$1:* ");
-  t = t.replace(/\*\s*(R\$)/g, "$1"); // remove asterisco antes de R$
-  t = t.replace(/(R\$\s*\d[^\n]*)\*/g, "$1"); // remove asterisco sobrando depois do preço
+  t = t.replace(/\*\s*(R\$)/g, "$1");
+  t = t.replace(/(R\$\s*\d[^\n]*)\*/g, "$1");
 
   return t.trim();
 }
@@ -529,20 +511,20 @@ REGRAS IMPORTANTES (WhatsApp):
 - Não invente informações. Se faltar dado, use texto neutro: "Consulte valores", "Consulte sabores", "Consulte disponibilidade".
 
 DIFERENÇA ENTRE PRODUTO x SERVIÇO:
-- Se for PRODUTO (comida, item, artesanato etc):
+- Se for PRODUTO:
   - Só mencione entrega/retirada se o cliente informou.
   - Se não informou, OU omita isso, OU use "Entrega/retirada a combinar".
-- Se for SERVIÇO (ex.: pedreiro, manicure, sobrancelha, elétrica, pneu, vidraceiro etc):
+- Se for SERVIÇO:
   - NÃO use "entrega/retirada".
-  - Se parecer serviço com hora marcada (unha, cabelo, sobrancelha, estética): use "Agende um horário".
-  - Se parecer serviço orçamentado (pedreiro, elétrica, telhado, vidraçaria): use "Solicite um orçamento".
+  - Se parecer serviço com hora marcada: use "Agende um horário".
+  - Se parecer serviço orçamentado: use "Solicite um orçamento".
 
 ESTRUTURA:
 1) *TÍTULO*
 2) 2–4 linhas com benefícios e apelo
 3) Linha de preço/valor (se houver) ou "Consulte valores"
 4) Linha final: produto (entrega/retirada se fizer sentido) OU serviço ("Agende um horário" / "Solicite um orçamento")
-5) CTA curto (ex.: "Chama no WhatsApp!").
+5) CTA curto.
 `.trim();
 
   const user = `
@@ -589,27 +571,70 @@ async function asaasFetch(path, method, bodyObj) {
 
   const resp = await fetch(`${ASAAS_BASE_URL}${path}`, {
     method,
-    headers: { "Content-Type": "application/json", access_token: ASAAS_API_KEY },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      access_token: ASAAS_API_KEY,
+    },
     body: bodyObj ? JSON.stringify(bodyObj) : undefined,
   });
 
   const data = await resp.json().catch(() => ({}));
+
+  // Asaas geralmente retorna 4xx em erro, mas vamos ser defensivos:
   if (!resp.ok) {
     throw new Error(`Asaas ${resp.status}: ${JSON.stringify(data)}`);
   }
+  if (data && typeof data === "object" && Array.isArray(data.errors) && data.errors.length) {
+    // Não expor dados sensíveis. Só uma mensagem genérica.
+    throw new Error(`Asaas: retornou errors no body.`);
+  }
   return data;
+}
+
+async function findCustomerByCpfCnpj(doc) {
+  // doc já vem limpo (apenas números)
+  const q = encodeURIComponent(doc);
+  const data = await asaasFetch(`/v3/customers?cpfCnpj=${q}`, "GET");
+  // Estrutura típica: { data: [...], totalCount: n }
+  const list = Array.isArray(data?.data) ? data.data : [];
+  if (list.length > 0 && list[0]?.id) return String(list[0].id);
+  return "";
 }
 
 async function findOrCreateAsaasCustomer({ waId, name, doc }) {
   const cached = await redisGet(kAsaasCustomerId(waId));
   if (cached) return cached;
 
-  const created = await asaasFetch("/v3/customers", "POST", { name, cpfCnpj: doc });
-  const customerId = created?.id;
+  // 1) tenta criar
+  let created = null;
+  try {
+    created = await asaasFetch("/v3/customers", "POST", {
+      name,
+      cpfCnpj: doc,
+      externalReference: waId, // ajuda em troubleshooting sem expor doc
+    });
+  } catch (e) {
+    // Se falhar, tentamos buscar
+    safeLogError("Asaas create customer falhou (tentando buscar):", e);
+  }
+
+  let customerId = created?.id ? String(created.id) : "";
+
+  // 2) fallback: buscar por CPF/CNPJ
+  if (!customerId) {
+    try {
+      const found = await findCustomerByCpfCnpj(doc);
+      if (found) customerId = found;
+    } catch (e) {
+      safeLogError("Asaas search customer falhou:", e);
+    }
+  }
+
   if (!customerId) throw new Error("Asaas: customerId não retornou.");
 
   await redisSet(kAsaasCustomerId(waId), customerId);
-  await redisSet(kAsaasCustomerToWa(customerId), waId); // índice reverso p/ webhook
+  await redisSet(kAsaasCustomerToWa(customerId), waId);
   return customerId;
 }
 
@@ -630,10 +655,10 @@ async function createCardSubscription({ waId, plan }) {
     description: `Amigo das Vendas - Plano ${plan.name}`,
   });
 
-  const subId = sub?.id;
+  const subId = sub?.id ? String(sub.id) : "";
   if (!subId) throw new Error("Asaas: subscription id não retornou.");
 
-  await redisSet(kAsaasSubToWa(subId), waId); // índice reverso p/ webhook
+  await redisSet(kAsaasSubToWa(subId), waId);
   const link = sub?.invoiceUrl || sub?.paymentLink || sub?.url || "";
   return { subscriptionId: subId, link };
 }
@@ -658,12 +683,11 @@ async function createPixPayment({ waId, plan }) {
     description: `Amigo das Vendas - Plano ${plan.name} (PIX)`,
   });
 
-  const payId = payment?.id;
+  const payId = payment?.id ? String(payment.id) : "";
   if (!payId) throw new Error("Asaas: payment id não retornou.");
 
-  await redisSet(kAsaasPaymentToWa(payId), waId); // índice reverso p/ webhook
+  await redisSet(kAsaasPaymentToWa(payId), waId);
 
-  // QR / payload (opcional)
   const pix = await asaasFetch(`/v3/payments/${payId}/pixQrCode`, "GET");
   const link = payment?.invoiceUrl || pix?.payload || "";
   return { paymentId: payId, link, invoiceUrl: payment?.invoiceUrl || "" };
@@ -690,20 +714,16 @@ async function activatePlanAfterPayment({ waId, planCode, method, subscriptionId
   const plan = findPlanByCode(planCode);
   if (!plan) return false;
 
-  // Ativa plano e reseta quota do mês
   await setPlanCode(waId, plan.code);
   await setQuotaMonth(waId, currentMonthKey());
   await setQuotaUsed(waId, 0);
 
-  // Pix: validade de 30 dias só após confirmação
   if (method === "PIX") {
     const validUntil = Date.now() + 30 * 24 * 60 * 60 * 1000;
     await setPixValidUntil(waId, validUntil);
-    // Pix não usa subscription
     await redisDel(kAsaasSubscriptionId(waId));
   }
 
-  // Cartão: salva subscriptionId e remove validade Pix
   if (method === "CARD") {
     if (subscriptionId) await redisSet(kAsaasSubscriptionId(waId), subscriptionId);
     await clearPixValidUntil(waId);
@@ -718,7 +738,6 @@ async function activatePlanAfterPayment({ waId, planCode, method, subscriptionId
 }
 
 // ===================== WEBHOOK ASAAS =====================
-// Aqui é onde ativamos de fato o plano, SOMENTE após confirmação.
 app.post("/asaas/webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -731,20 +750,17 @@ app.post("/asaas/webhook", async (req, res) => {
     const payload = req.body || {};
     const event = String(payload?.event || "").trim();
 
-    // Eventos comuns (variam por configuração do Asaas):
     const allowedEvents = new Set([
       "PAYMENT_CONFIRMED",
       "PAYMENT_RECEIVED",
       "PAYMENT_APPROVED",
     ]);
-
     if (!allowedEvents.has(event)) return;
 
     const paymentId = payload?.payment?.id ? String(payload.payment.id) : "";
     const subscriptionId = payload?.payment?.subscription ? String(payload.payment.subscription) : "";
     const customerId = payload?.payment?.customer ? String(payload.payment.customer) : "";
 
-    // Descobre waId por índice reverso
     let waId = "";
     if (paymentId) waId = (await redisGet(kAsaasPaymentToWa(paymentId))) || "";
     if (!waId && subscriptionId) waId = (await redisGet(kAsaasSubToWa(subscriptionId))) || "";
@@ -752,7 +768,6 @@ app.post("/asaas/webhook", async (req, res) => {
 
     if (!waId) return;
 
-    // Só ativa se essa pessoa estava com pagamento pendente
     const pendingPlanCode = (await redisGet(kPendingPlan(waId))) || "";
     const pendingMethod = (await redisGet(kPendingMethod(waId))) || "";
     const pendingPaymentId = (await redisGet(kPendingPaymentId(waId))) || "";
@@ -760,7 +775,6 @@ app.post("/asaas/webhook", async (req, res) => {
 
     if (!pendingPlanCode || !pendingMethod) return;
 
-    // Se tivermos IDs pendentes, validar coerência
     if (pendingMethod === "PIX" && pendingPaymentId && paymentId && pendingPaymentId !== paymentId) return;
     if (pendingMethod === "CARD" && pendingSubId && subscriptionId && pendingSubId !== subscriptionId) return;
 
@@ -804,7 +818,6 @@ function paymentMethodText() {
   return "*Forma de pagamento* 💳\n\n1) Cartão\n2) Pix\n\nResponda com 1 ou 2.";
 }
 async function buildMySubscriptionText(waId) {
-  // Se estiver aguardando pagamento, mostra isso
   const status = await getStatus(waId);
   if (status === "PAYMENT_PENDING") {
     const planCode = (await redisGet(kPendingPlan(waId))) || "";
@@ -908,7 +921,6 @@ app.post("/webhook", async (req, res) => {
     if (metaPhoneId === "123456123") return; // mock
     if (metaPhoneId && PHONE_NUMBER_ID && metaPhoneId !== PHONE_NUMBER_ID) return;
 
-    // status events (sent/delivered/read)
     const statuses = value?.statuses;
     if (statuses && statuses.length) return;
 
@@ -919,10 +931,8 @@ app.post("/webhook", async (req, res) => {
     const waId = msg.from;
     if (!waId) return;
 
-    // idempotência
     if (await isDuplicateMessage(msg.id)) return;
 
-    // só texto
     if (msg.type !== "text") {
       await sendWhatsAppText(
         waId,
@@ -937,7 +947,6 @@ app.post("/webhook", async (req, res) => {
     let status = await getStatus(waId);
     status = await normalizeOnboardingStatus(waId, status);
 
-    // ===================== MENU (a qualquer momento) =====================
     if (isMenuCommand(text)) {
       await setMenuReturn(waId, status);
       await setStatus(waId, "MENU");
@@ -945,9 +954,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // ===================== SE ESTÁ AGUARDANDO PAGAMENTO =====================
     if (status === "PAYMENT_PENDING") {
-      // Se não for "menu", mantém parado aguardando
       await sendWhatsAppText(
         waId,
         "⏳ Estou aguardando a confirmação do seu pagamento pelo Asaas.\n\n" +
@@ -957,13 +964,11 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // ===================== MENU FLOW (não prende o usuário) =====================
     if (status === "MENU") {
       if (!["1", "2", "3", "4", "5", "6"].includes(text)) {
         const back = (await popMenuReturn(waId)) || "ACTIVE";
         await setStatus(waId, back);
         status = back;
-        // NÃO return: continua o processamento abaixo com o texto como descrição.
       } else {
         if (text === "1") {
           const info = await buildMySubscriptionText(waId);
@@ -1005,7 +1010,6 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // Cancelar plano (cartão)
     if (status === "MENU_CANCEL_CONFIRM") {
       if (text === "2") {
         await setStatus(waId, "MENU");
@@ -1037,7 +1041,6 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // Alterar nome
     if (status === "MENU_UPDATE_NAME") {
       const name = text.trim();
       if (name.length < 3) {
@@ -1051,7 +1054,6 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // Alterar CPF/CNPJ
     if (status === "MENU_UPDATE_DOC") {
       const doc = cleanDoc(text);
       if (doc.length !== 11 && doc.length !== 14) {
@@ -1065,7 +1067,6 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // ===================== ONBOARDING =====================
     if (status === "WAIT_NAME") {
       await sendWhatsAppText(waId, "Oi! 🙂\nQual é o seu *nome completo*?");
       await setStatus(waId, "WAIT_NAME_VALUE");
@@ -1103,7 +1104,6 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // ===================== CONTRATAÇÃO / TROCA DE PLANO =====================
     if (status === "WAIT_PLAN") {
       if (!["1", "2", "3"].includes(text)) {
         await sendWhatsAppText(waId, "Responda com 1, 2 ou 3 para escolher o plano.");
@@ -1129,7 +1129,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Cartão (recorrente) — NÃO ativa aqui
       if (text === "1") {
         try {
           const r = await createCardSubscription({ waId, plan });
@@ -1160,15 +1159,15 @@ app.post("/webhook", async (req, res) => {
           safeLogError("Erro criando assinatura Asaas:", e);
           await sendWhatsAppText(
             waId,
-            "Tive um problema ao gerar o pagamento agora. Tente novamente (responda 1, 2 ou 3 para escolher o plano)."
+            "Não consegui gerar o pagamento agora.\n\n" +
+            "Se quiser, digite *MENU* e tente novamente em *Mudar plano*.\n" +
+            "Ou revise seu CPF/CNPJ em *Alterar CPF/CNPJ*."
           );
           await setStatus(waId, "WAIT_PLAN");
-          await sendWhatsAppText(waId, plansMenuText());
         }
         return;
       }
 
-      // Pix — NÃO ativa aqui
       if (text === "2") {
         try {
           const r = await createPixPayment({ waId, plan });
@@ -1191,17 +1190,17 @@ app.post("/webhook", async (req, res) => {
           safeLogError("Erro criando pagamento Pix Asaas:", e);
           await sendWhatsAppText(
             waId,
-            "Tive um problema ao gerar o pagamento agora. Tente novamente (responda 1, 2 ou 3 para escolher o plano)."
+            "Não consegui gerar o Pix agora.\n\n" +
+            "Se quiser, digite *MENU* e tente novamente em *Mudar plano*.\n" +
+            "Ou revise seu CPF/CNPJ em *Alterar CPF/CNPJ*."
           );
           await setStatus(waId, "WAIT_PLAN");
-          await sendWhatsAppText(waId, plansMenuText());
         }
         return;
       }
     }
 
     // ===================== BLOQUEIOS =====================
-    // Sem plano e sem trial
     const planCode = await getPlanCode(waId);
     if (!planCode) {
       const used = await getFreeUsed(waId);
@@ -1212,7 +1211,6 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // Com plano mas sem uso (quota esgotou ou Pix expirou)
     if (planCode) {
       const can = await canUseByPlanNow(waId);
       if (!can) {
@@ -1228,7 +1226,6 @@ app.post("/webhook", async (req, res) => {
     const refineCount = await getRefineCount(waId);
     const lastInput = await getLastInput(waId);
 
-    // Finaliza/zera se OK
     if (lastDesc && (isOkToFinish(text) || isPositiveFeedbackLegacy(text))) {
       await sendWhatsAppText(waId, "Boa! ✅\nSe quiser fazer outra descrição, é só me mandar o próximo produto/serviço 🙂");
       await clearDraft(waId);
@@ -1238,7 +1235,6 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // Se existe descrição anterior, tentamos tratar como refino/info extra; senão, é nova descrição.
     if (lastDesc) {
       const isRefine = looksLikeRefinement(text);
       const isExtraInfo = looksLikeAdditionalInfo(text);
@@ -1291,7 +1287,6 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // ===================== NOVA DESCRIÇÃO =====================
     const draft = mergeDraftFromMessage(await getDraft(waId), text);
     await setDraft(waId, draft);
 
