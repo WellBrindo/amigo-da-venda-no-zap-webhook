@@ -510,33 +510,53 @@ async function openaiGenerateDescription({ baseUserText, previousDescription, in
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente.");
 
   const system = `
-Você é o "Amigo das Vendas": cria descrições curtas, chamativas e vendáveis para WhatsApp.
+Você é o "Amigo das Vendas": cria anúncios prontos para WhatsApp (curtos, escaneáveis e vendáveis).
 
-OBJETIVO:
-- Transformar a mensagem do cliente em uma descrição pronta para copiar/encaminhar.
+ENTREGA
+- Entregue SOMENTE o anúncio final. Sem explicações, sem rascunhos e sem títulos extras.
+- Nunca invente informações. Se faltar algo (local, preço, prazo, entrega, horários, etc.), use termos neutros:
+  "sob consulta", "a combinar", "conforme disponibilidade", "valores sob consulta", "entrega/atendimento sob consulta".
 
-REGRAS IMPORTANTES (WhatsApp):
-- Negrito é com *asterisco único*: *TÍTULO*
-- O título (1ª linha) SEMPRE em negrito.
-- Use emojis moderados (não exagerar).
-- Destaque APENAS 2 a 4 trechos importantes em negrito. Não deixe tudo em negrito.
-- Não invente informações. Se faltar dado, use texto neutro: "Consulte valores", "Consulte sabores", "Consulte disponibilidade".
+REGRAS DE FORMATAÇÃO (OBRIGATÓRIAS)
+- Título sempre na 1ª linha, em negrito, com 1 emoji no início: "🍰 *Título*"
+- Sempre pular 1 linha depois do título.
+- Frases curtas e escaneáveis (WhatsApp).
+- Emojis com moderação: 3 a 6 no total, no máximo 1 por linha.
+- Negrito apenas para palavras-chave (máx. 4 destaques no texto todo). Não colocar tudo em negrito.
+- Bullets com ✅ apenas se fizer sentido; no máximo 3. Se não houver info, use bullets genéricos neutros (sem inventar).
 
-DIFERENÇA ENTRE PRODUTO x SERVIÇO:
-- Se for PRODUTO:
-  - Só mencione entrega/retirada se o cliente informou.
-  - Se não informou, OU omita isso, OU use "Entrega/retirada a combinar".
-- Se for SERVIÇO:
-  - NÃO use "entrega/retirada".
-  - Se parecer serviço com hora marcada: use "Agende um horário".
-  - Se parecer serviço orçamentado: use "Solicite um orçamento".
+ESTRUTURA FIXA (SEMPRE NESTA ORDEM)
+[1] TÍTULO (emoji + negrito)
+[2] Proposta de valor (2 linhas)
+[3] Diferenciais (✅ até 3 – opcional/genericamente neutro se necessário)
+[4] Impulso de venda (2–3 linhas curtas, tom de anúncio)
+[5] Condições neutras (3 linhas fixas):
+    📍 *Região/atendimento:* ...
+    💰 *Valores:* ...
+    🕒 *Disponibilidade:* ...
+[6] CTA (1 linha final): pedir 2–3 infos objetivas adequadas ao segmento, em negrito.
 
-ESTRUTURA:
-1) *TÍTULO*
-2) 2–4 linhas com benefícios e apelo
-3) Linha de preço/valor (se houver) ou "Consulte valores"
-4) Linha final: produto (entrega/retirada se fizer sentido) OU serviço ("Agende um horário" / "Solicite um orçamento")
-5) CTA curto.
+REGRAS DE PRODUTO x SERVIÇO
+- Identifique se é PRODUTO ou SERVIÇO pelo texto do cliente.
+- PRODUTO:
+  - Se não tiver preço, use "valores sob consulta".
+  - Se entrega/retirada não foi informada, use "entrega/retirada a combinar" (ou "sob consulta").
+- SERVIÇO:
+  - Nunca falar de entrega/retirada.
+  - Se for serviço com agendamento (ex.: sobrancelha, cabelo, manicure): incluir a ideia de "Agende seu horário".
+  - Se for serviço técnico/orçamentado (ex.: pedreiro, encanador, eletricista, manutenção): incluir a ideia de "Solicite seu orçamento".
+  - Nunca usar "Consulte entrega" para serviços.
+
+LINGUAGEM POR SEGMENTO
+- Comida: apetitoso/sabor
+- Beleza: procedimento/resultado
+- Transporte: rota/carga/segurança
+- Manutenção/técnico: solução/rapidez/confiança
+- Sempre soar como anúncio para grupo, natural e direto.
+
+IMPORTANTE
+- Use *asterisco único* para negrito no WhatsApp.
+- Se existir "Descrição anterior" e houver "o que melhorar", gere uma NOVA VERSÃO aplicando o ajuste sem trocar de assunto.
 `.trim();
 
   const user = `
@@ -881,6 +901,23 @@ async function popMenuReturn(waId) {
 }
 async function clearMenuReturn(waId) {
   await redisDel(kMenuReturn(waId));
+}
+
+async function sendTrialEndedFlow(waId) {
+  // Fim do trial: mensagem + convite + planos
+  await sendWhatsAppText(waId, "✅ Você concluiu o *teste gratuito* e usou as *5 descrições* disponíveis.");
+  await sendWhatsAppText(
+    waId,
+    "🤝 *Gostou do seu novo amigo de vendas?*\n\n" +
+      "Ele te ajudou a deixar seus anúncios mais profissionais.\n" +
+      "Facilitou na hora de divulgar.\n" +
+      "Deixou tudo mais organizado e vendável.\n\n" +
+      "✨ Não fique sem o seu Amigo.\n" +
+      "Escolha um plano abaixo e continue essa amizade que ajuda você a vender."
+  );
+
+  await setStatus(waId, "WAIT_PLAN");
+  await sendWhatsAppText(waId, plansMenuText());
 }
 
 // ===================== LIMPEZA (a cada ~1h) =====================
@@ -1395,7 +1432,8 @@ ${r.invoiceUrl || r.link || ""}
       const used = await getFreeUsed(waId);
       if (used >= FREE_DESCRIPTIONS_LIMIT) {
         await setStatus(waId, "BLOCKED");
-        await sendWhatsAppText(waId, "Você atingiu o limite do trial.\nDigite *MENU* para ver opções.");
+        await sendTrialEndedFlow(waId);
+        return;
         return;
       }
     }
@@ -1482,7 +1520,11 @@ ${r.invoiceUrl || r.link || ""}
     const okConsume = await consumeOneDescriptionOrBlock(waId);
     if (!okConsume) {
       await setStatus(waId, "BLOCKED");
-      await sendWhatsAppText(waId, "Você atingiu o limite do trial/plano.\nDigite *MENU* para ver opções.");
+      if (!planCode) {
+        await sendTrialEndedFlow(waId);
+        return;
+      }
+      await sendWhatsAppText(waId, "Seu plano expirou ou atingiu o limite.\nDigite *MENU* para ver opções.");
       return;
     }
 
