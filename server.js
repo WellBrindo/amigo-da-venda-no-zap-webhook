@@ -1335,9 +1335,9 @@ async function expirePendingPaymentIfNeeded(waId) {
 
   await sendWhatsAppText(
     waId,
-    "⏳ Seu pagamento ficou pendente por mais de 48h e o link expirou.
+    `⏳ Seu pagamento ficou pendente por mais de 48h e o link expirou.
 
-Vamos gerar um novo rapidinho 🙂"
+Vamos gerar um novo rapidinho 🙂`
   );
   await sendWhatsAppText(waId, plansMenuText());
   return true;
