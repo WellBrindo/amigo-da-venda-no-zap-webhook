@@ -25,8 +25,12 @@ const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").tr
 const ASAAS_API_KEY = (process.env.ASAAS_API_KEY || "").trim();
 const ASAAS_ENV = (process.env.ASAAS_ENV || "sandbox").trim(); // "sandbox" | "production"
 const ASAAS_WEBHOOK_TOKEN = (process.env.ASAAS_WEBHOOK_TOKEN || "").trim(); // opcional (recomendado)
+
+// ✅ FIX CRÍTICO: Base URL correta do Asaas
+// Production: https://api.asaas.com
+// Sandbox: https://api-sandbox.asaas.com
 const ASAAS_BASE_URL =
-  ASAAS_ENV === "production" ? "https://api.asaas.com" : "https://sandbox.asaas.com";
+  ASAAS_ENV === "production" ? "https://api.asaas.com" : "https://api-sandbox.asaas.com";
 
 // Produto
 const HELP_URL = "https://amigodasvendas.com.br";
@@ -581,22 +585,18 @@ async function asaasFetch(path, method, bodyObj) {
 
   const data = await resp.json().catch(() => ({}));
 
-  // Asaas geralmente retorna 4xx em erro, mas vamos ser defensivos:
   if (!resp.ok) {
     throw new Error(`Asaas ${resp.status}: ${JSON.stringify(data)}`);
   }
   if (data && typeof data === "object" && Array.isArray(data.errors) && data.errors.length) {
-    // Não expor dados sensíveis. Só uma mensagem genérica.
     throw new Error(`Asaas: retornou errors no body.`);
   }
   return data;
 }
 
 async function findCustomerByCpfCnpj(doc) {
-  // doc já vem limpo (apenas números)
   const q = encodeURIComponent(doc);
   const data = await asaasFetch(`/v3/customers?cpfCnpj=${q}`, "GET");
-  // Estrutura típica: { data: [...], totalCount: n }
   const list = Array.isArray(data?.data) ? data.data : [];
   if (list.length > 0 && list[0]?.id) return String(list[0].id);
   return "";
@@ -606,22 +606,19 @@ async function findOrCreateAsaasCustomer({ waId, name, doc }) {
   const cached = await redisGet(kAsaasCustomerId(waId));
   if (cached) return cached;
 
-  // 1) tenta criar
   let created = null;
   try {
     created = await asaasFetch("/v3/customers", "POST", {
       name,
       cpfCnpj: doc,
-      externalReference: waId, // ajuda em troubleshooting sem expor doc
+      externalReference: waId,
     });
   } catch (e) {
-    // Se falhar, tentamos buscar
     safeLogError("Asaas create customer falhou (tentando buscar):", e);
   }
 
   let customerId = created?.id ? String(created.id) : "";
 
-  // 2) fallback: buscar por CPF/CNPJ
   if (!customerId) {
     try {
       const found = await findCustomerByCpfCnpj(doc);
