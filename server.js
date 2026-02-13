@@ -186,6 +186,10 @@ function kCleanupTick() { return `cleanup:last`; }
 // Menu: “return status” separado para não travar
 function kMenuReturn(waId) { return `menu:return:${waId}`; }
 
+// Salvar condições neutras (confirmação)
+function kCondPending(waId) { return `cond:pending:${waId}`; }
+function kCondReturn(waId) { return `cond:return:${waId}`; }
+
 // ===================== USER STATE =====================
 async function getStatus(waId) {
   const s = await redisGet(kStatus(waId));
@@ -220,6 +224,69 @@ async function setDoc(waId, doc) {
   const u = await getUser(waId);
   u.doc = String(doc || "").trim();
   await setUser(waId, u);
+}
+
+// ===================== CONDIÇÕES SALVAS / PREFERÊNCIAS =====================
+async function getPrefs(waId) {
+  const u = await getUser(waId);
+  const p = u?.prefs || {};
+  return {
+    allowBullets: p.allowBullets !== false,               // default true
+    allowConditionsBlock: p.allowConditionsBlock !== false, // default true
+    allowConditionIcons: p.allowConditionIcons !== false, // default true (📍 💰 🕒)
+  };
+}
+async function setPrefs(waId, patch) {
+  const u = await getUser(waId);
+  u.prefs = { ...(u.prefs || {}), ...(patch || {}) };
+  await setUser(waId, u);
+}
+
+async function getSavedConditions(waId) {
+  const u = await getUser(waId);
+  return u?.savedConditions || {};
+}
+async function setSavedConditions(waId, patch) {
+  const u = await getUser(waId);
+  u.savedConditions = { ...(u.savedConditions || {}), ...(patch || {}) };
+  await setUser(waId, u);
+}
+async function clearSavedConditionsFields(waId, fields) {
+  const u = await getUser(waId);
+  const cur = { ...(u.savedConditions || {}) };
+  for (const f of (fields || [])) delete cur[f];
+  u.savedConditions = cur;
+  await setUser(waId, u);
+}
+
+async function setPendingConditions(waId, obj, returnStatus) {
+  await redisSet(kCondPending(waId), JSON.stringify(obj || {}));
+  await redisSet(kCondReturn(waId), returnStatus || "ACTIVE");
+}
+async function getPendingConditions(waId) {
+  const raw = await redisGet(kCondPending(waId));
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+async function clearPendingConditions(waId) {
+  await redisDel(kCondPending(waId));
+  await redisDel(kCondReturn(waId));
+}
+async function popCondReturn(waId) {
+  const r = await redisGet(kCondReturn(waId));
+  await redisDel(kCondReturn(waId));
+  return r || "ACTIVE";
+}
+
+async function setStyleAnchor(waId, desc) {
+  const u = await getUser(waId);
+  u.styleAnchor = String(desc || "");
+  u.styleAnchorAt = Date.now();
+  await setUser(waId, u);
+}
+async function getStyleAnchor(waId) {
+  const u = await getUser(waId);
+  return String(u?.styleAnchor || "");
 }
 
 /**
@@ -468,6 +535,118 @@ function extractImprovementInstruction(text) {
   return t.trim();
 }
 
+// ===================== PREFERÊNCIAS & CONDIÇÕES (EXTRAÇÃO) =====================
+function normalizeDigits(s) {
+  return String(s || "").replace(/\D+/g, "");
+}
+function formatBRPhoneToE164(raw) {
+  const d = normalizeDigits(raw);
+  if (!d) return "";
+  // Já veio com 55 + DDD + número
+  if (d.length === 13 && d.startsWith("55")) return d;
+  // DDD + número (10 ou 11)
+  if (d.length === 10 || d.length === 11) return `55${d}`;
+  // Sem DDD (evitar chutar demais)
+  return "";
+}
+function extractConditionsFromText(t) {
+  const text = String(t || "");
+
+  // telefone: tenta pegar qualquer número "de contato"
+  const phoneMatches = text.match(/(\+?55\s*)?(\(?\d{2}\)?\s*)?9?\d{4}\-?\d{4}/g) || [];
+  let phone = "";
+  for (const m of phoneMatches) {
+    const f = formatBRPhoneToE164(m);
+    if (f) { phone = f; break; }
+  }
+
+  // instagram / site
+  const ig = (text.match(/@([a-zA-Z0-9._]{3,})/g) || [])[0] || "";
+  const site = (text.match(/\bhttps?:\/\/[^\s]+/i) || [])[0] || "";
+
+  // preço
+  const price = (text.match(/R\$\s*\d[\d\.\,]*/i) || [])[0] || "";
+
+  // horário: pega a linha/frase com palavras-chave
+  let hours = "";
+  const lines = text.split("\n").map((x) => x.trim()).filter(Boolean);
+  const hourLine = lines.find((l) =>
+    /hor[aá]rio|atendimento|das\s+\d|às\s+\d|\d{1,2}\s*h|\bseg\b|\bsegunda\b|\bs[aá]bado\b|\bdom\b/i.test(l)
+  );
+  if (hourLine) hours = hourLine;
+
+  // endereço/local: linha com rua/av/bairro/cidade/cep
+  let address = "";
+  const addrLine = lines.find((l) =>
+    /\bru?a\b|\bav\.?\b|\bavenida\b|\btravessa\b|\bbairro\b|\bcep\b|\bcidade\b|\bn[ºo]\b/i.test(l)
+  );
+  if (addrLine) address = addrLine;
+
+  // Se não achou em linhas, tenta por trechos
+  if (!address) {
+    const m = text.match(/(rua|av\.?|avenida|travessa|alameda)[^\n]{6,}/i);
+    if (m) address = m[0].trim();
+  }
+
+  const out = {};
+  if (phone) out.phone = phone;
+  if (address) out.address = address;
+  if (hours) out.hours = hours;
+  if (price) out.price = price;
+  if (ig) out.instagram = ig;
+  if (site) out.website = site;
+
+  return out;
+}
+
+function hasAnyKeys(obj) {
+  return obj && typeof obj === "object" && Object.keys(obj).length > 0;
+}
+
+function detectPrefsUpdate(messageText) {
+  const t = String(messageText || "").toLowerCase();
+
+  const patch = {};
+
+  // Bullets
+  if (/(sem\s+bullets?|sem\s+lista|sem\s+t[oó]picos|tira\s+bullets?|remover\s+bullets?)/i.test(t)) {
+    patch.allowBullets = false;
+  }
+  if (/(pode\s+usar\s+bullets?|coloque\s+bullets?|com\s+bullets?)/i.test(t)) {
+    patch.allowBullets = true;
+  }
+
+  // Condições bloco
+  if (/(sem\s+condi[cç][oõ]es|tira\s+condi[cç][oõ]es|remover\s+condi[cç][oõ]es)/i.test(t)) {
+    patch.allowConditionsBlock = false;
+  }
+  if (/(pode\s+colocar\s+condi[cç][oõ]es|com\s+condi[cç][oõ]es)/i.test(t)) {
+    patch.allowConditionsBlock = true;
+  }
+
+  // Emojis das condições (📍💰🕒)
+  if (/(sem\s+emoji|sem\s+emojis|tira\s+os\s+emojis|sem\s+📍|sem\s+💰|sem\s+🕒)/i.test(t)) {
+    patch.allowConditionIcons = false;
+  }
+  if (/(pode\s+usar\s+emojis|com\s+📍|com\s+💰|com\s+🕒)/i.test(t)) {
+    patch.allowConditionIcons = true;
+  }
+
+  return patch;
+}
+
+function detectRemoveSavedConditionsFields(messageText) {
+  const t = String(messageText || "").toLowerCase();
+  const fields = [];
+  if (/(tira|remova|n[aã]o\s+use|n[aã]o\s+coloque).*(telefone|celular|contato)/i.test(t)) fields.push("phone");
+  if (/(tira|remova|n[aã]o\s+use|n[aã]o\s+coloque).*(endere[cç]o|local|rua|bairro)/i.test(t)) fields.push("address");
+  if (/(tira|remova|n[aã]o\s+use|n[aã]o\s+coloque).*(hor[aá]rio|horarios|atendimento)/i.test(t)) fields.push("hours");
+  if (/(tira|remova|n[aã]o\s+use|n[aã]o\s+coloque).*(pre[cç]o|valor|valores|R\$)/i.test(t)) fields.push("price");
+  if (/(tira|remova|n[aã]o\s+use|n[aã]o\s+coloque).*(instagram|@)/i.test(t)) fields.push("instagram");
+  if (/(tira|remova|n[aã]o\s+use|n[aã]o\s+coloque).*(site|link|https?:\/\/)/i.test(t)) fields.push("website");
+  return [...new Set(fields)];
+}
+
 function askFeedbackText() {
   return `💬 Quer que eu deixe ainda mais a sua cara?
 
@@ -513,7 +692,7 @@ function sanitizeWhatsAppMarkdown(text) {
   return t.trim();
 }
 
-async function openaiGenerateDescription({ baseUserText, previousDescription, instruction, fullName }) {
+async function openaiGenerateDescription({ baseUserText, previousDescription, instruction, fullName, prefs, savedConditions, styleAnchor }) {
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente.");
 
   const system = `
@@ -530,18 +709,26 @@ REGRAS DE FORMATAÇÃO (OBRIGATÓRIAS)
 - Frases curtas e escaneáveis (WhatsApp).
 - Emojis com moderação: 3 a 6 no total, no máximo 1 por linha.
 - Negrito apenas para palavras-chave (máx. 4 destaques no texto todo). Não colocar tudo em negrito.
-- Bullets com ✅ apenas se fizer sentido; no máximo 3. Se não houver info, use bullets genéricos neutros (sem inventar).
+- Respeite as preferências do cliente (quando informadas):
+  - Se "allowBullets" for false: NÃO use bullets.
+  - Se "allowConditionsBlock" for false: NÃO inclua a seção de condições (📍/💰/🕒).
+  - Se "allowConditionIcons" for false: se precisar mostrar condições, use rótulos sem emojis ("Local:", "Preço:", "Horário:").
 
-ESTRUTURA FIXA (SEMPRE NESTA ORDEM)
+- Bullets (✅) APENAS se fizer sentido E se houver informações reais fornecidas pelo cliente; no máximo 3.
+- NUNCA use bullets genéricos só para “preencher”. Se não houver info suficiente, NÃO use bullets.
+
+ESTRUTURA (ORDEM PADRÃO)
 [1] TÍTULO (emoji + negrito)
 [2] Proposta de valor (2 linhas)
-[3] Diferenciais (✅ até 3 – opcional/genericamente neutro se necessário)
+[3] Diferenciais (opcional): até 3 bullets (✅) SOMENTE se fizer sentido e se houver informações reais.
 [4] Impulso de venda (2–3 linhas curtas, tom de anúncio)
-[5] Condições neutras (3 linhas fixas):
-    📍 *Região/atendimento:* ...
-    💰 *Valores:* ...
-    🕒 *Disponibilidade:* ...
-[6] CTA (1 linha final): pedir 2–3 infos objetivas adequadas ao segmento, em negrito.
+[5] Condições (opcional):
+    - Só inclua se houver dados informados pelo cliente (no pedido atual) OU dados salvos do cliente.
+    - Respeite as preferências:
+      - Se allowConditionsBlock for false: NÃO inclua esta seção.
+      - Se allowConditionIcons for false: use rótulos sem emojis ("Local:", "Preço:", "Horário:").
+      - Se allowConditionIcons for true: você pode usar (📍/💰/🕒) com moderação.
+[6] CTA (1 linha final): pedir 1–2 infos objetivas adequadas ao segmento, em negrito.
 
 REGRAS DE PRODUTO x SERVIÇO
 - Identifique se é PRODUTO ou SERVIÇO pelo texto do cliente.
@@ -566,10 +753,25 @@ IMPORTANTE
 - Se existir "Descrição anterior" e houver "o que melhorar", gere uma NOVA VERSÃO aplicando o ajuste sem trocar de assunto.
 `.trim();
 
+  const p = prefs || { allowBullets: true, allowConditionsBlock: true, allowConditionIcons: true };
+  const c = savedConditions || {};
+  const style = String(styleAnchor || "").trim();
+
   const user = `
 Nome do cliente (se houver): ${fullName || "—"}
 
-Informações do cliente (base):
+Preferências do cliente:
+- allowBullets: ${p.allowBullets}
+- allowConditionsBlock: ${p.allowConditionsBlock}
+- allowConditionIcons: ${p.allowConditionIcons}
+
+Condições já salvas do cliente (use se fizer sentido; não invente nada):
+${JSON.stringify(c, null, 2)}
+
+Estilo aprovado anteriormente (se existir):
+${style ? style : "—"}
+
+Pedido atual do cliente (base):
 ${baseUserText || "—"}
 
 Descrição anterior (se houver):
@@ -578,7 +780,11 @@ ${previousDescription || "—"}
 O que o cliente quer melhorar (se houver):
 ${instruction || "—"}
 
-Crie a DESCRIÇÃO FINAL agora. Se houver "Descrição anterior", faça uma NOVA VERSÃO dela aplicando a melhoria pedida, sem trocar de assunto.
+Agora crie a DESCRIÇÃO FINAL.
+- Se houver "Estilo aprovado anteriormente", use como referência de estrutura/ritmo (sem copiar texto).
+- Se houver condições salvas (telefone/endereço/horário/valores), inclua na seção de condições apenas se allowConditionsBlock=true.
+- Se allowConditionIcons=false, NÃO use 📍💰🕒 (use rótulos).
+- Se allowBullets=false, NÃO use bullets.
 `.trim();
 
   const body = {
@@ -1102,6 +1308,51 @@ app.post("/webhook", async (req, res) => {
     let status = await getStatus(waId);
     status = await normalizeOnboardingStatus(waId, status);
 
+    // ===================== PREFERÊNCIAS (ajustes do usuário) =====================
+    const prefPatch = detectPrefsUpdate(text);
+    if (Object.keys(prefPatch).length) {
+      await setPrefs(waId, prefPatch);
+    }
+
+    // Remoção explícita de dados salvos (ex.: "não use meu endereço")
+    const removeFields = detectRemoveSavedConditionsFields(text);
+    if (removeFields.length) {
+      await clearSavedConditionsFields(waId, removeFields);
+    }
+
+    // ===================== CONFIRMAÇÃO DE SALVAR CONDIÇÕES =====================
+    if (status === "WAIT_SAVE_CONDITIONS_CONFIRM") {
+      const pending = await getPendingConditions(waId);
+
+      const t = text.trim().toLowerCase();
+      const yes = t === "1" || t === "sim" || t === "s" || t === "salvar";
+      const no = t === "2" || t === "não" || t === "nao" || t === "n" || t === "não salvar" || t === "nao salvar";
+
+      if (yes && pending && hasAnyKeys(pending)) {
+        await setSavedConditions(waId, pending);
+        await sendWhatsAppText(waId, "Perfeito ✅ Vou salvar e usar essas informações nas próximas descrições.
+
+Se quiser tirar depois, é só me pedir (ex.: "não use meu endereço").");
+      } else if (no) {
+        await sendWhatsAppText(waId, "Beleza 🙂 Não vou salvar essas informações para as próximas descrições.");
+      } else {
+        await sendWhatsAppText(waId, "Só pra eu confirmar 🙂
+
+1) Sim, pode salvar
+2) Não, não salvar");
+        return;
+      }
+
+      const back = await popCondReturn(waId);
+      await clearPendingConditions(waId);
+      await setStatus(waId, back);
+
+      // Depois da confirmação, segue o fluxo normal (ex.: feedback da descrição)
+      await sendWhatsAppText(waId, askFeedbackText());
+      return;
+    }
+
+
     if (isMenuCommand(text)) {
       await setMenuReturn(waId, status);
       await setStatus(waId, "MENU");
@@ -1490,6 +1741,9 @@ ${r.invoiceUrl || r.link || ""}
     const lastInput = await getLastInput(waId);
 
     if (lastDesc && (isOkToFinish(text) || isPositiveFeedbackLegacy(text))) {
+      // "OK" significa que o cliente gostou — vamos guardar como referência de estilo.
+      await setStyleAnchor(waId, lastDesc);
+
       await sendWhatsAppText(waId, "Legal! ✅\nQuando quiser criar outra descrição, é só me mandar. Tô aqui prontinho pra te ajudar 🙂");
       await clearDraft(waId);
       await clearRefineCount(waId);
@@ -1546,9 +1800,44 @@ try {
             previousDescription: lastDesc,
             instruction,
             fullName: await getFullName(waId),
+            prefs: await getPrefs(waId),
+            savedConditions: await getSavedConditions(waId),
+            styleAnchor: await getStyleAnchor(waId),
           });
           await setLastDescription(waId, gen);
           await sendWhatsAppText(waId, gen);
+
+          // Se no refinamento o cliente mandou dados (telefone/endereço/horário/etc), oferecemos salvar.
+          const extractedConds2 = extractConditionsFromText(text);
+          if (hasAnyKeys(extractedConds2)) {
+            const already2 = await getSavedConditions(waId);
+            const isNew2 =
+              (extractedConds2.phone && extractedConds2.phone !== already2.phone) ||
+              (extractedConds2.address && extractedConds2.address !== already2.address) ||
+              (extractedConds2.hours && extractedConds2.hours !== already2.hours) ||
+              (extractedConds2.price && extractedConds2.price !== already2.price) ||
+              (extractedConds2.instagram && extractedConds2.instagram !== already2.instagram) ||
+              (extractedConds2.website && extractedConds2.website !== already2.website);
+
+            if (isNew2) {
+              await setPendingConditions(waId, extractedConds2, "ACTIVE");
+              await setStatus(waId, "WAIT_SAVE_CONDITIONS_CONFIRM");
+
+              await sendWhatsAppText(
+                waId,
+                "📌 Vi que você colocou alguns dados como telefone, endereço, horário, valores ou links.
+
+" +
+                  "Quer que eu *salve essas informações* para incluir nas descrições futuras?
+
+" +
+                  "1) Sim, pode salvar
+2) Não, não salvar"
+              );
+              return;
+            }
+          }
+
           await sendWhatsAppText(waId, askFeedbackText());
         } catch (e) {
           safeLogError("Erro OpenAI (refino):", e);
@@ -1579,6 +1868,9 @@ try {
         previousDescription: "",
         instruction: "",
         fullName: await getFullName(waId),
+        prefs: await getPrefs(waId),
+        savedConditions: await getSavedConditions(waId),
+        styleAnchor: await getStyleAnchor(waId),
       });
 
       await setLastInput(waId, baseText);
@@ -1586,6 +1878,39 @@ try {
       await setRefineCount(waId, 0);
 
       await sendWhatsAppText(waId, gen);
+
+      // Se o cliente mandou telefone/endereço/horário/etc no texto, oferecemos salvar para próximas descrições.
+      const extractedConds = extractConditionsFromText(text);
+      if (hasAnyKeys(extractedConds)) {
+        // Só pergunta se for algo novo (não ficar insistindo)
+        const already = await getSavedConditions(waId);
+        const isNew =
+          (extractedConds.phone && extractedConds.phone !== already.phone) ||
+          (extractedConds.address && extractedConds.address !== already.address) ||
+          (extractedConds.hours && extractedConds.hours !== already.hours) ||
+          (extractedConds.price && extractedConds.price !== already.price) ||
+          (extractedConds.instagram && extractedConds.instagram !== already.instagram) ||
+          (extractedConds.website && extractedConds.website !== already.website);
+
+        if (isNew) {
+          await setPendingConditions(waId, extractedConds, "ACTIVE");
+          await setStatus(waId, "WAIT_SAVE_CONDITIONS_CONFIRM");
+
+          await sendWhatsAppText(
+            waId,
+            "📌 Vi que você colocou alguns dados como telefone, endereço, horário, valores ou links.
+
+" +
+              "Quer que eu *salve essas informações* para incluir nas descrições futuras?
+
+" +
+              "1) Sim, pode salvar
+2) Não, não salvar"
+          );
+          return;
+        }
+      }
+
       await sendWhatsAppText(waId, askFeedbackText());
     } catch (e) {
       safeLogError("Erro OpenAI (geração):", e);
