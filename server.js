@@ -458,19 +458,22 @@ function extractImprovementInstruction(text) {
 
   t = t.replace(/^((não\s+gostei|nao\s+gostei)\s*(do|da|de)?\s*)/i, "");
   t = t.replace(/^(melhore|melhorar|ajuste|ajustar|refaça|refaca|refazer|troque|substitua|mude|coloque)\s*[:\-]?\s*/i, "");
+  // Se ficar algum "*" solto (WhatsApp exige pares para negrito), remove o último para balancear.
+  while (((t.match(/\*/g) || []).length % 2) === 1) {
+    const idx = t.lastIndexOf("*");
+    if (idx === -1) break;
+    t = t.slice(0, idx) + t.slice(idx + 1);
+  }
+
   return t.trim();
 }
 
 function askFeedbackText() {
-  return (
-    "💬 Quer que eu deixe ainda mais a sua cara?
+  return `💬 Quer que eu deixe ainda mais a sua cara?
 
-" +
-    "Me diga o que você quer ajustar (ex.: mais emoji, mudar o título, mais emocional, mais curto, mais técnico).
+Me diga o que você quer ajustar (ex.: mais emoji, mudar o título, mais emocional, mais curto, mais técnico).
 
-" +
-    "Se estiver tudo certinho, me manda um OK ✅"
-  );
+Se estiver tudo certinho, me manda um OK ✅`;
 }
 
 // ===================== WHATSAPP SEND =====================
@@ -865,13 +868,13 @@ function plansMenuText() {
   );
 }
 function paymentMethodText() {
-  return "Perfeito 🙂
+  return `Perfeito 🙂
 Assim que você escolher a forma de pagamento, eu já preparo tudinho pra gente continuar com as suas descrições sem parar. 💳
 
 1) Cartão
 2) Pix
 
-Me responde com 1 ou 2 🙂";
+Me responde com 1 ou 2 🙂`;
 }
 async function buildMySubscriptionText(waId) {
   const status = await getStatus(waId);
@@ -1235,18 +1238,15 @@ app.post("/webhook", async (req, res) => {
 
       // Fluxo correto: agradece o nome e libera o trial (5 descrições) sem pedir CPF/CNPJ agora.
       await sendWhatsAppText(waId, `É um prazer te conhecer, ${name.split(" ")[0]} 🙂`);
-      await sendWhatsAppText(
+            await sendWhatsAppText(
         waId,
-        "Pra gente se conhecer melhor 😊 você pode me pedir *5 descrições gratuitas* pra testar.
+        `Pra gente se conhecer melhor 😊 você pode me pedir *5 descrições gratuitas* pra testar.
 
-" +
-          "Você pode mandar bem completo (com preço, detalhes, entrega etc.) ou bem simples mesmo, tipo: “Faço bolo de chocolate R$35”. Eu organizo e deixo com cara de anúncio.
+Você pode mandar bem completo (com preço, detalhes, entrega etc.) ou bem simples mesmo, tipo: “Faço bolo de chocolate R$35”. Eu organizo e deixo com cara de anúncio.
 
-" +
-          "E tem mais: depois que eu te entregar a descrição, você pode pedir até *2 ajustes* (ex.: mais emoji, mais emocional, mudar o título) sem consumir uma nova descrição.
+E tem mais: depois que eu te entregar a descrição, você pode pedir até *2 ajustes* (ex.: mais emoji, mais emocional, mudar o título) sem consumir uma nova descrição.
 
-" +
-          "Me manda agora o que você vende ou o serviço que você oferece."
+Me manda agora o que você vende ou o serviço que você oferece.`
       );
 
       await setStatus(waId, "ACTIVE");
