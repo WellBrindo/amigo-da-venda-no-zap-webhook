@@ -43,6 +43,12 @@ const TEST_RESET_COMMANDS = new Set(["resetar", "reset", "zerar"]); // comandos 
 const FREE_DESCRIPTIONS_LIMIT = 5;        // trial por uso
 const MAX_REFINES_PER_DESCRIPTION = 2;    // até 2 refinamentos por descrição; o 3º conta como nova descrição
 
+// TTLs (Upstash / Redis)
+// Idempotência: evita crescer infinito (ex.: 7 dias)
+const IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60;
+// Pendência de pagamento: expira após 48h
+const PENDING_PAYMENT_TTL_SECONDS = 48 * 60 * 60;
+
 // Planos (descrições por mês)
 const PLANS = {
   1: {
@@ -85,6 +91,50 @@ function safeLogError(prefix, err) {
 // ===================== HEALTH =====================
 app.get("/", (_req, res) => {
   res.status(200).send("OK - Amigo das Vendas no Zap webhook rodando");
+});
+
+// Observabilidade leve (sem vazar segredos)
+app.get("/healthz", async (_req, res) => {
+  const missing = [];
+
+  // Essenciais
+  if (!ACCESS_TOKEN) missing.push("ACCESS_TOKEN");
+  if (!PHONE_NUMBER_ID) missing.push("PHONE_NUMBER_ID");
+  if (!VERIFY_TOKEN) missing.push("VERIFY_TOKEN");
+  if (!OPENAI_API_KEY) missing.push("OPENAI_API_KEY");
+  if (!ASAAS_API_KEY) missing.push("ASAAS_API_KEY");
+
+  // Upstash (se habilitado)
+  if (USE_UPSTASH) {
+    if (!UPSTASH_REDIS_REST_URL) missing.push("UPSTASH_REDIS_REST_URL");
+    if (!UPSTASH_REDIS_REST_TOKEN) missing.push("UPSTASH_REDIS_REST_TOKEN");
+  }
+
+  let upstashOk = null;
+  if (USE_UPSTASH && UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN) {
+    try {
+      const pong = await upstashCommand(["PING"]);
+      upstashOk = String(pong?.result || "").toUpperCase() === "PONG";
+    } catch {
+      upstashOk = false;
+    }
+  }
+
+  const ok =
+    missing.length === 0 &&
+    (USE_UPSTASH ? (upstashOk === true) : true);
+
+  return res.status(ok ? 200 : 503).json({
+    ok,
+    uptimeSec: Math.floor(process.uptime()),
+    upstash: {
+      enabled: USE_UPSTASH,
+      ok: upstashOk,
+    },
+    env: {
+      missing,
+    },
+  });
 });
 
 // ===================== WEBHOOK VERIFY (META) =====================
@@ -136,6 +186,14 @@ async function redisSet(key, value) {
   if (!USE_UPSTASH) return null;
   const v = value === undefined ? "" : String(value);
   return upstashCommand(["SET", key, v]);
+}
+
+async function redisSetEx(key, value, ttlSeconds) {
+  if (!USE_UPSTASH) return null;
+  const v = value === undefined ? "" : String(value);
+  const ttl = Number(ttlSeconds || 0);
+  if (!ttl || ttl <= 0) return upstashCommand(["SET", key, v]);
+  return upstashCommand(["SET", key, v, "EX", String(ttl)]);
 }
 
 async function redisDel(key) {
@@ -681,7 +739,7 @@ function buildSaveConditionsPrompt(pending) {
 
   const lines = items.map((it) => `${it.n}) ${it.label}: ${it.value}`).join("\n");
 
-  return `📌 Identifiquei estas informações na sua mensagem:\n\n${lines}\n\nQuer que eu salve alguma delas para usar automaticamente nas próximas descrições?\n\n✅ Para salvar *todas*, responda: *tudo*\n✅ Para salvar apenas algumas, responda com os números separados por espaço (ex.: *1 3 4*)\n🚫 Para não salvar nada, responda: *0*\n✅ Para salvar por *nome*, responda com o(s) item(ns) (ex.: *telefone e endereço*)`;
+  return `📌 Identifiquei estas informações na sua mensagem:\n\n${lines}\n\nQuer que eu salve alguma delas para usar automaticamente nas próximas descrições?\n\n✅ Para salvar *todas*, responda: *tudo*\n✅ Para salvar apenas algumas, responda com os números separados por espaço (ex.: *1 3 4*)\n🚫 Para não salvar nada, responda: *0*`;
 }
 
 function pickConditionsByNumbers(pending, numbers) {
@@ -697,28 +755,6 @@ function pickConditionsByNumbers(pending, numbers) {
     if (key && pending[key]) selected[key] = pending[key];
   }
   return selected;
-
-function pickConditionsByNames(pending, rawText) {
-  if (!pending || typeof pending !== "object") return {};
-  const t = String(rawText || "").toLowerCase();
-
-  const rules = [
-    { key: "phone", pats: [/telefone/i, /celular/i, /whats/i, /zap/i, /contato/i, /n[uú]mero/i] },
-    { key: "address", pats: [/endere[cç]o/i, /local/i, /rua/i, /avenida/i, /av\.?/i, /bairro/i, /cidade/i, /cep/i] },
-    { key: "hours", pats: [/hor[aá]rio/i, /atendimento/i, /funciona/i, /abre/i, /fecha/i, /das\s+\d/i, /\d{1,2}\s*h/i] },
-    { key: "price", pats: [/pre[cç]o/i, /valor/i, /r\$/i, /promo/i, /a\s+partir\s+de/i] },
-    { key: "instagram", pats: [/instagram/i, /insta/i, /@/i] },
-    { key: "website", pats: [/site/i, /link/i, /http/i, /www\./i] },
-  ];
-
-  const selected = {};
-  for (const r of rules) {
-    if (!pending[r.key]) continue;
-    if (r.pats.some((p) => p.test(t))) selected[r.key] = pending[r.key];
-  }
-  return selected;
-}
-
 }
 
 function hasAnyKeys(obj) {
@@ -1273,11 +1309,38 @@ async function clearPendingPayment(waId) {
 }
 
 async function setPendingPayment({ waId, planCode, method, paymentId, subId }) {
-  await redisSet(kPendingPlan(waId), planCode || "");
-  await redisSet(kPendingMethod(waId), method || "");
-  if (paymentId) await redisSet(kPendingPaymentId(waId), paymentId);
-  if (subId) await redisSet(kPendingSubId(waId), subId);
-  await redisSet(kPendingCreatedAt(waId), String(Date.now()));
+  await redisSetEx(kPendingPlan(waId), planCode || "", PENDING_PAYMENT_TTL_SECONDS);
+  await redisSetEx(kPendingMethod(waId), method || "", PENDING_PAYMENT_TTL_SECONDS);
+  if (paymentId) await redisSetEx(kPendingPaymentId(waId), paymentId, PENDING_PAYMENT_TTL_SECONDS);
+  if (subId) await redisSetEx(kPendingSubId(waId), subId, PENDING_PAYMENT_TTL_SECONDS);
+  await redisSetEx(kPendingCreatedAt(waId), String(Date.now()), PENDING_PAYMENT_TTL_SECONDS);
+}
+
+async function isPendingPaymentExpired(waId) {
+  const at = Number((await redisGet(kPendingCreatedAt(waId))) || 0);
+  if (!at) return false;
+  return Date.now() - at > PENDING_PAYMENT_TTL_SECONDS * 1000;
+}
+
+async function expirePendingPaymentIfNeeded(waId) {
+  const status = await getStatus(waId);
+  if (status !== "PAYMENT_PENDING") return false;
+
+  const expired = await isPendingPaymentExpired(waId);
+  if (!expired) return false;
+
+  // Expirou: limpa pendência e orienta o usuário a gerar novo pagamento
+  await clearPendingPayment(waId);
+  await setStatus(waId, "WAIT_PLAN");
+
+  await sendWhatsAppText(
+    waId,
+    "⏳ Seu pagamento ficou pendente por mais de 48h e o link expirou.
+
+Vamos gerar um novo rapidinho 🙂"
+  );
+  await sendWhatsAppText(waId, plansMenuText());
+  return true;
 }
 
 async function activatePlanAfterPayment({ waId, planCode, method, subscriptionId }) {
@@ -1483,7 +1546,7 @@ async function isDuplicateMessage(messageId) {
   const key = kIdempotency(messageId);
   const seen = await redisGet(key);
   if (seen) return true;
-  await redisSet(key, "1");
+  await redisSetEx(key, "1", IDEMPOTENCY_TTL_SECONDS);
   return false;
 }
 
@@ -1619,6 +1682,10 @@ app.post("/webhook", async (req, res) => {
     let status = await getStatus(waId);
     status = await normalizeOnboardingStatus(waId, status);
 
+    // Expiração de pagamento pendente (48h)
+    if (await expirePendingPaymentIfNeeded(waId)) return;
+
+
     // ===================== FORMATAÇÃO (prioridade do usuário) =====================
     // A mensagem atual pode conter pedidos estruturais (sem emojis, texto corrido, tabela, etc.).
     // Esses pedidos SEMPRE têm prioridade no anúncio atual.
@@ -1725,20 +1792,8 @@ app.post("/webhook", async (req, res) => {
           return;
         }
       } else {
-        const pickedByName = pickConditionsByNames(pending, raw);
-        if (pickedByName && hasAnyKeys(pickedByName)) {
-          const current = await getSavedConditions(waId);
-          await setSavedConditions(waId, { ...(current || {}), ...pickedByName });
-          await sendWhatsAppText(
-            waId,
-            `Combinado ✅ Vou salvar o que você indicou pelo nome e usar nas próximas descrições.
-
-Se quiser tirar depois, é só me pedir (ex.: "não use meu endereço").`
-          );
-        } else {
-          await sendWhatsAppText(waId, buildSaveConditionsPrompt(pending));
-          return;
-        }
+        await sendWhatsAppText(waId, buildSaveConditionsPrompt(pending));
+        return;
       }
 
       const back = await popCondReturn(waId);
