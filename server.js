@@ -1,5 +1,7 @@
 import express from "express";
 import crypto from "crypto";
+// AMIGO DAS VENDAS — server.js V15.8 (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+
 
 // Node 18+ já tem fetch global.
 // Este server.js é ESM (import ...). Garanta "type":"module" no package.json.
@@ -14,6 +16,13 @@ const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "").trim();
 
 const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
 const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
+
+// OpenAI controle de custo (limite de saída por resposta)
+const OPENAI_MAX_OUTPUT_TOKENS = Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 450);
+
+// Retry seguro OpenAI
+const OPENAI_RETRY_MAX_ATTEMPTS = Number(process.env.OPENAI_RETRY_MAX_ATTEMPTS || 3);
+const OPENAI_RETRY_BASE_DELAY_MS = Number(process.env.OPENAI_RETRY_BASE_DELAY_MS || 350);
 
 // Upstash (Redis REST)
 const USE_UPSTASH =
@@ -225,6 +234,10 @@ function kAsaasSubscriptionId(waId) { return `asaas:sub:${waId}`; }
 function kAsaasCustomerToWa(customerId) { return `asaas:customer_to_wa:${customerId}`; }
 function kAsaasPaymentToWa(paymentId) { return `asaas:payment_to_wa:${paymentId}`; }
 function kAsaasSubToWa(subId) { return `asaas:sub_to_wa:${subId}`; }
+
+// cache rápido de status de assinatura (para evitar calls excessivas ao Asaas)
+function kAsaasSubActiveCache(subId) { return `asaas:sub_active:${subId}`; }
+function kAsaasSubActiveCacheAt(subId) { return `asaas:sub_active_at:${subId}`; }
 
 // pagamento pendente
 function kPendingPlan(waId) { return `pending:plan:${waId}`; }        // planCode
@@ -500,7 +513,10 @@ async function canUseByPlanNow(waId) {
   if (!planCode) return false;
 
   const subId = await redisGet(kAsaasSubscriptionId(waId));
-  if (!subId) {
+  if (subId) {
+    const active = await isAsaasSubscriptionActive(subId);
+    if (!active) return false;
+  } else {
     const ok = await isActiveByPix(waId);
     if (!ok) return false;
   }
@@ -918,6 +934,54 @@ function sanitizeWhatsAppMarkdown(text) {
 }
 
 
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function isRetryableStatus(status) {
+  return status === 429 || status === 408 || (status >= 500 && status <= 599);
+}
+
+async function openaiFetchWithRetry(url, options) {
+  const attempts = Math.max(1, OPENAI_RETRY_MAX_ATTEMPTS || 1);
+  let lastErr = null;
+
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      // timeout simples por tentativa (25s)
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 25000);
+      const resp = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timeout);
+
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        const err = new Error(`OpenAI error: ${resp.status} ${body}`);
+        err.status = resp.status;
+
+        if (isRetryableStatus(resp.status) && i < attempts) {
+          const delay = OPENAI_RETRY_BASE_DELAY_MS * Math.pow(2, i - 1);
+          await sleep(delay);
+          continue;
+        }
+        throw err;
+      }
+      return resp;
+    } catch (e) {
+      lastErr = e;
+      const status = Number(e?.status || 0);
+      const isAbort = String(e?.name || "") === "AbortError";
+      const retryable = isAbort || isRetryableStatus(status);
+      if (retryable && i < attempts) {
+        const delay = OPENAI_RETRY_BASE_DELAY_MS * Math.pow(2, i - 1);
+        await sleep(delay);
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr || new Error("OpenAI fetch falhou.");
+}
+
+
 function stripEmojis(text) {
   // Remove caracteres de emoji (Extended_Pictographic) e variações
   let t = String(text || "");
@@ -969,6 +1033,11 @@ function normalizeConditionsIcons(text) {
 
 function applyFormattingEnforcement(text, formatting) {
   const fmt = formatting || {};
+
+  const clip = (s, max) => {
+    const t = String(s || "");
+    return t.length > max ? (t.slice(0, max) + "…") : t;
+  };
   let t = String(text || "");
 
   if (fmt.plainText) {
@@ -1069,9 +1138,12 @@ async function openaiGenerateDescription({ baseUserText, previousDescription, in
   }
 
   // Âncora de estilo: quando houver, peça para manter o mesmo padrão (sem copiar texto)
-  const styleHint = styleAnchor
-    ? `\nPADRÃO APROVADO (ÂNCORA): use como referência de estrutura/tom/ritmo, sem copiar literalmente:\n---\n${styleAnchor}\n---\n`
-    : "";
+  const styleHint = styleAnchor ? `
+PADRÃO APROVADO (ÂNCORA): use como referência de estrutura/tom/ritmo, sem copiar literalmente:
+---
+${clip(styleAnchor, 1800)}
+---
+` : "";
 
   const system = `
 Você é o "Amigo das Vendas": cria anúncios prontos para WhatsApp (curtos, escaneáveis e vendáveis).
@@ -1106,9 +1178,9 @@ CONDIÇÕES SALVAS (SE HOUVER)
 ${JSON.stringify(savedConditions || {}, null, 2)}
 
 CONTEXTO / PEDIDO
-- O que o usuário vende / presta: ${baseUserText || ""}
-- Instrução atual do usuário (refinamento/pedido): ${instruction || ""}
-- Descrição anterior (se houver): ${previousDescription || ""}
+- O que o usuário vende / presta: ${clip(baseUserText, 1800)}
+- Instrução atual do usuário (refinamento/pedido): ${clip(instruction, 1200)}
+- Descrição anterior (se houver): ${clip(previousDescription, 2200)}
 
 ${styleHint}
 `;
@@ -1116,6 +1188,7 @@ ${styleHint}
   // OpenAI Responses API
   const payload = {
     model: OPENAI_MODEL,
+    max_output_tokens: OPENAI_MAX_OUTPUT_TOKENS,
     input: [
       { role: "system", content: system },
       { role: "user", content: user },
@@ -1181,6 +1254,38 @@ async function asaasFetch(path, method, bodyObj) {
   }
   return data;
 }
+
+
+async function isAsaasSubscriptionActive(subId) {
+  const id = String(subId || "").trim();
+  if (!id) return false;
+
+  // cache por 10 minutos para não bater no Asaas o tempo todo
+  const CACHE_TTL_SECONDS = 600;
+
+  const lastAt = Number((await redisGet(kAsaasSubActiveCacheAt(id))) || 0);
+  const cached = (await redisGet(kAsaasSubActiveCache(id))) || "";
+  if (cached && lastAt && (Date.now() - lastAt) < (CACHE_TTL_SECONDS * 1000)) {
+    return cached === "1";
+  }
+
+  try {
+    const sub = await asaasFetch(`/v3/subscriptions/${encodeURIComponent(id)}`, "GET");
+    // Status esperados (Asaas): ACTIVE / INACTIVE / CANCELED etc.
+    const st = String(sub?.status || "").toUpperCase();
+    const ok = st === "ACTIVE";
+    await redisSetEx(kAsaasSubActiveCache(id), ok ? "1" : "0", CACHE_TTL_SECONDS);
+    await redisSetEx(kAsaasSubActiveCacheAt(id), String(Date.now()), CACHE_TTL_SECONDS);
+    return ok;
+  } catch (e) {
+    safeLogError("Asaas subscription status falhou:", e);
+    // Em caso de erro, seja conservador (não libera uso) para não dar custo sem receber
+    await redisSetEx(kAsaasSubActiveCache(id), "0", CACHE_TTL_SECONDS);
+    await redisSetEx(kAsaasSubActiveCacheAt(id), String(Date.now()), CACHE_TTL_SECONDS);
+    return false;
+  }
+}
+
 
 async function findCustomerByCpfCnpj(doc) {
   const q = encodeURIComponent(doc);
@@ -2174,15 +2279,15 @@ ${r.invoiceUrl || r.link || ""}
         await setStatus(waId, "BLOCKED");
         await sendTrialEndedFlow(waId);
         return;
-        return;
       }
     }
 
     if (planCode) {
       const can = await canUseByPlanNow(waId);
       if (!can) {
-        await setStatus(waId, "BLOCKED");
-        await sendWhatsAppText(waId, "Seu plano expirou ou atingiu o limite.\nDigite *MENU* para ver opções.");
+        await setStatus(waId, "WAIT_PLAN");
+        await sendWhatsAppText(waId, "Seu plano expirou ou atingiu o limite. Vamos renovar?");
+        await sendWhatsAppText(waId, plansMenuText());
         return;
       }
     }
@@ -2237,9 +2342,14 @@ ${r.invoiceUrl || r.link || ""}
         if (nextRef % 3 === 0) {
           const okConsume = await consumeOneDescriptionOrBlock(waId);
           if (!okConsume) {
-            await setStatus(waId, "BLOCKED");
-            await sendWhatsAppText(waId, `Você atingiu o limite do trial/plano.
-Digite *MENU* para ver opções.`);
+            await setStatus(waId, "WAIT_PLAN");
+            const planCodeNow = await redisGet(kPlanCode(waId));
+            if (!planCodeNow) {
+              await sendTrialEndedFlow(waId);
+              return;
+            }
+            await sendWhatsAppText(waId, "Seu plano expirou ou atingiu o limite. Vamos renovar?");
+            await sendWhatsAppText(waId, plansMenuText());
             return;
           }
         }
@@ -2324,12 +2434,14 @@ const draft = mergeDraftFromMessage(await getDraft(waId), text);
 
     const okConsume = await consumeOneDescriptionOrBlock(waId);
     if (!okConsume) {
-      await setStatus(waId, "BLOCKED");
       if (!planCode) {
+        await setStatus(waId, "BLOCKED");
         await sendTrialEndedFlow(waId);
         return;
       }
-      await sendWhatsAppText(waId, "Seu plano expirou ou atingiu o limite.\nDigite *MENU* para ver opções.");
+      await setStatus(waId, "WAIT_PLAN");
+      await sendWhatsAppText(waId, "Seu plano expirou ou atingiu o limite. Vamos renovar?");
+      await sendWhatsAppText(waId, plansMenuText());
       return;
     }
 
