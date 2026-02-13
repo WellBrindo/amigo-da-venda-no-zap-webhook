@@ -35,6 +35,10 @@ const ASAAS_BASE_URL =
 // Produto
 const HELP_URL = "https://amigodasvendas.com.br";
 
+// Reset controlado (somente para seu número de teste)
+const TEST_RESET_WAID = "5511960765975";
+const TEST_RESET_COMMANDS = new Set(["resetar", "reset", "zerar"]); // comandos aceitos
+
 // Trial e limites
 const FREE_DESCRIPTIONS_LIMIT = 5;        // trial por uso
 const MAX_REFINES_PER_DESCRIPTION = 2;    // até 2 refinamentos por descrição; o 3º conta como nova descrição
@@ -902,6 +906,70 @@ function cleanDoc(text) {
   return String(text || "").replace(/\D/g, "");
 }
 
+// ===================== RESET (APENAS TESTE) =====================
+async function resetTestNumber(waId) {
+  // Segurança: só permite para o número de teste definido
+  if (waId !== TEST_RESET_WAID) return false;
+
+  // Captura ids para apagar índices reversos (se existirem)
+  const customerId = (await redisGet(kAsaasCustomerId(waId))) || "";
+  const subId = (await redisGet(kAsaasSubscriptionId(waId))) || "";
+  const pendingPaymentId = (await redisGet(kPendingPaymentId(waId))) || "";
+  const pendingSubId = (await redisGet(kPendingSubId(waId))) || "";
+
+  const keysToDelete = [
+    kStatus(waId),
+    kUser(waId),
+
+    kFreeUsed(waId),
+
+    kPlan(waId),
+    kQuotaUsed(waId),
+    kQuotaMonth(waId),
+    kPixValidUntil(waId),
+
+    kAsaasCustomerId(waId),
+    kAsaasSubscriptionId(waId),
+
+    kPendingPlan(waId),
+    kPendingMethod(waId),
+    kPendingPaymentId(waId),
+    kPendingSubId(waId),
+    kPendingCreatedAt(waId),
+
+    kDraft(waId),
+    kLastDesc(waId),
+    kLastInput(waId),
+    kRefineCount(waId),
+
+    kMenuReturn(waId),
+
+    `tmp:planchoice:${waId}`,
+  ];
+
+  for (const k of keysToDelete) {
+    try { await redisDel(k); } catch {}
+  }
+
+  // Apaga índices reversos do Asaas (se existirem)
+  if (customerId) {
+    try { await redisDel(kAsaasCustomerToWa(customerId)); } catch {}
+  }
+  if (subId) {
+    try { await redisDel(kAsaasSubToWa(subId)); } catch {}
+  }
+  if (pendingPaymentId) {
+    try { await redisDel(kAsaasPaymentToWa(pendingPaymentId)); } catch {}
+  }
+  if (pendingSubId) {
+    try { await redisDel(kAsaasSubToWa(pendingSubId)); } catch {}
+  }
+
+  // Observação: NÃO apagamos idempotência (idemp:*) para não reprocessar mensagens antigas.
+  return true;
+}
+
+
 // ===================== WEBHOOK (META EVENTS) =====================
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
@@ -940,6 +1008,22 @@ app.post("/webhook", async (req, res) => {
 
     const text = String(msg.text?.body || "").trim();
     if (!text) return;
+
+    // Reset controlado (somente para o número de teste)
+    if (TEST_RESET_COMMANDS.has(text.toLowerCase())) {
+      const ok = await resetTestNumber(waId);
+      if (ok) {
+        await sendWhatsAppText(
+          waId,
+          "🧹 Reset concluído ✅\n\nSeu cadastro, plano e contadores foram zerados para teste.\n\nVamos começar do zero 🙂"
+        );
+        await setStatus(waId, "WAIT_NAME");
+        await sendWhatsAppText(waId, "Oi! 🙂\nQual é o seu *nome completo*?");
+      } else {
+        await sendWhatsAppText(waId, "Esse comando de reset está disponível apenas para o número de teste.");
+      }
+      return;
+    }
 
     let status = await getStatus(waId);
     status = await normalizeOnboardingStatus(waId, status);
