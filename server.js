@@ -1172,12 +1172,8 @@ app.post("/webhook", async (req, res) => {
       await sendWhatsAppText(waId, `Perfeito, ${name.split(" ")[0]}! 🙂`);
       await sendWhatsAppText(
         waId,
-        "✅ Você já pode usar *5 descrições gratuitas* para testar.
-
-" +
-          'Me mande agora o que você vende ou o serviço que oferece (ex: "Faço bolo de chocolate R$35").
-
-' +
+        "✅ Você já pode usar *5 descrições gratuitas* para testar.\n\n" +
+          'Me mande agora o que você vende ou o serviço que oferece (ex: "Faço bolo de chocolate R$35").\n\n' +
           "Quando as 5 acabarem, eu te mostro os planos para continuar."
       );
 
