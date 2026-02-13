@@ -423,7 +423,7 @@ app.post("/webhook", async (req, res) => {
         if (pay.invoiceUrl) {
           await sendWhatsAppText(
             waId,
-            `✅ Perfeito! Aqui está o link para ativar seu plano:\n${pay.invoiceUrl}\n\nAssim que o pagamento for confirmado, eu libero automaticamente ✅`
+            `✅ Perfeito! O *Amigo das Vendas* é uma empresa da *Simetria Group*. Aqui está o link para ativar seu plano:\n${pay.invoiceUrl}\n\nAssim que o pagamento for confirmado, eu libero automaticamente ✅`
           );
         } else {
           await sendWhatsAppText(waId, "Eu criei sua assinatura, mas não consegui obter o link automaticamente. Me avise aqui que eu verifico e te envio ✅");
