@@ -1520,19 +1520,27 @@ ${r.invoiceUrl || r.link || ""}
           instruction = extractImprovementInstruction(text) || text;
         }
 
-        let nextRef = refineCount + 1;
-        if (refineCount >= MAX_REFINES_PER_DESCRIPTION) {
+        
+        // Contagem de refinamentos:
+        // - 0,1,2 refinamentos => ainda conta como 1 descrição
+        // - 3,4,5 refinamentos => passa a contar como 2 descrições
+        // - 6,7,8 refinamentos => passa a contar como 3 descrições
+        // Ou seja: a cada 3 refinamentos (3º, 6º, 9º, ...) consome +1 descrição.
+        const nextRef = refineCount + 1;
+        if (nextRef % 3 === 0) {
           const okConsume = await consumeOneDescriptionOrBlock(waId);
           if (!okConsume) {
             await setStatus(waId, "BLOCKED");
-            await sendWhatsAppText(waId, "Você atingiu o limite do seu plano/trial.\nDigite *MENU* para ver opções.");
+            await sendWhatsAppText(
+              waId,
+              "Você atingiu o limite do trial/plano.
+Digite *MENU* para ver opções."
+            );
             return;
           }
-          nextRef = 1;
         }
         await setRefineCount(waId, nextRef);
-
-        try {
+try {
           const gen = await openaiGenerateDescription({
             baseUserText: baseText,
             previousDescription: lastDesc,
