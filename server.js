@@ -238,22 +238,38 @@ function isResetCommand(text) {
   return ["novo", "reiniciar", "cancelar", "reset"].includes(t);
 }
 
-function isPositiveFeedback(text) {
-  const t = String(text || "").trim().toLowerCase();
-  return ["gostei", "perfeito", "ótimo", "otimo", "amei", "ficou bom", "show", "top", "fechado"].some((k) => t.includes(k));
-}
-
 function isNegativeFeedback(text) {
   const t = String(text || "").trim().toLowerCase();
+  // negativas explícitas (prioridade)
   return (
     t.includes("não gostei") ||
     t.includes("nao gostei") ||
+    t.includes("não curti") ||
+    t.includes("nao curti") ||
     t.includes("ruim") ||
-    t.includes("melhorar") ||
     t.includes("refazer") ||
+    t.includes("faz de novo") ||
+    t.includes("mudar") ||
     t.includes("trocar") ||
-    t.includes("mudar")
+    t.includes("melhorar")
   );
+}
+
+function isPositiveFeedback(text) {
+  const t = String(text || "").trim().toLowerCase();
+
+  // se for negativo, NUNCA pode cair como positivo
+  if (isNegativeFeedback(t)) return false;
+
+  // positivos “limpos”
+  const positives = ["perfeito", "ótimo", "otimo", "amei", "ficou bom", "show", "top", "fechado"];
+  if (positives.some((k) => t.includes(k))) return true;
+
+  // "gostei" só vale se NÃO vier negado
+  // ex: "gostei" ok, "não gostei" não
+  if (t.includes("gostei") && !t.includes("não gostei") && !t.includes("nao gostei")) return true;
+
+  return false;
 }
 
 function extractFeedbackInstruction(text) {
@@ -525,6 +541,25 @@ async function generateSalesDescription({ draft, feedbackInstruction, previousDe
   const out = resp.output_text?.trim();
   if (!out) throw new Error("EMPTY_MODEL_OUTPUT");
   return out;
+}
+async function generateSalesDescription(...) {
+   ...
+   return out;
+}
+
+// 👇 COLE AQUI EMBAIXO 👇
+function sanitizeWhatsAppFormatting(text) {
+  let t = String(text || "");
+
+  // Remove negrito do rótulo "Preço:"
+  t = t.replace(/\*\s*preço\s*:\s*\*/gi, "Preço: ");
+  t = t.replace(/\*\s*preco\s*:\s*\*/gi, "Preço: ");
+
+  // Remove duplicação acidental de *
+  t = t.replace(/\*\s*\*/g, "*");
+  t = t.replace(/\*\s+\*/g, "*");
+
+  return t.trim();
 }
 
 // ===================== FLUXO: DRAFT UPDATE =====================
