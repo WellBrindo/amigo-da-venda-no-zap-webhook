@@ -519,7 +519,6 @@ async function generateSalesDescription({ draft, feedbackInstruction, previousDe
       { role: "user", content: prompt },
     ],
     // dá mais “vida” sem perder controle
-    temperature: 0.85,
     max_output_tokens: 520,
   });
 
