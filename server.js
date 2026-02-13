@@ -245,7 +245,7 @@ async function getPrefs(waId) {
     tableLayout: p.tableLayout === true,                        // default false (formato tabela texto)
   };
 }
-async function setPrefs(waId, patch) {(waId, patch) {
+async function setPrefs(waId, patch) {
   const u = await getUser(waId);
   u.prefs = { ...(u.prefs || {}), ...(patch || {}) };
   await setUser(waId, u);
