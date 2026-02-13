@@ -654,6 +654,51 @@ function extractConditionsFromText(t) {
   return out;
 }
 
+function conditionsKeyOrder() {
+  return [
+    { key: "phone", label: "Telefone" },
+    { key: "address", label: "Endereço / Local" },
+    { key: "hours", label: "Horário" },
+    { key: "price", label: "Valor / Preço" },
+    { key: "instagram", label: "Instagram" },
+    { key: "website", label: "Site / Link" },
+  ];
+}
+
+function buildSaveConditionsPrompt(pending) {
+  const items = [];
+  const order = conditionsKeyOrder();
+  for (let i = 0; i < order.length; i++) {
+    const { key, label } = order[i];
+    if (pending && pending[key]) {
+      items.push({ n: items.length + 1, key, label, value: String(pending[key]).trim() });
+    }
+  }
+
+  if (!items.length) {
+    return `📌 Não encontrei dados claros (telefone/endereço/horário/valor/links) para salvar agora.`;
+  }
+
+  const lines = items.map((it) => `${it.n}) ${it.label}: ${it.value}`).join("\n");
+
+  return `📌 Identifiquei estas informações na sua mensagem:\n\n${lines}\n\nQuer que eu salve alguma delas para usar automaticamente nas próximas descrições?\n\n✅ Para salvar *todas*, responda: *tudo*\n✅ Para salvar apenas algumas, responda com os números separados por espaço (ex.: *1 3 4*)\n🚫 Para não salvar nada, responda: *0*`;
+}
+
+function pickConditionsByNumbers(pending, numbers) {
+  const order = conditionsKeyOrder();
+  const presentKeys = order.map((o) => o.key).filter((k) => pending && pending[k]);
+  // Mapeia números 1..N apenas para os itens presentes
+  const selected = {};
+  const valid = new Set();
+  presentKeys.forEach((k, idx) => valid.add(idx + 1));
+  const uniq = Array.from(new Set(numbers)).filter((n) => valid.has(n));
+  for (const n of uniq) {
+    const key = presentKeys[n - 1];
+    if (key && pending[key]) selected[key] = pending[key];
+  }
+  return selected;
+}
+
 function hasAnyKeys(obj) {
   return obj && typeof obj === "object" && Object.keys(obj).length > 0;
 }
@@ -1603,20 +1648,62 @@ app.post("/webhook", async (req, res) => {
     }
 
     // ===================== CONFIRMAÇÃO DE SALVAR CONDIÇÕES =====================
+    
+    // ===================== CONFIRMAÇÃO GRANULAR DE SALVAR CONDIÇÕES =====================
     if (status === "WAIT_SAVE_CONDITIONS_CONFIRM") {
       const pending = await getPendingConditions(waId);
 
-      const t = text.trim().toLowerCase();
-      const yes = t === "1" || t === "sim" || t === "s" || t === "salvar";
-      const no = t === "2" || t === "não" || t === "nao" || t === "n" || t === "não salvar" || t === "nao salvar";
+      const raw = String(text || "").trim();
+      const t = raw.toLowerCase();
 
-      if (yes && pending && hasAnyKeys(pending)) {
+      const saveAll =
+        t === "tudo" ||
+        t === "todos" ||
+        t === "salvar tudo" ||
+        t === "salvar todos" ||
+        t === "sim" ||
+        t === "s";
+
+      const saveNone =
+        t === "0" ||
+        t === "nao" ||
+        t === "não" ||
+        t === "n" ||
+        t === "não salvar" ||
+        t === "nao salvar" ||
+        t === "nenhum" ||
+        t === "nenhuma";
+
+      // Extrai números (ex.: "1 3 4" ou "1,3,4")
+      const nums = (raw.match(/\d+/g) || []).map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n));
+
+      if (!pending || !hasAnyKeys(pending)) {
+        // Não há nada pendente para salvar
+        await sendWhatsAppText(waId, "Beleza 🙂 Não tenho informações pendentes para salvar agora.");
+      } else if (saveAll) {
         await setSavedConditions(waId, pending);
-        await sendWhatsAppText(waId, `Perfeito ✅ Vou salvar e usar essas informações nas próximas descrições.\n\nSe quiser tirar depois, é só me pedir (ex.: "não use meu endereço").`);
-      } else if (no) {
+        await sendWhatsAppText(
+          waId,
+          `Perfeito ✅ Vou salvar e usar essas informações nas próximas descrições.\n\nSe quiser tirar depois, é só me pedir (ex.: "não use meu endereço").`
+        );
+      } else if (saveNone) {
         await sendWhatsAppText(waId, "Beleza 🙂 Não vou salvar essas informações para as próximas descrições.");
+      } else if (nums.length) {
+        const picked = pickConditionsByNumbers(pending, nums);
+        if (picked && hasAnyKeys(picked)) {
+          // Mescla com o que já existe, preservando o que não foi selecionado
+          const current = await getSavedConditions(waId);
+          await setSavedConditions(waId, { ...(current || {}), ...picked });
+          await sendWhatsAppText(
+            waId,
+            `Combinado ✅ Vou salvar apenas o que você escolheu e usar nas próximas descrições.\n\nSe quiser tirar depois, é só me pedir (ex.: "não use meu endereço").`
+          );
+        } else {
+          await sendWhatsAppText(waId, buildSaveConditionsPrompt(pending));
+          return;
+        }
       } else {
-        await sendWhatsAppText(waId, `Só pra eu confirmar 🙂\n\n1) Sim, pode salvar\n2) Não, não salvar`);
+        await sendWhatsAppText(waId, buildSaveConditionsPrompt(pending));
         return;
       }
 
@@ -2113,15 +2200,7 @@ try {
               await setPendingConditions(waId, extractedConds2, "ACTIVE");
               await setStatus(waId, "WAIT_SAVE_CONDITIONS_CONFIRM");
 
-              await sendWhatsAppText(
-                waId,
-                `📌 Vi que você colocou alguns dados como telefone, endereço, horário, valores ou links.
-
-Quer que eu *salve essas informações* para incluir nas descrições futuras?
-
-1) Sim, pode salvar
-2) Não, não salvar`
-              );
+              await sendWhatsAppText(waId, buildSaveConditionsPrompt(extractedConds2));
               return;
             }
           }
