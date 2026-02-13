@@ -681,7 +681,7 @@ function buildSaveConditionsPrompt(pending) {
 
   const lines = items.map((it) => `${it.n}) ${it.label}: ${it.value}`).join("\n");
 
-  return `📌 Identifiquei estas informações na sua mensagem:\n\n${lines}\n\nQuer que eu salve alguma delas para usar automaticamente nas próximas descrições?\n\n✅ Para salvar *todas*, responda: *tudo*\n✅ Para salvar apenas algumas, responda com os números separados por espaço (ex.: *1 3 4*)\n🚫 Para não salvar nada, responda: *0*`;
+  return `📌 Identifiquei estas informações na sua mensagem:\n\n${lines}\n\nQuer que eu salve alguma delas para usar automaticamente nas próximas descrições?\n\n✅ Para salvar *todas*, responda: *tudo*\n✅ Para salvar apenas algumas, responda com os números separados por espaço (ex.: *1 3 4*)\n🚫 Para não salvar nada, responda: *0*\n✅ Para salvar por *nome*, responda com o(s) item(ns) (ex.: *telefone e endereço*)`;
 }
 
 function pickConditionsByNumbers(pending, numbers) {
@@ -697,6 +697,28 @@ function pickConditionsByNumbers(pending, numbers) {
     if (key && pending[key]) selected[key] = pending[key];
   }
   return selected;
+
+function pickConditionsByNames(pending, rawText) {
+  if (!pending || typeof pending !== "object") return {};
+  const t = String(rawText || "").toLowerCase();
+
+  const rules = [
+    { key: "phone", pats: [/telefone/i, /celular/i, /whats/i, /zap/i, /contato/i, /n[uú]mero/i] },
+    { key: "address", pats: [/endere[cç]o/i, /local/i, /rua/i, /avenida/i, /av\.?/i, /bairro/i, /cidade/i, /cep/i] },
+    { key: "hours", pats: [/hor[aá]rio/i, /atendimento/i, /funciona/i, /abre/i, /fecha/i, /das\s+\d/i, /\d{1,2}\s*h/i] },
+    { key: "price", pats: [/pre[cç]o/i, /valor/i, /r\$/i, /promo/i, /a\s+partir\s+de/i] },
+    { key: "instagram", pats: [/instagram/i, /insta/i, /@/i] },
+    { key: "website", pats: [/site/i, /link/i, /http/i, /www\./i] },
+  ];
+
+  const selected = {};
+  for (const r of rules) {
+    if (!pending[r.key]) continue;
+    if (r.pats.some((p) => p.test(t))) selected[r.key] = pending[r.key];
+  }
+  return selected;
+}
+
 }
 
 function hasAnyKeys(obj) {
@@ -1703,8 +1725,20 @@ app.post("/webhook", async (req, res) => {
           return;
         }
       } else {
-        await sendWhatsAppText(waId, buildSaveConditionsPrompt(pending));
-        return;
+        const pickedByName = pickConditionsByNames(pending, raw);
+        if (pickedByName && hasAnyKeys(pickedByName)) {
+          const current = await getSavedConditions(waId);
+          await setSavedConditions(waId, { ...(current || {}), ...pickedByName });
+          await sendWhatsAppText(
+            waId,
+            `Combinado ✅ Vou salvar o que você indicou pelo nome e usar nas próximas descrições.
+
+Se quiser tirar depois, é só me pedir (ex.: "não use meu endereço").`
+          );
+        } else {
+          await sendWhatsAppText(waId, buildSaveConditionsPrompt(pending));
+          return;
+        }
       }
 
       const back = await popCondReturn(waId);
