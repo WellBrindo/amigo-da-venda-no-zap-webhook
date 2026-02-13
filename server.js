@@ -1330,16 +1330,11 @@ app.post("/webhook", async (req, res) => {
 
       if (yes && pending && hasAnyKeys(pending)) {
         await setSavedConditions(waId, pending);
-        await sendWhatsAppText(waId, "Perfeito ✅ Vou salvar e usar essas informações nas próximas descrições.
-
-Se quiser tirar depois, é só me pedir (ex.: "não use meu endereço").");
+        await sendWhatsAppText(waId, `Perfeito ✅ Vou salvar e usar essas informações nas próximas descrições.\n\nSe quiser tirar depois, é só me pedir (ex.: "não use meu endereço").`);
       } else if (no) {
         await sendWhatsAppText(waId, "Beleza 🙂 Não vou salvar essas informações para as próximas descrições.");
       } else {
-        await sendWhatsAppText(waId, "Só pra eu confirmar 🙂
-
-1) Sim, pode salvar
-2) Não, não salvar");
+        await sendWhatsAppText(waId, `Só pra eu confirmar 🙂\n\n1) Sim, pode salvar\n2) Não, não salvar`);
         return;
       }
 
@@ -1785,11 +1780,8 @@ ${r.invoiceUrl || r.link || ""}
           const okConsume = await consumeOneDescriptionOrBlock(waId);
           if (!okConsume) {
             await setStatus(waId, "BLOCKED");
-            await sendWhatsAppText(
-              waId,
-              "Você atingiu o limite do trial/plano.
-Digite *MENU* para ver opções."
-            );
+            await sendWhatsAppText(waId, `Você atingiu o limite do trial/plano.
+Digite *MENU* para ver opções.`);
             return;
           }
         }
@@ -1825,14 +1817,12 @@ try {
 
               await sendWhatsAppText(
                 waId,
-                "📌 Vi que você colocou alguns dados como telefone, endereço, horário, valores ou links.
+                `📌 Vi que você colocou alguns dados como telefone, endereço, horário, valores ou links.
 
-" +
-                  "Quer que eu *salve essas informações* para incluir nas descrições futuras?
+Quer que eu *salve essas informações* para incluir nas descrições futuras?
 
-" +
-                  "1) Sim, pode salvar
-2) Não, não salvar"
+1) Sim, pode salvar
+2) Não, não salvar`
               );
               return;
             }
@@ -1898,14 +1888,12 @@ try {
 
           await sendWhatsAppText(
             waId,
-            "📌 Vi que você colocou alguns dados como telefone, endereço, horário, valores ou links.
+            `📌 Vi que você colocou alguns dados como telefone, endereço, horário, valores ou links.
 
-" +
-              "Quer que eu *salve essas informações* para incluir nas descrições futuras?
+Quer que eu *salve essas informações* para incluir nas descrições futuras?
 
-" +
-              "1) Sim, pode salvar
-2) Não, não salvar"
+1) Sim, pode salvar
+2) Não, não salvar`
           );
           return;
         }
