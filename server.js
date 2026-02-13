@@ -15,13 +15,13 @@ const UPSTASH_REDIS_REST_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim()
 const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 
 const ASAAS_API_KEY = (process.env.ASAAS_API_KEY || "").trim();
-const ASAAS_WEBHOOK_TOKEN = (process.env.ASAAS_WEBHOOK_TOKEN || "").trim();
 const ASAAS_BASE_URL = (process.env.ASAAS_BASE_URL || "https://api.asaas.com").trim();
+const ASAAS_WEBHOOK_TOKEN = (process.env.ASAAS_WEBHOOK_TOKEN || "").trim();
 
 const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
 const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
 
-// ===================== LIMITES / PLANOS =====================
+// ===================== CONFIG PRODUTO =====================
 const FREE_DESCRIPTIONS_LIMIT = 5; // trial por usos
 
 const PLANS = {
@@ -39,6 +39,7 @@ const MAX_REFINES_PER_DESCRIPTION = 2;
 // TTLs
 const TTL_WEEK_SECONDS = 60 * 60 * 24 * 7;
 const TTL_MONTH_SECONDS = 60 * 60 * 24 * 31;
+const TTL_DRAFT_SECONDS = 60 * 60; // 1 hora (limpeza automática de rascunho)
 
 // ===================== HELPERS (SEGURANÇA / LOG) =====================
 function safeLogError(label, err) {
@@ -48,6 +49,10 @@ function safeLogError(label, err) {
 
 function nowMs() {
   return Date.now();
+}
+
+function sha256(str) {
+  return crypto.createHash("sha256").update(String(str)).digest("hex");
 }
 
 // ===================== REDIS (UPSTASH REST) =====================
@@ -61,11 +66,13 @@ async function redisFetch(path, { method = "GET", body = null } = {}) {
       Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body,
   });
 
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(`Upstash ${resp.status}`);
+  if (!resp.ok) {
+    throw new Error(`Upstash ${resp.status}: ${JSON.stringify(data).slice(0, 240)}`);
+  }
   return data;
 }
 
@@ -87,22 +94,22 @@ async function redisSetEx(key, value, ttlSeconds) {
 
 async function redisDel(key) {
   if (!USE_UPSTASH) return;
-  await redisFetch(`/del/${encodeURIComponent(key)}`, { method: "POST" });
+  await redisFetch(`/del/${encodeURIComponent(key)}`);
+}
+
+async function redisExists(key) {
+  if (!USE_UPSTASH) return 0;
+  const data = await redisFetch(`/exists/${encodeURIComponent(key)}`);
+  return Number(data?.result || 0);
 }
 
 async function redisIncr(key) {
   if (!USE_UPSTASH) return 0;
-  const data = await redisFetch(`/incr/${encodeURIComponent(key)}`, { method: "POST" });
+  const data = await redisFetch(`/incr/${encodeURIComponent(key)}`);
   return Number(data?.result || 0);
 }
 
-async function redisExists(key) {
-  if (!USE_UPSTASH) return false;
-  const data = await redisFetch(`/exists/${encodeURIComponent(key)}`);
-  return Number(data?.result || 0) > 0;
-}
-
-// ===================== STORAGE KEYS =====================
+// ===================== KEYS =====================
 function kStatus(waId) { return `status:${waId}`; }
 function kFullName(waId) { return `fullName:${waId}`; }
 function kDoc(waId) { return `doc:${waId}`; }
@@ -113,8 +120,10 @@ function kDraft(waId) { return `draft:${waId}`; }
 function kRefineCount(waId) { return `refines:${waId}`; }
 function kLastDescription(waId) { return `lastdesc:${waId}`; }
 
-function kTrialUses(waId) { return `trial_uses:${waId}`; }
+function kPrevStatus(waId) { return `prev_status:${waId}`; }
+function kSeenMsg(msgId) { return `msg_seen:${msgId}`; }
 
+function kTrialUses(waId) { return `trial_uses:${waId}`; }
 function kMonthlyUsage(waId, yyyymm) { return `usage:${waId}:${yyyymm}`; }
 
 function currentYYYYMM() {
@@ -127,13 +136,14 @@ function currentYYYYMM() {
 // Asaas mappings
 function kAsaasCustomer(waId) { return `asaas_customer:${waId}`; }
 function kAsaasSubscription(waId) { return `asaas_subscription:${waId}`; }
-function kSubscriptionToWa(subId) { return `subscription_to_wa:${subId}`; }
-
+function kSubscriptionToWa(subscriptionId) { return `subscription_to_wa:${subscriptionId}`; }
 function kAsaasPayment(waId) { return `asaas_payment:${waId}`; }
 function kPaymentToWa(paymentId) { return `payment_to_wa:${paymentId}`; }
+function kAsaasEvt(hash) { return `asaas_evt:${hash}`; }
 
 // ===================== STATUS =====================
 // TRIAL / BLOCKED / WAIT_NAME / WAIT_DOC / WAIT_PLAN / WAIT_PAYMETHOD / PENDING / ACTIVE
+// MENU / MENU_WAIT_NAME / MENU_WAIT_DOC
 async function getStatus(waId) {
   const s = await redisGet(kStatus(waId));
   return s || "TRIAL";
@@ -159,24 +169,24 @@ async function getActiveUntil(waId) {
 async function setActiveUntil(waId, tsMs) { await redisSet(kActiveUntil(waId), String(tsMs)); }
 async function clearActiveUntil(waId) { await redisDel(kActiveUntil(waId)); }
 
-// Draft/refine/lastdesc
+// Draft/refine/lastdesc (com TTL 1 hora)
 async function getDraft(waId) {
   const raw = await redisGet(kDraft(waId));
   if (!raw) return null;
   try { return JSON.parse(raw); } catch { return null; }
 }
-async function setDraft(waId, draft) { await redisSet(kDraft(waId), JSON.stringify(draft)); }
+async function setDraft(waId, draft) { await redisSetEx(kDraft(waId), JSON.stringify(draft), TTL_DRAFT_SECONDS); }
 async function clearDraft(waId) { await redisDel(kDraft(waId)); }
 
 async function getRefineCount(waId) {
   const v = await redisGet(kRefineCount(waId));
   return v ? Number(v) : 0;
 }
-async function setRefineCount(waId, n) { await redisSet(kRefineCount(waId), String(n)); }
+async function setRefineCount(waId, n) { await redisSetEx(kRefineCount(waId), String(n), TTL_DRAFT_SECONDS); }
 async function clearRefineCount(waId) { await redisDel(kRefineCount(waId)); }
 
 async function getLastDescription(waId) { return (await redisGet(kLastDescription(waId))) || ""; }
-async function setLastDescription(waId, txt) { await redisSet(kLastDescription(waId), txt); }
+async function setLastDescription(waId, txt) { await redisSetEx(kLastDescription(waId), txt, TTL_DRAFT_SECONDS); }
 async function clearLastDescription(waId) { await redisDel(kLastDescription(waId)); }
 
 // Trial
@@ -187,40 +197,36 @@ async function getTrialUses(waId) {
 async function incrTrialUses(waId) {
   const key = kTrialUses(waId);
   const next = await redisIncr(key);
-  await redisSetEx(key, String(next), 60 * 60 * 24 * 180);
+  await redisSetEx(key, String(next), TTL_MONTH_SECONDS);
   return next;
 }
 
 // Monthly usage
 async function getMonthlyUsage(waId) {
-  const ym = currentYYYYMM();
-  const v = await redisGet(kMonthlyUsage(waId, ym));
+  const key = kMonthlyUsage(waId, currentYYYYMM());
+  const v = await redisGet(key);
   return v ? Number(v) : 0;
 }
 async function incrMonthlyUsage(waId) {
-  const ym = currentYYYYMM();
-  const key = kMonthlyUsage(waId, ym);
+  const key = kMonthlyUsage(waId, currentYYYYMM());
   const next = await redisIncr(key);
   await redisSetEx(key, String(next), TTL_MONTH_SECONDS);
   return next;
 }
 
-// ===================== TEXT HELPERS =====================
+// ===================== TEXTO / UX =====================
 function firstNameOf(fullName) {
-  if (!fullName) return "";
-  return String(fullName).trim().split(/\s+/)[0] || "";
+  const t = String(fullName || "").trim();
+  if (!t) return "";
+  return t.split(/\s+/)[0] || "";
 }
 
-function onlyDigits(s) {
-  return String(s || "").replace(/\D/g, "");
-}
-
-function normalizeDocOnlyDigits(s) {
-  return onlyDigits(s);
+function normalizeDocOnlyDigits(text) {
+  return String(text || "").replace(/\D+/g, "");
 }
 
 function isValidCPFOrCNPJ(digits) {
-  const d = onlyDigits(digits);
+  const d = String(digits || "").replace(/\D+/g, "");
   return d.length === 11 || d.length === 14;
 }
 
@@ -229,7 +235,7 @@ function looksLikeGreeting(text) {
   return ["oi", "olá", "ola", "bom dia", "boa tarde", "boa noite"].includes(t);
 }
 
-// ✅ AGORA: finaliza com OK (determinante)
+// ✅ finaliza com OK (determinante)
 function isOkToFinish(text) {
   const t = String(text || "").trim().toLowerCase();
   return t === "ok" || t === "ok!" || t === "ok ✅" || t === "ok✅";
@@ -243,57 +249,25 @@ function isPositiveFeedbackLegacy(text) {
   return (
     t === "sim" ||
     t === "gostei" ||
-    (t.includes("gostei") && !t.includes("não gostei") && !t.includes("nao gostei")) ||
-    t.includes("perfeito") ||
-    t.includes("ótimo") ||
-    t.includes("otimo") ||
-    t.includes("amei") ||
-    t.includes("ficou bom") ||
-    t.includes("ficou ótimo") ||
-    t.includes("ficou otimo")
+    (t.includes("gostei") && !t.includes("não gostei") && !t.includes("nao gostei"))
   );
 }
 
-function isNegativeOrImprovement(text) {
-  const t = String(text || "").trim().toLowerCase();
-  if (!t) return false;
-
-  // qualquer pedido de ajuste
-  return (
-    t.includes("não gostei") ||
-    t.includes("nao gostei") ||
-    t.includes("não curti") ||
-    t.includes("nao curti") ||
-    t.includes("muda") ||
-    t.includes("troca") ||
-    t.includes("melhora") ||
-    t.includes("mais emoji") ||
-    t.includes("pouco emoji") ||
-    t.includes("emoji") ||
-    t.includes("título") ||
-    t.includes("titulo") ||
-    t.includes("mais emocional") ||
-    t.includes("mais curto") ||
-    t.includes("mais direto") ||
-    t.includes("mais técnico") ||
-    t.includes("mais tecnico")
-  );
-}
-
+// Extrai instruções do usuário para refinamento
 function extractImprovementInstruction(text) {
-  const t = String(text || "").trim();
-  const lower = t.toLowerCase();
+  let t = String(text || "").trim();
+  if (!t) return "";
 
-  // se vier com "não gostei", usa o que vier depois
-  let instr = t;
+  const lower = t.toLowerCase();
   const idx1 = lower.indexOf("não gostei");
   const idx2 = lower.indexOf("nao gostei");
+
+  let instr = "";
   if (idx1 >= 0) instr = t.slice(idx1 + "não gostei".length).trim();
   else if (idx2 >= 0) instr = t.slice(idx2 + "nao gostei".length).trim();
 
   if (!instr) instr = t;
 
-  // padroniza
   instr = instr.replace(/^do\s+/i, "").trim();
   return instr;
 }
@@ -303,6 +277,83 @@ function askFeedbackText() {
     "💬 *Quer melhorar algo?*\n\n" +
     "Me diga *o que você quer que eu melhore* (ex.: “mais emoji”, “muda o título”, “mais emocional”, “mais curto”, “mais direto”).\n\n" +
     "Se estiver tudo certo, responda *OK* ✅"
+  );
+}
+
+function helpUrl() {
+  return "https://amigodasvendas.com.br";
+}
+
+function isMenuCommand(text) {
+  const t = String(text || "").trim().toLowerCase();
+  return t === "menu" || t === "cardápio" || t === "cardapio";
+}
+
+function menuText() {
+  return (
+    "📌 *MENU*\n\n" +
+    "1) Minha assinatura\n" +
+    "2) Alterar nome\n" +
+    "3) Alterar CPF/CNPJ\n" +
+    "4) Mudar plano\n" +
+    "5) Cancelar plano\n" +
+    "6) Ajuda\n\n" +
+    "Responda com *1–6*."
+  );
+}
+
+async function pushPrevStatus(waId, status) {
+  await redisSetEx(kPrevStatus(waId), status, 60 * 10); // 10 min
+}
+
+async function popPrevStatus(waId) {
+  const s = await redisGet(kPrevStatus(waId));
+  await redisDel(kPrevStatus(waId));
+  return s || "TRIAL";
+}
+
+async function buildMySubscriptionText(waId) {
+  const status = await getStatus(waId);
+
+  if (status !== "ACTIVE") {
+    const used = await getTrialUses(waId);
+    const left = Math.max(0, FREE_DESCRIPTIONS_LIMIT - used);
+    return (
+      "📄 *Minha assinatura*\n\n" +
+      "Status: *Trial*\n" +
+      `Grátis restantes: *${left}* de *${FREE_DESCRIPTIONS_LIMIT}*\n\n` +
+      "Digite *MENU* para ver as opções."
+    );
+  }
+
+  const planCode = await getPlan(waId);
+  const plan = PLANS[planCode];
+  const used = await getMonthlyUsage(waId);
+  const limit = plan?.monthlyLimit ?? 0;
+
+  const payMethod = await getPayMethod(waId);
+
+  let extra = "";
+  if (payMethod === "PIX") {
+    const until = await getActiveUntil(waId);
+    if (until) {
+      const msLeft = until - nowMs();
+      const daysLeft = Math.max(0, Math.ceil(msLeft / (24 * 60 * 60 * 1000)));
+      extra = `Validade (Pix): *${daysLeft} dia(s)* restantes\n`;
+    } else {
+      extra = "Validade (Pix): *expirado*\n";
+    }
+  } else if (payMethod === "CARD") {
+    extra = "Pagamento: *Cartão*\n";
+  }
+
+  return (
+    "📄 *Minha assinatura*\n\n" +
+    "Status: *Ativo*\n" +
+    `Plano: *${plan?.name || "-"}*\n` +
+    `Uso do mês: *${used}/${limit}*\n` +
+    extra +
+    "\nDigite *MENU* para ver as opções."
   );
 }
 
@@ -321,169 +372,34 @@ function plansMenuText() {
 
 function payMethodText() {
   return (
-    "Como você prefere pagar?\n\n" +
+    "Como você quer pagar?\n\n" +
     "1) Cartão\n" +
     "2) Pix\n\n" +
     "Responda *1* ou *2*."
   );
 }
 
-// ===================== DRAFT LOGIC =====================
-function emptyDraft() {
-  return { product: "", price: "", flavors: "", delivery: "", extras: "" };
-}
+// ===================== SANITIZADOR (WhatsApp markdown) =====================
+function sanitizeWhatsAppMarkdown(s) {
+  let out = String(s || "");
 
-function updateDraftFromUserMessage(draft, text) {
-  const t = String(text || "").trim();
-  const lower = t.toLowerCase();
-
-  // preço
-  const priceMatch = t.match(/(r\$\s*\d+[.,]?\d*)|(\d+[.,]?\d*\s*reais)/i);
-  if (priceMatch && !draft.price) draft.price = priceMatch[0].trim();
-
-  // entrega
-  if (!draft.delivery && (lower.includes("entrego") || lower.includes("entrega") || lower.includes("retira") || lower.includes("retirada") || lower.includes("buscar"))) {
-    draft.delivery = t;
-  }
-
-  // sabores/opções
-  if (!draft.flavors && (lower.includes("sabor") || lower.includes("sabores") || lower.includes("opção") || lower.includes("opcoes") || lower.includes("opções"))) {
-    draft.flavors = t;
-  }
-
-  // produto
-  if (!draft.product && !looksLikeGreeting(t)) {
-    if (!["1", "2", "3"].includes(t) && onlyDigits(t).length < 11) {
-      draft.product = t;
-    }
-  } else if (draft.product && !looksLikeGreeting(t)) {
-    if (t.length >= 3 && onlyDigits(t).length < 11) {
-      if (!draft.extras) draft.extras = t;
-      else if (!draft.extras.includes(t)) draft.extras = `${draft.extras} • ${t}`;
-    }
-  }
-
-  return draft;
-}
-
-// ===================== FORMATAÇÃO WHATSAPP (SANITIZER) =====================
-function sanitizeWhatsAppFormatting(text) {
-  let out = String(text || "");
-
+  // **bold** -> *bold* (WhatsApp)
   out = out.replace(/\*\*(.+?)\*\*/g, "*$1*");
+
+  // remove casos de * * quebrado
   out = out.replace(/\*\s+\*/g, "");
-  out = out.replace(/\*{3,}/g, "*");
 
-  out = out.replace(/\*Preço\*\s*:/gi, "Preço:");
-  out = out.replace(/\*Preco\*\s*:/gi, "Preco:");
-  out = out.replace(/\*Preço\*/gi, "Preço");
-  out = out.replace(/\*Preco\*/gi, "Preco");
+  // colapsa múltiplos asteriscos
+  out = out.replace(/\*{3,}/g, "**");
 
-  const lines = out.split("\n");
-  if (lines.length > 0) {
-    const first = lines[0].trim();
-    if (first && !(first.startsWith("*") && first.endsWith("*"))) {
-      lines[0] = `*${first}*`;
-      out = lines.join("\n");
-    }
-  }
+  // evita linhas com "Preço" duplicando negrito de forma estranha
+  out = out.replace(/\*Preço\*\s*:\s*\*/gi, "*Preço:* ");
+  out = out.replace(/\*Preço\*\s*:/gi, "*Preço:*");
 
+  // limpa espaços extras
   out = out.replace(/[ \t]+\n/g, "\n");
-  out = out.replace(/\n{4,}/g, "\n\n\n");
+  out = out.trim();
 
-  return out.trim();
-}
-
-// ===================== IA (PROMPT) =====================
-function buildUserBrief(draft) {
-  const parts = [];
-  if (draft.product) parts.push(`Produto: ${draft.product}`);
-  if (draft.price) parts.push(`Preço informado: ${draft.price}`);
-  if (draft.flavors) parts.push(`Sabores/opções informados: ${draft.flavors}`);
-  if (draft.delivery) parts.push(`Entrega/retirada informada: ${draft.delivery}`);
-  if (draft.extras) parts.push(`Detalhes extras: ${draft.extras}`);
-  return parts.join("\n");
-}
-
-function buildMissingHints(draft) {
-  const hints = [];
-  if (!draft.price) hints.push("Não foi informado o preço: inclua algo neutro como “Consulte valores”.");
-  if (!draft.flavors) hints.push("Não foram informados sabores/opções: inclua “Consulte sabores disponíveis”.");
-  if (!draft.delivery) hints.push("Não foi informado entrega/retirada: inclua “Entrega/retirada a combinar”.");
-  return hints.join("\n");
-}
-
-function buildPrompt({ draft, feedbackInstruction, previousDescription }) {
-  return `
-Você é um especialista em copywriting para vendas no WhatsApp.
-
-Sua tarefa é gerar UMA ÚNICA descrição de venda pronta para a cliente COPIAR e ENCAMINHAR no WhatsApp.
-
-Regras de formatação:
-- Use negrito no padrão do WhatsApp: *texto*
-- O TÍTULO (primeira linha) deve ser em negrito.
-- Destaque em negrito APENAS 2 a 4 trechos importantes no total (inclui o título). Não deixe tudo em negrito.
-- Emojis: moderados (nem zero, nem exagerado).
-- Estrutura clara, com quebras de linha.
-- Não use ** (markdown), use *.
-- Não coloque o label “Preço” em negrito. Se mencionar preço, destaque o VALOR, não a palavra “Preço”.
-
-========================
-DADOS DO PRODUTO (pode estar incompleto)
-${buildUserBrief(draft) || "(o usuário escreveu pouco; use apenas o que foi dito e complete com frases neutras sem inventar)"}
-========================
-
-${previousDescription ? `DESCRIÇÃO ANTERIOR (para refinamento):
-${previousDescription}
-========================
-` : ""}
-
-${feedbackInstruction ? `AJUSTE SOLICITADO PELO USUÁRIO:
-${feedbackInstruction}
-========================
-` : ""}
-
-Se o texto do usuário estiver incompleto, complete com frases neutras SEM INVENTAR dados.
-Use estas sugestões neutras (se faltar algo):
-${buildMissingHints(draft) || "(nenhuma)"}
-
-Saída final:
-- Deve ter título curto e chamativo (1 linha, em negrito)
-- Depois 3 a 6 linhas bem organizadas
-- Se fizer sentido, inclua uma linha de chamada para ação (ex.: “Me chama no WhatsApp para pedir”)
-- Não inclua explicações sobre regras, apenas o texto final.
-`.trim();
-}
-
-async function generateSalesDescription({ draft, feedbackInstruction, previousDescription }) {
-  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY não configurada.");
-
-  const prompt = buildPrompt({ draft, feedbackInstruction, previousDescription });
-
-  const resp = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      input: prompt,
-    }),
-  });
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const msg = data?.error?.message || `OpenAI ${resp.status}`;
-    throw new Error(msg);
-  }
-
-  const out =
-    data?.output?.[0]?.content?.[0]?.text ||
-    data?.output_text ||
-    "";
-
-  if (!out) throw new Error("OpenAI retornou vazio.");
   return out;
 }
 
@@ -500,42 +416,180 @@ async function sendWhatsAppText(to, text) {
     messaging_product: "whatsapp",
     to,
     type: "text",
-    text: { body: text },
+    text: { body: String(text || "") },
   };
 
-  const resp = await fetch(url, {
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      console.error("Erro ao enviar mensagem:", resp.status, { message: data?.error?.message || "send_failed" });
+    } else {
+      console.log("Mensagem enviada OK:", data?.messages?.[0]?.id || "ok");
+    }
+  } catch (err) {
+    safeLogError("Erro de rede ao enviar mensagem:", err);
+  }
+}
+
+// ===================== OPENAI (Responses API) =====================
+async function openaiGenerateDescription({ userText, instruction = "", fullName = "" }) {
+  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente.");
+
+  const system = `
+Você é o "Amigo das Vendas": cria descrições de venda curtas e chamativas para WhatsApp.
+
+Regras IMPORTANTES:
+- O título deve estar em negrito no padrão WhatsApp: *TÍTULO*
+- Use emojis moderados (não exagerar).
+- Destaque APENAS 2 a 4 trechos importantes em negrito (WhatsApp: *...*). Não deixe tudo em negrito.
+- Estrutura sugerida:
+  1) *TÍTULO*
+  2) 2–4 linhas com benefícios e apelo
+  3) Linha com preço/valor (se houver) ou "Consulte valores"
+  4) Linha com entrega/retirada (se houver) ou "Entrega/retirada a combinar"
+  5) CTA curto (ex.: "Chama no WhatsApp para pedir!").
+- Se faltarem dados (sabores, preço, entrega), não invente. Use texto neutro tipo "Consulte sabores disponíveis" / "Consulte valores".
+- Seja humano e vendedor, porém sem parecer spam.
+`;
+
+  const user = `
+Produto / mensagem do cliente:
+${userText}
+
+Nome do cliente (para personalização leve, se útil): ${fullName || "-"}
+
+Pedido de melhoria (se houver):
+${instruction || "(nenhum)"} 
+`;
+
+  const resp = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${ACCESS_TOKEN}`,
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      input: [
+        { role: "system", content: system.trim() },
+        { role: "user", content: user.trim() },
+      ],
+    }),
   });
 
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    safeLogError("Erro ao enviar WhatsApp:", new Error(data?.error?.message || `HTTP ${resp.status}`));
-  } else {
-    console.log("Mensagem enviada OK:", data?.messages?.[0]?.id || "(sem id)");
+    const msg = data?.error?.message || "openai_failed";
+    throw new Error(msg);
   }
+
+  // responses api: tenta extrair texto
+  const out =
+    data?.output_text ||
+    data?.output?.[0]?.content?.[0]?.text ||
+    "";
+
+  return sanitizeWhatsAppMarkdown(out);
+}
+
+// ===================== DRAFT PARSER =====================
+function mergeDraftFromMessage(draft, messageText) {
+  const text = String(messageText || "").trim();
+
+  const next = draft ? { ...draft } : { raw: "" };
+  next.raw = [next.raw, text].filter(Boolean).join(" ").trim();
+
+  // tenta detectar preço tipo "R$ 10" / "10,00" / "10"
+  const priceMatch = next.raw.match(/R\$\s*([\d.,]+)/i) || next.raw.match(/\b(\d{1,4}[.,]\d{2})\b/);
+  if (priceMatch && !next.price) {
+    next.price = priceMatch[0].toUpperCase().includes("R$")
+      ? `R$ ${priceMatch[1]}`
+      : `R$ ${priceMatch[1]}`;
+  }
+
+  // tentativa simples de produto: primeira frase
+  if (!next.product) {
+    next.product = text;
+  }
+
+  return next;
+}
+
+function draftToUserText(draft) {
+  const product = draft?.product || "";
+  const price = draft?.price || "";
+  const raw = draft?.raw || "";
+
+  // Se não tem nada, retorna raw mesmo
+  let base = raw || product;
+
+  // Se não tem preço, ajuda o modelo a não inventar
+  if (!price) {
+    base += "\n(Obs: cliente não informou preço.)";
+  }
+
+  return base.trim();
+}
+
+// ===================== CONSUMO =====================
+async function consumeOneDescriptionOrBlock(waId) {
+  const status = await getStatus(waId);
+
+  if (status === "ACTIVE") {
+    const planCode = await getPlan(waId);
+    const plan = PLANS[planCode];
+    const used = await getMonthlyUsage(waId);
+    if (!plan) return false;
+
+    if (used >= plan.monthlyLimit) {
+      await setStatus(waId, "BLOCKED");
+      return false;
+    }
+
+    await incrMonthlyUsage(waId);
+    return true;
+  }
+
+  // Trial
+  if (status === "TRIAL") {
+    const used = await getTrialUses(waId);
+    if (used >= FREE_DESCRIPTIONS_LIMIT) {
+      await setStatus(waId, "BLOCKED");
+      return false;
+    }
+    await incrTrialUses(waId);
+    return true;
+  }
+
+  return false;
 }
 
 // ===================== ASAAS =====================
-async function asaasFetch(path, { method = "GET", body = null } = {}) {
-  if (!ASAAS_API_KEY) throw new Error("ASAAS_API_KEY não configurada.");
+async function asaasFetch(path, { method = "GET", body = null, headers = {} } = {}) {
+  if (!ASAAS_API_KEY) throw new Error("ASAAS_API_KEY ausente.");
 
   const resp = await fetch(`${ASAAS_BASE_URL}${path}`, {
     method,
     headers: {
-      "Content-Type": "application/json",
       access_token: ASAAS_API_KEY,
+      "Content-Type": "application/json",
+      ...headers,
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body: body ? JSON.stringify(body) : null,
   });
 
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    throw new Error(`Asaas ${resp.status}`);
+    throw new Error(`Asaas ${resp.status}: ${JSON.stringify(data).slice(0, 300)}`);
   }
   return data;
 }
@@ -550,9 +604,12 @@ function nextDueDateISO() {
 }
 
 async function updateAsaasCustomerDoc(customerId, cpfCnpj) {
+  if (!customerId) return;
+  const doc = String(cpfCnpj || "").replace(/\D+/g, "");
+  if (!doc) return;
   await asaasFetch(`/v3/customers/${customerId}`, {
-    method: "PUT",
-    body: { cpfCnpj },
+    method: "POST",
+    body: { cpfCnpj: doc },
   });
 }
 
@@ -629,9 +686,9 @@ async function createPixPaymentAndGetPayLink(waId, planCode) {
     body: {
       customer: customerId,
       billingType: "PIX",
-      dueDate: nextDueDateISO(),
       value: plan.price,
-      description: `Amigo das Vendas no Zap - ${plan.name}`,
+      dueDate: nextDueDateISO(),
+      description: `Amigo das Vendas no Zap - ${plan.name} (Pix)`,
     },
   });
 
@@ -640,62 +697,20 @@ async function createPixPaymentAndGetPayLink(waId, planCode) {
   await redisSet(kAsaasPayment(waId), pay.id);
   await redisSet(kPaymentToWa(pay.id), waId);
 
-  return { paymentId: pay.id, invoiceUrl: pay?.invoiceUrl || null };
+  return { paymentId: pay.id, invoiceUrl: pay.invoiceUrl || null };
 }
 
-// ===================== COTA / BLOQUEIO =====================
-async function canConsumeDescription(waId) {
-  const status = await getStatus(waId);
-
-  if (status === "ACTIVE") {
-    const payMethod = await getPayMethod(waId);
-
-    if (payMethod === "PIX") {
-      const until = await getActiveUntil(waId);
-      if (!until || nowMs() > until) {
-        await setStatus(waId, "BLOCKED");
-        return { ok: false, reason: "pix_expired" };
-      }
-    }
-
-    const planCode = await getPlan(waId);
-    const plan = PLANS[planCode];
-    if (!plan) return { ok: false, reason: "no_plan" };
-
-    const used = await getMonthlyUsage(waId);
-    const limit = plan.monthlyLimit;
-    if (used >= limit) return { ok: false, reason: "plan_limit", used, limit };
-
-    const next = await incrMonthlyUsage(waId);
-    return { ok: true, used: next, limit };
-  }
-
-  const used = await getTrialUses(waId);
-  if (used >= FREE_DESCRIPTIONS_LIMIT) return { ok: false, reason: "trial_limit", used, limit: FREE_DESCRIPTIONS_LIMIT };
-
-  const next = await incrTrialUses(waId);
-  return { ok: true, used: next, limit: FREE_DESCRIPTIONS_LIMIT };
+async function cancelAsaasSubscription(subscriptionId) {
+  if (!subscriptionId) return;
+  await asaasFetch(`/v3/subscriptions/${subscriptionId}`, { method: "DELETE" });
 }
 
-function limitMessage(status, planCode, used, limit) {
-  if (status === "ACTIVE") {
-    const plan = PLANS[planCode];
-    return (
-      `✅ Você atingiu o limite do mês do plano *${plan?.name || ""}*.\n` +
-      `Uso: ${used}/${limit}\n\n` +
-      `Se quiser, posso te mostrar os planos novamente.`
-    );
-  }
-  return `✅ Você atingiu o limite do trial.\nUso: ${used}/${limit}\n\n${plansMenuText()}`;
-}
-
-// ===================== ROUTES =====================
-// Health
+// ===================== HEALTH =====================
 app.get("/", (_req, res) => {
-  res.status(200).send("OK - Amigo das Vendas no Zap rodando");
+  res.status(200).send("OK - Amigo das Vendas no Zap webhook rodando");
 });
 
-// Webhook verify (Meta)
+// ===================== WEBHOOK VERIFY (Meta GET) =====================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -707,7 +722,63 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// ===================== WHATSAPP WEBHOOK =====================
+// ===================== ASAAS WEBHOOK =====================
+app.post("/asaas/webhook", async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    // token opcional
+    if (ASAAS_WEBHOOK_TOKEN) {
+      const token = String(req.headers["asaas-access-token"] || req.headers["x-asaas-token"] || "").trim();
+      if (token && token !== ASAAS_WEBHOOK_TOKEN) {
+        return;
+      }
+    }
+
+    const evt = req.body || {};
+    const evtHash = sha256(JSON.stringify(evt).slice(0, 5000));
+
+    const seen = await redisExists(kAsaasEvt(evtHash));
+    if (seen) return;
+
+    await redisSetEx(kAsaasEvt(evtHash), "1", TTL_WEEK_SECONDS);
+
+    const event = String(evt.event || "");
+    const payment = evt.payment || null;
+
+    if (!payment?.id) return;
+
+    const paymentId = String(payment.id);
+    const subscriptionId = payment.subscription ? String(payment.subscription) : "";
+
+    // Descobre waId
+    let waId = null;
+    if (subscriptionId) {
+      waId = await redisGet(kSubscriptionToWa(subscriptionId));
+    }
+    if (!waId) {
+      waId = await redisGet(kPaymentToWa(paymentId));
+    }
+    if (!waId) return;
+
+    // Ativa quando recebido/confirmado
+    if (event === "PAYMENT_RECEIVED" || event === "PAYMENT_CONFIRMED") {
+      await setStatus(waId, "ACTIVE");
+
+      // PIX: validade 30 dias
+      if (!subscriptionId) {
+        const until = nowMs() + PIX_ACTIVE_DAYS * 24 * 60 * 60 * 1000;
+        await setActiveUntil(waId, until);
+      }
+
+      await sendWhatsAppText(waId, "✅ Pagamento confirmado! Seu plano está ativo.\n\nAgora me mande o produto que você quer vender 🙂");
+    }
+  } catch (e) {
+    safeLogError("Erro Asaas webhook:", e);
+  }
+});
+
+// ===================== WHATSAPP WEBHOOK (POST) =====================
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -733,10 +804,128 @@ app.post("/webhook", async (req, res) => {
     const waId = msg.from;
     const text = (msg.text?.body || "").trim();
 
+    // Anti-loop / idempotência: evita processar a mesma mensagem 2x
+    if (msg.id) {
+      const seenKey = kSeenMsg(msg.id);
+      const already = await redisExists(seenKey);
+      if (already) return;
+      await redisSetEx(seenKey, "1", 60 * 60 * 24); // 24h
+    }
+
     // ===================== INICIALIZAÇÃO (nome) =====================
     let status = await getStatus(waId);
     let fullName = await getFullName(waId);
 
+    // ===== MENU (pode chamar a qualquer momento) =====
+    if (isMenuCommand(text)) {
+      await pushPrevStatus(waId, status);
+      await setStatus(waId, "MENU");
+      await sendWhatsAppText(waId, menuText());
+      return;
+    }
+
+    // ===== MENU FLOW =====
+    if (status === "MENU") {
+      if (text === "1") {
+        await sendWhatsAppText(waId, await buildMySubscriptionText(waId));
+        return;
+      }
+      if (text === "2") {
+        await setStatus(waId, "MENU_WAIT_NAME");
+        await sendWhatsAppText(waId, "Me envie seu *nome completo* 🙂");
+        return;
+      }
+      if (text === "3") {
+        await setStatus(waId, "MENU_WAIT_DOC");
+        await sendWhatsAppText(waId, "Me envie seu *CPF ou CNPJ* (somente números).");
+        return;
+      }
+      if (text === "4") {
+        // Mudar plano: se tiver assinatura de cartão, cancela a atual antes
+        const payMethod = await getPayMethod(waId);
+        if (payMethod === "CARD") {
+          const subId = await redisGet(kAsaasSubscription(waId));
+          if (subId) {
+            try {
+              await cancelAsaasSubscription(subId);
+              await redisDel(kAsaasSubscription(waId));
+              await redisDel(kSubscriptionToWa(subId));
+            } catch (e) {
+              safeLogError("Erro ao mudar plano (cancelar assinatura):", e);
+              await sendWhatsAppText(waId, "Tive um problema para mudar seu plano agora. Tente novamente em instantes.");
+              return;
+            }
+          }
+        }
+        await setStatus(waId, "WAIT_PLAN");
+        await sendWhatsAppText(waId, plansMenuText());
+        return;
+      }
+      if (text === "5") {
+        // Cancelar plano
+        const payMethod = await getPayMethod(waId);
+        if (payMethod === "CARD") {
+          const subId = await redisGet(kAsaasSubscription(waId));
+          if (subId) {
+            try {
+              await cancelAsaasSubscription(subId);
+              await redisDel(kAsaasSubscription(waId));
+              await redisDel(kSubscriptionToWa(subId));
+            } catch (e) {
+              safeLogError("Erro ao cancelar assinatura:", e);
+              await sendWhatsAppText(waId, "Não consegui cancelar agora. Tente novamente em instantes.");
+              return;
+            }
+          }
+        }
+        // PIX: não há recorrência; só desativa
+        await clearActiveUntil(waId);
+        await setStatus(waId, "BLOCKED");
+        await sendWhatsAppText(waId, "✅ Plano cancelado.\n\nSe quiser voltar, digite *MENU* e escolha um plano.");
+        return;
+      }
+      if (text === "6") {
+        await sendWhatsAppText(waId, `❓ Ajuda: ${helpUrl()}`);
+        return;
+      }
+
+      await sendWhatsAppText(waId, menuText());
+      return;
+    }
+
+    if (status === "MENU_WAIT_NAME") {
+      const name = String(text || "").trim();
+      if (name.length < 5) {
+        await sendWhatsAppText(waId, "Me envie seu *nome completo*, por favor 🙂");
+        return;
+      }
+      await setFullName(waId, name);
+      const prev = await popPrevStatus(waId);
+      await setStatus(waId, prev);
+      await sendWhatsAppText(waId, "✅ Nome atualizado.\n\nDigite *MENU* para ver as opções.");
+      return;
+    }
+
+    if (status === "MENU_WAIT_DOC") {
+      const doc = normalizeDocOnlyDigits(text);
+      if (!isValidCPFOrCNPJ(doc)) {
+        await sendWhatsAppText(waId, "CPF (11 dígitos) ou CNPJ (14 dígitos), *somente números* 🙂");
+        return;
+      }
+      await setDoc(waId, doc);
+
+      const customerId = await redisGet(kAsaasCustomer(waId));
+      if (customerId) {
+        try { await updateAsaasCustomerDoc(customerId, doc); } catch { /* silencioso */ }
+      }
+
+      const prev = await popPrevStatus(waId);
+      await setStatus(waId, prev);
+      await sendWhatsAppText(waId, "✅ CPF/CNPJ atualizado.\n\nDigite *MENU* para ver as opções.");
+      return;
+    }
+
+    // Fluxo inicial de nome
     if (!fullName && status === "TRIAL" && looksLikeGreeting(text)) {
       await setStatus(waId, "WAIT_NAME");
       await sendWhatsAppText(waId, "Olá! 😊 Antes de começar, me diga seu *nome completo*.");
@@ -756,7 +945,6 @@ app.post("/webhook", async (req, res) => {
     }
 
     // ===================== FINALIZAÇÃO: OK =====================
-    // OK zera e prepara para novo produto
     if (isOkToFinish(text)) {
       await clearDraft(waId);
       await clearRefineCount(waId);
@@ -826,12 +1014,12 @@ app.post("/webhook", async (req, res) => {
               `✅ Aqui está o link para ativar seu plano:\n${pay.invoiceUrl}\n\nAssim que o pagamento for confirmado, eu libero automaticamente ✅`
             );
           } else {
-            await sendWhatsAppText(waId, "Criei o pagamento, mas não consegui obter o link automaticamente. Me chama aqui que eu verifico ✅");
+            await sendWhatsAppText(waId, "Criei o pagamento, mas não consegui obter o link automaticamente. Me chama aqui que eu verifico 🙂");
           }
         } catch (e) {
-          safeLogError("Erro criando cobrança Asaas:", e);
-          await setStatus(waId, "BLOCKED");
+          safeLogError("Erro criando pagamento/assinatura:", e);
           await sendWhatsAppText(waId, "Tive um problema ao gerar o pagamento agora. Tente novamente em instantes (responda 1, 2 ou 3).");
+          await setStatus(waId, "WAIT_PLAN");
         }
         return;
       }
@@ -839,7 +1027,7 @@ app.post("/webhook", async (req, res) => {
       if (status === "WAIT_DOC") {
         const doc = normalizeDocOnlyDigits(text);
         if (!isValidCPFOrCNPJ(doc)) {
-          await sendWhatsAppText(waId, "Não consegui validar. Envie CPF (11 dígitos) ou CNPJ (14 dígitos), *somente números*.");
+          await sendWhatsAppText(waId, "CPF (11 dígitos) ou CNPJ (14 dígitos), *somente números* 🙂");
           return;
         }
 
@@ -860,221 +1048,117 @@ app.post("/webhook", async (req, res) => {
               `✅ Aqui está o link para ativar seu plano:\n${pay.invoiceUrl}\n\nAssim que o pagamento for confirmado, eu libero automaticamente ✅`
             );
           } else {
-            await sendWhatsAppText(waId, "Criei o pagamento, mas não consegui obter o link automaticamente. Me chama aqui que eu verifico ✅");
+            await sendWhatsAppText(waId, "Criei o pagamento, mas não consegui obter o link automaticamente. Me chama aqui que eu verifico 🙂");
           }
         } catch (e) {
-          safeLogError("Erro criando cobrança Asaas:", e);
-          await setStatus(waId, "BLOCKED");
+          safeLogError("Erro criando pagamento/assinatura:", e);
           await sendWhatsAppText(waId, "Tive um problema ao gerar o pagamento agora. Tente novamente em instantes (responda 1, 2 ou 3).");
+          await setStatus(waId, "WAIT_PLAN");
         }
+
         return;
       }
 
       if (status === "PENDING") {
-        await sendWhatsAppText(waId, "Assim que o pagamento for confirmado, eu libero automaticamente ✅");
+        await sendWhatsAppText(waId, "⏳ Estou aguardando a confirmação do pagamento.\nAssim que confirmar, eu libero automaticamente ✅");
         return;
       }
     }
 
-    // ===================== ATIVO/TRIAL: DESCRIÇÃO =====================
-    status = await getStatus(waId);
-
-    if (status !== "ACTIVE") {
-      const usedTrial = await getTrialUses(waId);
-      if (usedTrial >= FREE_DESCRIPTIONS_LIMIT) {
-        await setStatus(waId, "BLOCKED");
-        await sendWhatsAppText(waId, `✅ Você usou as ${FREE_DESCRIPTIONS_LIMIT} descrições grátis.\n\n${plansMenuText()}`);
-        return;
-      }
-    }
-
-    const draft = await getDraft(waId);
-    const refines = await getRefineCount(waId);
-    const hasDraft = Boolean(draft);
-    const isImprovement = isNegativeOrImprovement(text);
-    const prevDesc = await getLastDescription(waId);
-
-    // Se a pessoa mandou algo tipo “sim”/“gostei” (legado), apenas orienta a usar OK
-    if (isPositiveFeedbackLegacy(text) && prevDesc) {
-      await sendWhatsAppText(waId, "Perfeito! ✅\nSe estiver tudo certo, me responda *OK*.\nSe quiser melhorar algo, me diga o que quer que eu melhore 🙂");
-      return;
-    }
-
-    // Regra: refinamentos não consomem até 2. Depois, consome como nova descrição.
-    let shouldConsumeNow = !hasDraft; // novo produto => consome
-    let refinementMode = false;
-
-    if (hasDraft && prevDesc && isImprovement) {
-      refinementMode = true;
-
-      // já refinou 2x? então essa próxima melhoria conta como nova descrição
-      if (refines >= MAX_REFINES_PER_DESCRIPTION) {
-        shouldConsumeNow = true;
-        await setRefineCount(waId, 0); // reinicia contador para o novo ciclo
-      } else {
-        shouldConsumeNow = false;
-      }
-    }
-
-    if (shouldConsumeNow) {
-      const check = await canConsumeDescription(waId);
-      if (!check.ok) {
-        if (check.reason === "trial_limit") {
+    // ===================== SE ATIVO (PIX) CHECA EXPIRAÇÃO =====================
+    if (status === "ACTIVE") {
+      const pm = await getPayMethod(waId);
+      if (pm === "PIX") {
+        const until = await getActiveUntil(waId);
+        if (until && nowMs() > until) {
           await setStatus(waId, "BLOCKED");
-          await sendWhatsAppText(waId, limitMessage("TRIAL", "", check.used || FREE_DESCRIPTIONS_LIMIT, check.limit || FREE_DESCRIPTIONS_LIMIT));
+          await sendWhatsAppText(waId, "Seu plano expirou. Digite *MENU* ou escolha um plano para renovar 🙂");
+          await setStatus(waId, "WAIT_PLAN");
+          await sendWhatsAppText(waId, plansMenuText());
           return;
         }
-        if (check.reason === "pix_expired") {
-          await sendWhatsAppText(waId, "✅ Seu plano expirou.\n\n" + plansMenuText());
-          return;
-        }
-        const planCode = await getPlan(waId);
-        await sendWhatsAppText(waId, limitMessage("ACTIVE", planCode, check.used, check.limit));
-        return;
       }
     }
 
-    // Atualiza draft somente se NÃO for mensagem de refinamento
-    let nextDraft = draft || emptyDraft();
-    if (!refinementMode) {
-      nextDraft = updateDraftFromUserMessage(nextDraft, text);
-    }
+    // ===================== CRIA / ATUALIZA DRAFT =====================
+    const draft = mergeDraftFromMessage(await getDraft(waId), text);
+    await setDraft(waId, draft);
 
-    if (!nextDraft.product || nextDraft.product.length < 2) {
-      await setDraft(waId, nextDraft);
-      await sendWhatsAppText(waId, "Me diga qual produto você está vendendo 🙂 (ex.: “bolo de chocolate”, “brigadeiro gourmet”).");
+    // ===================== REFINAMENTO OU NOVA DESCRIÇÃO =====================
+    const lastDesc = await getLastDescription(waId);
+    const refineCount = await getRefineCount(waId);
+
+    // Se existe uma descrição anterior e usuário pediu melhorias (e não é OK)
+    if (lastDesc && !isOkToFinish(text)) {
+      const instruction = extractImprovementInstruction(text);
+
+      // Se o usuário respondeu "sim/gostei" (legacy), encerra
+      if (isPositiveFeedbackLegacy(text)) {
+        await sendWhatsAppText(waId, "Boa! ✅\nSe quiser fazer outra descrição, é só me mandar o próximo produto 🙂");
+        await clearDraft(waId);
+        await clearRefineCount(waId);
+        await clearLastDescription(waId);
+        return;
+      }
+
+      // Se já estourou limite de refinamentos, conta como nova descrição
+      if (refineCount >= MAX_REFINES_PER_DESCRIPTION) {
+        const okConsume = await consumeOneDescriptionOrBlock(waId);
+        if (!okConsume) {
+          await setStatus(waId, "BLOCKED");
+          await sendWhatsAppText(waId, "Você atingiu o limite do seu plano.\nDigite *MENU* para ver opções.");
+          return;
+        }
+        await clearRefineCount(waId);
+      } else {
+        await setRefineCount(waId, refineCount + 1);
+      }
+
+      try {
+        const gen = await openaiGenerateDescription({
+          userText: draftToUserText(draft),
+          instruction,
+          fullName: await getFullName(waId),
+        });
+
+        await setLastDescription(waId, gen);
+        await sendWhatsAppText(waId, gen);
+        await sendWhatsAppText(waId, askFeedbackText());
+      } catch (e) {
+        safeLogError("Erro OpenAI (refino):", e);
+        await sendWhatsAppText(waId, "Tive um problema ao melhorar a descrição agora. Tente novamente em instantes.");
+      }
       return;
     }
 
-    // instrução de melhoria
-    const feedbackInstruction = refinementMode ? extractImprovementInstruction(text) : null;
-
-    // incrementa refine count (somente se refinementMode e NÃO for consumo novo)
-    if (refinementMode && !shouldConsumeNow) {
-      await setRefineCount(waId, refines + 1);
+    // ===================== GERA PRIMEIRA DESCRIÇÃO =====================
+    const okConsume = await consumeOneDescriptionOrBlock(waId);
+    if (!okConsume) {
+      await setStatus(waId, "BLOCKED");
+      await sendWhatsAppText(waId, "Você atingiu o limite do trial/plano.\nDigite *MENU* para ver opções.");
+      return;
     }
 
-    await setDraft(waId, nextDraft);
-
-    // ===================== GERAR COM IA =====================
-    let description;
     try {
-      description = await generateSalesDescription({
-        draft: nextDraft,
-        feedbackInstruction,
-        previousDescription: refinementMode ? prevDesc : null,
+      console.log("USE_UPSTASH =", USE_UPSTASH);
+
+      const gen = await openaiGenerateDescription({
+        userText: draftToUserText(draft),
+        instruction: "",
+        fullName: await getFullName(waId),
       });
+
+      await setLastDescription(waId, gen);
+      await setRefineCount(waId, 0);
+
+      await sendWhatsAppText(waId, gen);
+      await sendWhatsAppText(waId, askFeedbackText());
     } catch (e) {
       safeLogError("Erro OpenAI (geração):", e);
-      await sendWhatsAppText(waId, "Tive um problema para gerar a descrição agora. Tente novamente em instantes 🙂");
-      return;
-    }
-
-    description = sanitizeWhatsAppFormatting(description);
-
-    await setLastDescription(waId, description);
-
-    // 1) Texto pronto para encaminhar
-    await sendWhatsAppText(waId, description);
-
-    // 2) Pergunta de melhoria (com OK)
-    await sendWhatsAppText(waId, askFeedbackText());
-
-    // Se trial acabou exatamente agora, avisa
-    const st = await getStatus(waId);
-    if (st !== "ACTIVE") {
-      const used = await getTrialUses(waId);
-      if (used >= FREE_DESCRIPTIONS_LIMIT) {
-        await sendWhatsAppText(waId, `✅ Você usou as ${FREE_DESCRIPTIONS_LIMIT} descrições grátis.\nNa próxima, será necessário escolher um plano.`);
-      }
+      await sendWhatsAppText(waId, "Tive um problema ao gerar a descrição agora. Tente novamente em instantes.");
     }
   } catch (err) {
-    safeLogError("Erro geral no webhook:", err);
-  }
-});
-
-// ===================== WEBHOOK ASAAS =====================
-app.post("/asaas/webhook", async (req, res) => {
-  res.sendStatus(200);
-
-  try {
-    if (!USE_UPSTASH) return;
-
-    if (ASAAS_WEBHOOK_TOKEN) {
-      const token = req.get("asaas-access-token");
-      if (token !== ASAAS_WEBHOOK_TOKEN) return;
-    }
-
-    const hash = crypto.createHash("sha256").update(JSON.stringify(req.body)).digest("hex");
-    const evtKey = `asaas_evt:${hash}`;
-    if (await redisExists(evtKey)) return;
-    await redisSetEx(evtKey, "1", TTL_WEEK_SECONDS);
-
-    const eventType = req.body?.event;
-
-    if (eventType === "PAYMENT_RECEIVED" || eventType === "PAYMENT_CONFIRMED") {
-      const payment = req.body?.payment || null;
-      if (!payment?.id) return;
-
-      const subscriptionId = payment?.subscription || "";
-
-      // Assinatura (cartão)
-      if (subscriptionId) {
-        const waId = await redisGet(kSubscriptionToWa(subscriptionId));
-        if (!waId) return;
-
-        await setStatus(waId, "ACTIVE");
-        await setPayMethod(waId, "CARD");
-        await clearActiveUntil(waId);
-
-        const planCode = await getPlan(waId);
-        const plan = planCode ? PLANS[planCode] : null;
-        const fn = firstNameOf(await getFullName(waId));
-
-        await sendWhatsAppText(
-          waId,
-          `✅ Pagamento confirmado! Seu plano foi ativado${fn ? `, ${fn}` : ""}.\n` +
-          (plan ? `Plano: *${plan.name}* • ${plan.monthlyLimit} descrições/mês\n\n` : "\n") +
-          "Me mande o produto que você quer vender 🙂"
-        );
-        return;
-      }
-
-      // Pix (pagamento avulso)
-      const waId = await redisGet(kPaymentToWa(payment.id));
-      if (!waId) return;
-
-      await setStatus(waId, "ACTIVE");
-      await setPayMethod(waId, "PIX");
-
-      const until = nowMs() + PIX_ACTIVE_DAYS * 24 * 60 * 60 * 1000;
-      await setActiveUntil(waId, until);
-
-      const planCode = await getPlan(waId);
-      const plan = planCode ? PLANS[planCode] : null;
-      const fn = firstNameOf(await getFullName(waId));
-
-      await sendWhatsAppText(
-        waId,
-        `✅ Pagamento confirmado! Seu plano foi ativado${fn ? `, ${fn}` : ""}.\n` +
-        (plan ? `Plano: *${plan.name}* • ${plan.monthlyLimit} descrições/mês\n\n` : "\n") +
-        "Me mande o produto que você quer vender 🙂"
-      );
-      return;
-    }
-
-    if (eventType === "SUBSCRIPTION_INACTIVATED") {
-      const subId = req.body?.subscription?.id;
-      if (!subId) return;
-
-      const waId = await redisGet(kSubscriptionToWa(subId));
-      if (!waId) return;
-
-      await setStatus(waId, "BLOCKED");
-      await sendWhatsAppText(waId, "⚠️ Sua assinatura foi inativada.\n\n" + plansMenuText());
-    }
-  } catch (err) {
-    safeLogError("Erro webhook Asaas:", err);
+    safeLogError("Erro no webhook:", err);
   }
 });
 
@@ -1082,5 +1166,4 @@ app.post("/asaas/webhook", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
-  console.log("USE_UPSTASH =", USE_UPSTASH);
 });
