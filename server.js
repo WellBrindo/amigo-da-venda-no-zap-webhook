@@ -463,9 +463,13 @@ function extractImprovementInstruction(text) {
 
 function askFeedbackText() {
   return (
-    "💬 *Quer melhorar algo?*\n\n" +
-    "Me diga *o que você quer que eu melhore* (ex.: mais emoji, muda o título, mais emocional, mais curto, mais técnico).\n\n" +
-    "Se estiver tudo certo com a descrição, me envie um *OK* ✅"
+    "💬 Quer que eu deixe ainda mais a sua cara?
+
+" +
+    "Me diga o que você quer ajustar (ex.: mais emoji, mudar o título, mais emocional, mais curto, mais técnico).
+
+" +
+    "Se estiver tudo certinho, me manda um OK ✅"
   );
 }
 
@@ -861,7 +865,13 @@ function plansMenuText() {
   );
 }
 function paymentMethodText() {
-  return "*Forma de pagamento* 💳\n\n1) Cartão\n2) Pix\n\nResponda com 1 ou 2.";
+  return "Perfeito 🙂
+Assim que você escolher a forma de pagamento, eu já preparo tudinho pra gente continuar com as suas descrições sem parar. 💳
+
+1) Cartão
+2) Pix
+
+Me responde com 1 ou 2 🙂";
 }
 async function buildMySubscriptionText(waId) {
   const status = await getStatus(waId);
@@ -926,15 +936,12 @@ async function clearMenuReturn(waId) {
 
 async function sendTrialEndedFlow(waId) {
   // Fim do trial: mensagem + convite + planos
-  await sendWhatsAppText(waId, "✅ Você concluiu o *teste gratuito* e usou as *5 descrições* disponíveis.");
+  await sendWhatsAppText(waId, "Aaa que pena 🥺\nSuas *5 descrições grátis* do teste já foram usadas — mas foi só o começo!");
   await sendWhatsAppText(
     waId,
-    "🤝 *Gostou do seu novo amigo de vendas?*\n\n" +
-      "Ele te ajudou a deixar seus anúncios mais profissionais.\n" +
-      "Facilitou na hora de divulgar.\n" +
-      "Deixou tudo mais organizado e vendável.\n\n" +
-      "✨ Não fique sem o seu Amigo.\n" +
-      "Escolha um plano abaixo e continue essa amizade que ajuda você a vender."
+    "Não fica triste 🥺🙂\nEssa nossa amizade só começou.\n\n" +
+      "Você gostou das descrições que eu criei? Achou que ficou mais fácil divulgar, mais organizado e com cara mais vendável?\n\n" +
+      "Então bora escolher como a gente vai continuar daqui pra frente: 👇"
   );
 
   await setStatus(waId, "WAIT_PLAN");
@@ -1082,7 +1089,7 @@ app.post("/webhook", async (req, res) => {
         );
         // Já vamos perguntar o nome agora, então o próximo input deve ser tratado como o valor do nome
         await setStatus(waId, "WAIT_NAME_VALUE");
-        await sendWhatsAppText(waId, "Oi! 🙂\nQual é o seu *nome completo*?");
+        await sendWhatsAppText(waId, "Oi! 👋😊\nEu sou o Amigo das Vendas — pode me chamar de Amigo.\n\nVocê me diz o que você vende ou o serviço que você presta, e eu te devolvo um anúncio prontinho pra você copiar e mandar nos grupos do WhatsApp.\n\nAntes que eu esqueça 😄 qual é o seu nome completo?");
       } else {
         await sendWhatsAppText(waId, "Esse comando de reset está disponível apenas para o número de teste.");
       }
@@ -1202,7 +1209,7 @@ app.post("/webhook", async (req, res) => {
     if (status === "MENU_UPDATE_DOC") {
       const doc = cleanDoc(text);
       if (doc.length !== 11 && doc.length !== 14) {
-        await sendWhatsAppText(waId, "CPF/CNPJ inválido. Me envie somente números (11 ou 14 dígitos).");
+        await sendWhatsAppText(waId, "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\nDá uma olhadinha e me envia de novo, por favor, somente números:\n\nCPF: 11 dígitos\nCNPJ: 14 dígitos");
         return;
       }
       await setDoc(waId, doc);
@@ -1213,7 +1220,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (status === "WAIT_NAME") {
-      await sendWhatsAppText(waId, "Oi! 🙂\nQual é o seu *nome completo*?");
+      await sendWhatsAppText(waId, "Oi! 👋😊\nEu sou o Amigo das Vendas — pode me chamar de Amigo.\n\nVocê me diz o que você vende ou o serviço que você presta, e eu te devolvo um anúncio prontinho pra você copiar e mandar nos grupos do WhatsApp.\n\nAntes que eu esqueça 😄 qual é o seu nome completo?");
       await setStatus(waId, "WAIT_NAME_VALUE");
       return;
     }
@@ -1227,12 +1234,19 @@ app.post("/webhook", async (req, res) => {
       await setFullName(waId, name);
 
       // Fluxo correto: agradece o nome e libera o trial (5 descrições) sem pedir CPF/CNPJ agora.
-      await sendWhatsAppText(waId, `Perfeito, ${name.split(" ")[0]}! 🙂`);
+      await sendWhatsAppText(waId, `É um prazer te conhecer, ${name.split(" ")[0]} 🙂`);
       await sendWhatsAppText(
         waId,
-        "✅ Você já pode usar *5 descrições gratuitas* para testar.\n\n" +
-          'Me mande agora o que você vende ou o serviço que oferece (ex: "Faço bolo de chocolate R$35").\n\n' +
-          "Quando as 5 acabarem, eu te mostro os planos para continuar."
+        "Pra gente se conhecer melhor 😊 você pode me pedir *5 descrições gratuitas* pra testar.
+
+" +
+          "Você pode mandar bem completo (com preço, detalhes, entrega etc.) ou bem simples mesmo, tipo: “Faço bolo de chocolate R$35”. Eu organizo e deixo com cara de anúncio.
+
+" +
+          "E tem mais: depois que eu te entregar a descrição, você pode pedir até *2 ajustes* (ex.: mais emoji, mais emocional, mudar o título) sem consumir uma nova descrição.
+
+" +
+          "Me manda agora o que você vende ou o serviço que você oferece."
       );
 
       await setStatus(waId, "ACTIVE");
@@ -1243,7 +1257,7 @@ app.post("/webhook", async (req, res) => {
       // Coleta CPF/CNPJ apenas para contratação / troca de plano
       const doc = cleanDoc(text);
       if (doc.length !== 11 && doc.length !== 14) {
-        await sendWhatsAppText(waId, "CPF/CNPJ inválido. Me envie somente números (11 ou 14 dígitos).");
+        await sendWhatsAppText(waId, "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\nDá uma olhadinha e me envia de novo, por favor, somente números:\n\nCPF: 11 dígitos\nCNPJ: 14 dígitos");
         return;
       }
 
@@ -1371,7 +1385,8 @@ ${r.invoiceUrl || r.link || ""}
         await setStatus(waId, "WAIT_DOC");
         await sendWhatsAppText(
           waId,
-          "Antes de gerar o pagamento, me envie seu *CPF ou CNPJ* (somente números).\n" + "É só para registrar o pagamento (eu não mostro nem registro em logs)."
+          "Nossa, quase esqueci 😄\nPra eu conseguir gerar e registrar o pagamento, preciso do seu CPF ou CNPJ (somente números).\n\n" +
+            "Pode me enviar, por favor?\nFica tranquilo(a): eu uso só pra isso e não aparece em mensagens nem em logs."
         );
         return;
       }
@@ -1475,7 +1490,7 @@ ${r.invoiceUrl || r.link || ""}
     const lastInput = await getLastInput(waId);
 
     if (lastDesc && (isOkToFinish(text) || isPositiveFeedbackLegacy(text))) {
-      await sendWhatsAppText(waId, "Boa! ✅\nSe quiser fazer outra descrição, é só me mandar o próximo produto/serviço 🙂");
+      await sendWhatsAppText(waId, "Legal! ✅\nQuando quiser criar outra descrição, é só me mandar. Tô aqui prontinho pra te ajudar 🙂");
       await clearDraft(waId);
       await clearRefineCount(waId);
       await clearLastDescription(waId);
