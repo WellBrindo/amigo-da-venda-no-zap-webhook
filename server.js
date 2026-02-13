@@ -289,6 +289,11 @@ function isMenuCommand(text) {
   return t === "menu" || t === "cardápio" || t === "cardapio";
 }
 
+function isExitMenuText(text) {
+  const t = String(text || "").trim().toLowerCase();
+  return t === "sair" || t === "voltar" || t === "cancelar";
+}
+
 function menuText() {
   return (
     "📌 *MENU*\n\n" +
@@ -321,7 +326,7 @@ async function buildMySubscriptionText(waId) {
     return (
       "📄 *Minha assinatura*\n\n" +
       "Status: *Trial*\n" +
-      `Grátis restantes: *${left}* de *${FREE_DESCRIPTIONS_LIMIT}*\n\n` +
+      `Grátis restantes: *${left}* de *${FREE_DESCRIPTIONS_LIMIT}*\n\n" +
       "Digite *MENU* para ver as opções."
     );
   }
@@ -529,10 +534,8 @@ function draftToUserText(draft) {
   const price = draft?.price || "";
   const raw = draft?.raw || "";
 
-  // Se não tem nada, retorna raw mesmo
   let base = raw || product;
 
-  // Se não tem preço, ajuda o modelo a não inventar
   if (!price) {
     base += "\n(Obs: cliente não informou preço.)";
   }
@@ -824,20 +827,23 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // ===== MENU FLOW =====
+    // ===== MENU FLOW (CORRIGIDO PARA NÃO PRENDER) =====
     if (status === "MENU") {
       if (text === "1") {
         await sendWhatsAppText(waId, await buildMySubscriptionText(waId));
+        // sai do menu automaticamente
+        const prev = await popPrevStatus(waId);
+        await setStatus(waId, prev);
         return;
       }
       if (text === "2") {
         await setStatus(waId, "MENU_WAIT_NAME");
-        await sendWhatsAppText(waId, "Me envie seu *nome completo* 🙂");
+        await sendWhatsAppText(waId, "Me envie seu *nome completo* 🙂\n\nSe quiser sair, digite *sair*.");
         return;
       }
       if (text === "3") {
         await setStatus(waId, "MENU_WAIT_DOC");
-        await sendWhatsAppText(waId, "Me envie seu *CPF ou CNPJ* (somente números).");
+        await sendWhatsAppText(waId, "Me envie seu *CPF ou CNPJ* (somente números).\n\nSe quiser sair, digite *sair*.");
         return;
       }
       if (text === "4") {
@@ -857,6 +863,8 @@ app.post("/webhook", async (req, res) => {
             }
           }
         }
+        // sai do menu e entra no fluxo de plano
+        await popPrevStatus(waId);
         await setStatus(waId, "WAIT_PLAN");
         await sendWhatsAppText(waId, plansMenuText());
         return;
@@ -880,50 +888,72 @@ app.post("/webhook", async (req, res) => {
         }
         // PIX: não há recorrência; só desativa
         await clearActiveUntil(waId);
+        await popPrevStatus(waId);
         await setStatus(waId, "BLOCKED");
         await sendWhatsAppText(waId, "✅ Plano cancelado.\n\nSe quiser voltar, digite *MENU* e escolha um plano.");
         return;
       }
       if (text === "6") {
         await sendWhatsAppText(waId, `❓ Ajuda: ${helpUrl()}`);
+        // sai do menu automaticamente
+        const prev = await popPrevStatus(waId);
+        await setStatus(waId, prev);
         return;
       }
 
-      await sendWhatsAppText(waId, menuText());
-      return;
+      // ✅ IMPORTANTE: se não for 1–6, sai do menu e continua o fluxo normal (trata como nova descrição)
+      const prev = await popPrevStatus(waId);
+      await setStatus(waId, prev);
+      status = prev; // atualiza variável local para seguir fluxo normal
+      // (não retorna — segue abaixo como descrição)
     }
 
     if (status === "MENU_WAIT_NAME") {
-      const name = String(text || "").trim();
-      if (name.length < 5) {
-        await sendWhatsAppText(waId, "Me envie seu *nome completo*, por favor 🙂");
+      if (isExitMenuText(text) || isMenuCommand(text)) {
+        const prev = await popPrevStatus(waId);
+        await setStatus(waId, prev);
+        status = prev; // volta ao fluxo normal
+      } else {
+        const name = String(text || "").trim();
+        if (name.length < 5) {
+          await sendWhatsAppText(waId, "Me envie seu *nome completo*, por favor 🙂\n\nSe quiser sair, digite *sair*.");
+          return;
+        }
+        await setFullName(waId, name);
+        const prev = await popPrevStatus(waId);
+        await setStatus(waId, prev);
+        await sendWhatsAppText(waId, "✅ Nome atualizado.\n\nAgora é só me mandar o produto 🙂");
         return;
       }
-      await setFullName(waId, name);
-      const prev = await popPrevStatus(waId);
-      await setStatus(waId, prev);
-      await sendWhatsAppText(waId, "✅ Nome atualizado.\n\nDigite *MENU* para ver as opções.");
-      return;
     }
 
     if (status === "MENU_WAIT_DOC") {
-      const doc = normalizeDocOnlyDigits(text);
-      if (!isValidCPFOrCNPJ(doc)) {
-        await sendWhatsAppText(waId, "CPF (11 dígitos) ou CNPJ (14 dígitos), *somente números* 🙂");
+      if (isExitMenuText(text) || isMenuCommand(text)) {
+        const prev = await popPrevStatus(waId);
+        await setStatus(waId, prev);
+        status = prev; // volta ao fluxo normal
+      } else {
+        const doc = normalizeDocOnlyDigits(text);
+        if (!isValidCPFOrCNPJ(doc)) {
+          await sendWhatsAppText(waId, "CPF (11 dígitos) ou CNPJ (14 dígitos), *somente números* 🙂\n\nSe quiser sair, digite *sair*.");
+          return;
+        }
+        await setDoc(waId, doc);
+
+        const customerId = await redisGet(kAsaasCustomer(waId));
+        if (customerId) {
+          try { await updateAsaasCustomerDoc(customerId, doc); } catch { /* silencioso */ }
+        }
+
+        const prev = await popPrevStatus(waId);
+        await setStatus(waId, prev);
+        await sendWhatsAppText(waId, "✅ CPF/CNPJ atualizado.\n\nAgora é só me mandar o produto 🙂");
         return;
       }
-      await setDoc(waId, doc);
-
-      const customerId = await redisGet(kAsaasCustomer(waId));
-      if (customerId) {
-        try { await updateAsaasCustomerDoc(customerId, doc); } catch { /* silencioso */ }
-      }
-
-      const prev = await popPrevStatus(waId);
-      await setStatus(waId, prev);
-      await sendWhatsAppText(waId, "✅ CPF/CNPJ atualizado.\n\nDigite *MENU* para ver as opções.");
-      return;
     }
+
+    // recarrega nome se foi alterado no menu
+    fullName = await getFullName(waId);
 
     // Fluxo inicial de nome
     if (!fullName && status === "TRIAL" && looksLikeGreeting(text)) {
