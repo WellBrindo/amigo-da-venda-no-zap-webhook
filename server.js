@@ -19,37 +19,22 @@ const ASAAS_WEBHOOK_TOKEN = (process.env.ASAAS_WEBHOOK_TOKEN || "").trim();
 const ASAAS_BASE_URL = (process.env.ASAAS_BASE_URL || "https://api.asaas.com").trim();
 
 const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
-const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4o-mini").trim(); // você já está usando gpt-4o-mini
+const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
 
 // ===================== LIMITES / PLANOS =====================
 const FREE_DESCRIPTIONS_LIMIT = 5; // trial por usos
 
 const PLANS = {
-  P1: {
-    code: "P1",
-    name: "De Vez em Quando",
-    price: 24.9,
-    monthlyLimit: 20,
-  },
-  P2: {
-    code: "P2",
-    name: "Sempre por Perto",
-    price: 34.9,
-    monthlyLimit: 60,
-  },
-  P3: {
-    code: "P3",
-    name: "Melhor Amigo",
-    price: 49.9,
-    monthlyLimit: 200,
-  },
+  P1: { code: "P1", name: "De Vez em Quando", price: 24.9, monthlyLimit: 20 },
+  P2: { code: "P2", name: "Sempre por Perto", price: 34.9, monthlyLimit: 60 },
+  P3: { code: "P3", name: "Melhor Amigo", price: 49.9, monthlyLimit: 200 },
 };
 
 // Pix = 30 dias após ativação
 const PIX_ACTIVE_DAYS = 30;
 
-// Refinamento: até 3 (após isso vira “nova descrição”)
-const MAX_REFINES_PER_DESCRIPTION = 3;
+// Refinamento: até 2 (depois disso vira “nova descrição”)
+const MAX_REFINES_PER_DESCRIPTION = 2;
 
 // TTLs
 const TTL_WEEK_SECONDS = 60 * 60 * 24 * 7;
@@ -57,7 +42,6 @@ const TTL_MONTH_SECONDS = 60 * 60 * 24 * 31;
 
 // ===================== HELPERS (SEGURANÇA / LOG) =====================
 function safeLogError(label, err) {
-  // Nunca logar doc/CPF/CNPJ. Nunca logar envs.
   const msg = String(err?.message || err || "").slice(0, 180);
   console.error(label, { message: msg });
 }
@@ -132,7 +116,6 @@ function kLastDescription(waId) { return `lastdesc:${waId}`; }
 function kTrialUses(waId) { return `trial_uses:${waId}`; }
 
 function kMonthlyUsage(waId, yyyymm) { return `usage:${waId}:${yyyymm}`; }
-function kMonthlyUsageLimit(waId, yyyymm) { return `usage_limit:${waId}:${yyyymm}`; } // opcional
 
 function currentYYYYMM() {
   const d = new Date();
@@ -146,7 +129,7 @@ function kAsaasCustomer(waId) { return `asaas_customer:${waId}`; }
 function kAsaasSubscription(waId) { return `asaas_subscription:${waId}`; }
 function kSubscriptionToWa(subId) { return `subscription_to_wa:${subId}`; }
 
-function kAsaasPayment(waId) { return `asaas_payment:${waId}`; } // pix payment id atual
+function kAsaasPayment(waId) { return `asaas_payment:${waId}`; }
 function kPaymentToWa(paymentId) { return `payment_to_wa:${paymentId}`; }
 
 // ===================== STATUS =====================
@@ -203,7 +186,6 @@ async function getTrialUses(waId) {
 }
 async function incrTrialUses(waId) {
   const key = kTrialUses(waId);
-  // mantém no máximo por 6 meses (pra não crescer infinito)
   const next = await redisIncr(key);
   await redisSetEx(key, String(next), 60 * 60 * 24 * 180);
   return next;
@@ -247,16 +229,24 @@ function looksLikeGreeting(text) {
   return ["oi", "olá", "ola", "bom dia", "boa tarde", "boa noite"].includes(t);
 }
 
-function isPositiveFeedback(text) {
+// ✅ AGORA: finaliza com OK (determinante)
+function isOkToFinish(text) {
   const t = String(text || "").trim().toLowerCase();
+  return t === "ok" || t === "ok!" || t === "ok ✅" || t === "ok✅";
+}
+
+// IMPORTANTE: não pode considerar "não gostei" como positivo só porque tem "gostei"
+function isPositiveFeedbackLegacy(text) {
+  const t = String(text || "").trim().toLowerCase();
+  if (t.includes("não gostei") || t.includes("nao gostei")) return false;
+
   return (
     t === "sim" ||
     t === "gostei" ||
-    t.includes("gostei") ||
+    (t.includes("gostei") && !t.includes("não gostei") && !t.includes("nao gostei")) ||
     t.includes("perfeito") ||
     t.includes("ótimo") ||
     t.includes("otimo") ||
-    t.includes("am ei") ||
     t.includes("amei") ||
     t.includes("ficou bom") ||
     t.includes("ficou ótimo") ||
@@ -264,11 +254,12 @@ function isPositiveFeedback(text) {
   );
 }
 
-function isNegativeFeedback(text) {
+function isNegativeOrImprovement(text) {
   const t = String(text || "").trim().toLowerCase();
+  if (!t) return false;
+
+  // qualquer pedido de ajuste
   return (
-    t.startsWith("não gostei") ||
-    t.startsWith("nao gostei") ||
     t.includes("não gostei") ||
     t.includes("nao gostei") ||
     t.includes("não curti") ||
@@ -276,36 +267,42 @@ function isNegativeFeedback(text) {
     t.includes("muda") ||
     t.includes("troca") ||
     t.includes("melhora") ||
-    t.includes("pouco emoji") ||
     t.includes("mais emoji") ||
+    t.includes("pouco emoji") ||
+    t.includes("emoji") ||
     t.includes("título") ||
-    t.includes("titulo")
+    t.includes("titulo") ||
+    t.includes("mais emocional") ||
+    t.includes("mais curto") ||
+    t.includes("mais direto") ||
+    t.includes("mais técnico") ||
+    t.includes("mais tecnico")
   );
 }
 
-function extractFeedbackInstruction(text) {
+function extractImprovementInstruction(text) {
   const t = String(text || "").trim();
-  // Se a pessoa falou "não gostei", use o que vier depois como instrução
-  // e se não tiver, use o texto todo como instrução.
   const lower = t.toLowerCase();
+
+  // se vier com "não gostei", usa o que vier depois
+  let instr = t;
   const idx1 = lower.indexOf("não gostei");
   const idx2 = lower.indexOf("nao gostei");
-
-  let instr = t;
   if (idx1 >= 0) instr = t.slice(idx1 + "não gostei".length).trim();
   else if (idx2 >= 0) instr = t.slice(idx2 + "nao gostei".length).trim();
 
   if (!instr) instr = t;
 
-  // Normaliza instruções comuns
+  // padroniza
+  instr = instr.replace(/^do\s+/i, "").trim();
   return instr;
 }
 
 function askFeedbackText() {
   return (
-    "💬 *Gostou da descrição?*\n\n" +
-    "Se quiser melhorar, me diga *o que você não gostou* (ex.: “mais emoji”, “muda o título”, “deixa mais curto”, “mais emocional”).\n\n" +
-    "Se estiver ok, pode responder *sim* ✅"
+    "💬 *Quer melhorar algo?*\n\n" +
+    "Me diga *o que você quer que eu melhore* (ex.: “mais emoji”, “muda o título”, “mais emocional”, “mais curto”, “mais direto”).\n\n" +
+    "Se estiver tudo certo, responda *OK* ✅"
   );
 }
 
@@ -333,26 +330,14 @@ function payMethodText() {
 
 // ===================== DRAFT LOGIC =====================
 function emptyDraft() {
-  return {
-    product: "",
-    price: "",
-    flavors: "",
-    delivery: "",
-    extras: "",
-  };
+  return { product: "", price: "", flavors: "", delivery: "", extras: "" };
 }
 
 function updateDraftFromUserMessage(draft, text) {
   const t = String(text || "").trim();
-
-  // Heurísticas simples:
-  // - preço: captura R$ e números
-  // - entrega: palavras-chave
-  // - sabores: "sabores", "opções", "tem de", "tem sabor"
-  // - extras: "gourmet", "caseiro", etc.
   const lower = t.toLowerCase();
 
-  // preço (bem simples)
+  // preço
   const priceMatch = t.match(/(r\$\s*\d+[.,]?\d*)|(\d+[.,]?\d*\s*reais)/i);
   if (priceMatch && !draft.price) draft.price = priceMatch[0].trim();
 
@@ -367,16 +352,12 @@ function updateDraftFromUserMessage(draft, text) {
   }
 
   // produto
-  // Se ainda não tem produto, usa a mensagem como produto (se não for só saudação)
   if (!draft.product && !looksLikeGreeting(t)) {
-    // Remove números soltos de escolha (1/2/3) e doc
     if (!["1", "2", "3"].includes(t) && onlyDigits(t).length < 11) {
       draft.product = t;
     }
   } else if (draft.product && !looksLikeGreeting(t)) {
-    // Se já tem produto, use texto como extra
     if (t.length >= 3 && onlyDigits(t).length < 11) {
-      // Evita duplicar
       if (!draft.extras) draft.extras = t;
       else if (!draft.extras.includes(t)) draft.extras = `${draft.extras} • ${t}`;
     }
@@ -385,30 +366,19 @@ function updateDraftFromUserMessage(draft, text) {
   return draft;
 }
 
-// Decide se “vira novo rascunho” após 3 refinamentos
-function shouldResetAfterRefines(refinesCount) {
-  return refinesCount >= MAX_REFINES_PER_DESCRIPTION;
-}
-
 // ===================== FORMATAÇÃO WHATSAPP (SANITIZER) =====================
 function sanitizeWhatsAppFormatting(text) {
   let out = String(text || "");
 
-  // 1) Troca **negrito** (markdown) por *negrito* (WhatsApp)
   out = out.replace(/\*\*(.+?)\*\*/g, "*$1*");
+  out = out.replace(/\*\s+\*/g, "");
+  out = out.replace(/\*{3,}/g, "*");
 
-  // 2) Remove casos de "* *" ou "** *" etc
-  out = out.replace(/\*\s+\*/g, ""); // remove “* *”
-  out = out.replace(/\*{3,}/g, "*"); // *** -> *
-
-  // 3) Evitar label “Preço” em negrito com asterisco sobrando
-  // remove asteriscos ao redor de "Preço" quando for label
   out = out.replace(/\*Preço\*\s*:/gi, "Preço:");
   out = out.replace(/\*Preco\*\s*:/gi, "Preco:");
   out = out.replace(/\*Preço\*/gi, "Preço");
   out = out.replace(/\*Preco\*/gi, "Preco");
 
-  // 4) Garante título em negrito na primeira linha (se não estiver)
   const lines = out.split("\n");
   if (lines.length > 0) {
     const first = lines[0].trim();
@@ -418,7 +388,6 @@ function sanitizeWhatsAppFormatting(text) {
     }
   }
 
-  // 5) Remove excesso de espaços em branco
   out = out.replace(/[ \t]+\n/g, "\n");
   out = out.replace(/\n{4,}/g, "\n\n\n");
 
@@ -445,13 +414,6 @@ function buildMissingHints(draft) {
 }
 
 function buildPrompt({ draft, feedbackInstruction, previousDescription }) {
-  // Regras:
-  // - 1 único texto pronto para encaminhar
-  // - Título chamativo em negrito (WhatsApp = *texto*)
-  // - destacar poucas infos importantes em negrito (sem exagero)
-  // - emojis moderados
-  // - não inventar info; quando faltar, usar frases neutras
-  // - se feedbackInstruction existir, reescreva considerando o pedido (ex.: mais emoji, mudar título etc.)
   return `
 Você é um especialista em copywriting para vendas no WhatsApp.
 
@@ -507,7 +469,6 @@ async function generateSalesDescription({ draft, feedbackInstruction, previousDe
     body: JSON.stringify({
       model: OPENAI_MODEL,
       input: prompt,
-      // não usar temperature (você recebeu erro com alguns modelos)
     }),
   });
 
@@ -517,7 +478,6 @@ async function generateSalesDescription({ draft, feedbackInstruction, previousDe
     throw new Error(msg);
   }
 
-  // responses API: pega texto
   const out =
     data?.output?.[0]?.content?.[0]?.text ||
     data?.output_text ||
@@ -554,7 +514,6 @@ async function sendWhatsAppText(to, text) {
 
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    // não vazar detalhes
     safeLogError("Erro ao enviar WhatsApp:", new Error(data?.error?.message || `HTTP ${resp.status}`));
   } else {
     console.log("Mensagem enviada OK:", data?.messages?.[0]?.id || "(sem id)");
@@ -576,7 +535,6 @@ async function asaasFetch(path, { method = "GET", body = null } = {}) {
 
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    // não retornar payload (pode conter info)
     throw new Error(`Asaas ${resp.status}`);
   }
   return data;
@@ -632,7 +590,6 @@ async function createCardSubscriptionAndGetPayLink(waId, planCode) {
 
   const customerId = await getOrCreateAsaasCustomer(waId, fullName, doc);
 
-  // billingType CREDIT_CARD para ser recorrente no cartão
   const sub = await asaasFetch("/v3/subscriptions", {
     method: "POST",
     body: {
@@ -650,7 +607,6 @@ async function createCardSubscriptionAndGetPayLink(waId, planCode) {
   await redisSet(kSubscriptionToWa(sub.id), waId);
   await redisSet(kAsaasSubscription(waId), sub.id);
 
-  // pega o 1º pagamento para obter invoiceUrl
   const payments = await asaasFetch(`/v3/subscriptions/${sub.id}/payments`, { method: "GET" });
   const first = payments?.data?.[0] || null;
 
@@ -694,7 +650,6 @@ async function canConsumeDescription(waId) {
   if (status === "ACTIVE") {
     const payMethod = await getPayMethod(waId);
 
-    // PIX: precisa estar dentro do período
     if (payMethod === "PIX") {
       const until = await getActiveUntil(waId);
       if (!until || nowMs() > until) {
@@ -710,13 +665,14 @@ async function canConsumeDescription(waId) {
     const used = await getMonthlyUsage(waId);
     const limit = plan.monthlyLimit;
     if (used >= limit) return { ok: false, reason: "plan_limit", used, limit };
+
     const next = await incrMonthlyUsage(waId);
     return { ok: true, used: next, limit };
   }
 
-  // TRIAL
   const used = await getTrialUses(waId);
   if (used >= FREE_DESCRIPTIONS_LIMIT) return { ok: false, reason: "trial_limit", used, limit: FREE_DESCRIPTIONS_LIMIT };
+
   const next = await incrTrialUses(waId);
   return { ok: true, used: next, limit: FREE_DESCRIPTIONS_LIMIT };
 }
@@ -763,40 +719,32 @@ app.post("/webhook", async (req, res) => {
     if (!value) return;
 
     const metaPhoneId = String(value?.metadata?.phone_number_id || "").trim();
-
-    // Ignora mock do painel (alguns testes usam phone_number_id fictício)
     if (metaPhoneId === "123456123") return;
-
-    // Valida se evento é do seu número
     if (metaPhoneId && PHONE_NUMBER_ID && metaPhoneId !== PHONE_NUMBER_ID) return;
 
-    // Status events
+    // Status events: ignorar silenciosamente
     const statuses = value?.statuses;
-    if (statuses?.length) {
-      // se quiser, só log mínimo
-      return;
-    }
+    if (statuses?.length) return;
 
     const messages = value?.messages;
     if (!messages || !messages.length) return;
 
     const msg = messages[0];
-    const waId = msg.from; // cliente
+    const waId = msg.from;
+    const text = (msg.text?.body || "").trim();
 
     // ===================== INICIALIZAÇÃO (nome) =====================
     let status = await getStatus(waId);
     let fullName = await getFullName(waId);
 
-    // Se nunca teve nome, inicia fluxo de nome (mas sem travar quem já está usando)
-    if (!fullName && status === "TRIAL" && looksLikeGreeting(msg.text?.body || "")) {
+    if (!fullName && status === "TRIAL" && looksLikeGreeting(text)) {
       await setStatus(waId, "WAIT_NAME");
       await sendWhatsAppText(waId, "Olá! 😊 Antes de começar, me diga seu *nome completo*.");
       return;
     }
 
-    // Se está esperando nome
     if (status === "WAIT_NAME") {
-      const name = String(msg.text?.body || "").trim();
+      const name = String(text || "").trim();
       if (name.length < 5) {
         await sendWhatsAppText(waId, "Me envie seu *nome completo*, por favor 🙂");
         return;
@@ -807,50 +755,54 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // texto do usuário (não logar)
-    const text = (msg.text?.body || "").trim();
+    // ===================== FINALIZAÇÃO: OK =====================
+    // OK zera e prepara para novo produto
+    if (isOkToFinish(text)) {
+      await clearDraft(waId);
+      await clearRefineCount(waId);
+      await clearLastDescription(waId);
 
-    // ===================== FLUXO DE PAGAMENTO / ATIVAÇÃO =====================
-    // Se está bloqueado ou pending, a conversa vira: planos -> pagamento -> ativação
+      await sendWhatsAppText(waId, "Fechado! ✅\nMe mande o próximo produto que você quer vender 🙂");
+      return;
+    }
+
+    // ===================== FLUXO DE PAGAMENTO =====================
     status = await getStatus(waId);
 
-    const needsPaymentFlow = status === "BLOCKED" || status === "PENDING" || status === "WAIT_DOC" || status === "WAIT_PLAN" || status === "WAIT_PAYMETHOD";
+    const needsPaymentFlow =
+      status === "BLOCKED" ||
+      status === "PENDING" ||
+      status === "WAIT_DOC" ||
+      status === "WAIT_PLAN" ||
+      status === "WAIT_PAYMETHOD";
 
     if (needsPaymentFlow) {
-      // 1) Se bloqueado: mostra planos
       if (status === "BLOCKED") {
         await setStatus(waId, "WAIT_PLAN");
         await sendWhatsAppText(waId, plansMenuText());
         return;
       }
 
-      // 2) Escolher plano
       if (status === "WAIT_PLAN") {
-        const choice = text;
-        const chosen = choice === "1" ? "P1" : choice === "2" ? "P2" : choice === "3" ? "P3" : null;
-
+        const chosen = text === "1" ? "P1" : text === "2" ? "P2" : text === "3" ? "P3" : null;
         if (!chosen) {
           await sendWhatsAppText(waId, plansMenuText());
           return;
         }
-
         await setPlan(waId, chosen);
         await setStatus(waId, "WAIT_PAYMETHOD");
         await sendWhatsAppText(waId, payMethodText());
         return;
       }
 
-      // 3) Escolher forma de pagamento (cartão / pix)
       if (status === "WAIT_PAYMETHOD") {
-        const choice = text;
-        const method = choice === "1" ? "CARD" : choice === "2" ? "PIX" : "";
+        const method = text === "1" ? "CARD" : text === "2" ? "PIX" : "";
         if (!method) {
           await sendWhatsAppText(waId, payMethodText());
           return;
         }
         await setPayMethod(waId, method);
 
-        // precisa de doc?
         const existingDoc = await getDoc(waId);
         if (!existingDoc) {
           await setStatus(waId, "WAIT_DOC");
@@ -860,7 +812,6 @@ app.post("/webhook", async (req, res) => {
           return;
         }
 
-        // já tem doc -> cria cobrança
         await setStatus(waId, "PENDING");
         const planCode = (await getPlan(waId)) || "P1";
 
@@ -885,7 +836,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // 4) Receber DOC (CPF/CNPJ)
       if (status === "WAIT_DOC") {
         const doc = normalizeDocOnlyDigits(text);
         if (!isValidCPFOrCNPJ(doc)) {
@@ -920,7 +870,6 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Pending: se mandar algo, reorienta
       if (status === "PENDING") {
         await sendWhatsAppText(waId, "Assim que o pagamento for confirmado, eu libero automaticamente ✅");
         return;
@@ -928,7 +877,6 @@ app.post("/webhook", async (req, res) => {
     }
 
     // ===================== ATIVO/TRIAL: DESCRIÇÃO =====================
-    // Se status for TRIAL e passou 5, bloqueia e mostra planos
     status = await getStatus(waId);
 
     if (status !== "ACTIVE") {
@@ -940,36 +888,35 @@ app.post("/webhook", async (req, res) => {
       }
     }
 
-    // Draft/refine
     const draft = await getDraft(waId);
     const refines = await getRefineCount(waId);
-    const isNewDescription = !draft;
+    const hasDraft = Boolean(draft);
+    const isImprovement = isNegativeOrImprovement(text);
+    const prevDesc = await getLastDescription(waId);
 
-    const feedbackPositive = isPositiveFeedback(text);
-    const feedbackNegative = isNegativeFeedback(text);
-
-    // Se gostou, limpa rascunho
-    if (feedbackPositive) {
-      await clearDraft(waId);
-      await clearRefineCount(waId);
-      await clearLastDescription(waId);
-
-      await sendWhatsAppText(waId, "Boa! ✅ Se quiser fazer outro produto, me mande agora (ex.: “brigadeiro gourmet R$10”).");
+    // Se a pessoa mandou algo tipo “sim”/“gostei” (legado), apenas orienta a usar OK
+    if (isPositiveFeedbackLegacy(text) && prevDesc) {
+      await sendWhatsAppText(waId, "Perfeito! ✅\nSe estiver tudo certo, me responda *OK*.\nSe quiser melhorar algo, me diga o que quer que eu melhore 🙂");
       return;
     }
 
-    // Se refinou demais, força reset de “nova descrição”
-    const willResetRefines = !isNewDescription && shouldResetAfterRefines(refines);
+    // Regra: refinamentos não consomem até 2. Depois, consome como nova descrição.
+    let shouldConsumeNow = !hasDraft; // novo produto => consome
+    let refinementMode = false;
 
-    if (willResetRefines) {
-      // Zera, mas mantém o texto atual como “novo começo”
-      await clearDraft(waId);
-      await setRefineCount(waId, 0);
+    if (hasDraft && prevDesc && isImprovement) {
+      refinementMode = true;
+
+      // já refinou 2x? então essa próxima melhoria conta como nova descrição
+      if (refines >= MAX_REFINES_PER_DESCRIPTION) {
+        shouldConsumeNow = true;
+        await setRefineCount(waId, 0); // reinicia contador para o novo ciclo
+      } else {
+        shouldConsumeNow = false;
+      }
     }
 
-    // Verifica consumo: só consome quando for “nova descrição”
-    // Refinamentos (até 3) não consomem.
-    if (isNewDescription || willResetRefines) {
+    if (shouldConsumeNow) {
       const check = await canConsumeDescription(waId);
       if (!check.ok) {
         if (check.reason === "trial_limit") {
@@ -977,48 +924,36 @@ app.post("/webhook", async (req, res) => {
           await sendWhatsAppText(waId, limitMessage("TRIAL", "", check.used || FREE_DESCRIPTIONS_LIMIT, check.limit || FREE_DESCRIPTIONS_LIMIT));
           return;
         }
-
         if (check.reason === "pix_expired") {
           await sendWhatsAppText(waId, "✅ Seu plano expirou.\n\n" + plansMenuText());
           return;
         }
-
-        // plano atingiu limite
         const planCode = await getPlan(waId);
         await sendWhatsAppText(waId, limitMessage("ACTIVE", planCode, check.used, check.limit));
         return;
       }
     }
 
-    // Atualiza draft com mensagem do usuário
+    // Atualiza draft somente se NÃO for mensagem de refinamento
     let nextDraft = draft || emptyDraft();
-    nextDraft = updateDraftFromUserMessage(nextDraft, text);
+    if (!refinementMode) {
+      nextDraft = updateDraftFromUserMessage(nextDraft, text);
+    }
 
-    // Se ainda não tem produto
     if (!nextDraft.product || nextDraft.product.length < 2) {
       await setDraft(waId, nextDraft);
       await sendWhatsAppText(waId, "Me diga qual produto você está vendendo 🙂 (ex.: “bolo de chocolate”, “brigadeiro gourmet”).");
       return;
     }
 
-    // ===================== REFINAMENTO =====================
-    const previousDescription = await getLastDescription(waId);
+    // instrução de melhoria
+    const feedbackInstruction = refinementMode ? extractImprovementInstruction(text) : null;
 
-    // Se “não gostei…” ou msg curtinha (detalhe faltante), vira instrução de ajuste
-    const feedbackInstruction =
-      feedbackNegative || (!isNewDescription && text.length <= 200)
-        ? extractFeedbackInstruction(text)
-        : null;
-
-    // incrementa refine count se não for nova descrição
-    if (!isNewDescription) {
-      const newRef = willResetRefines ? 1 : refines + 1;
-      await setRefineCount(waId, newRef);
-    } else {
-      await setRefineCount(waId, 0);
+    // incrementa refine count (somente se refinementMode e NÃO for consumo novo)
+    if (refinementMode && !shouldConsumeNow) {
+      await setRefineCount(waId, refines + 1);
     }
 
-    // salva draft
     await setDraft(waId, nextDraft);
 
     // ===================== GERAR COM IA =====================
@@ -1027,7 +962,7 @@ app.post("/webhook", async (req, res) => {
       description = await generateSalesDescription({
         draft: nextDraft,
         feedbackInstruction,
-        previousDescription: isNewDescription ? null : previousDescription,
+        previousDescription: refinementMode ? prevDesc : null,
       });
     } catch (e) {
       safeLogError("Erro OpenAI (geração):", e);
@@ -1035,19 +970,17 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // Sanitiza
     description = sanitizeWhatsAppFormatting(description);
 
     await setLastDescription(waId, description);
 
-    // 1) Mensagem limpa pra encaminhar
+    // 1) Texto pronto para encaminhar
     await sendWhatsAppText(waId, description);
 
-    // 2) Feedback separado (bem diagramado)
+    // 2) Pergunta de melhoria (com OK)
     await sendWhatsAppText(waId, askFeedbackText());
 
-    // Se trial acabou exatamente agora (após consumo), avisa que a próxima exigirá plano
-    // (sem aumentar custo demais: só manda quando chega no limite)
+    // Se trial acabou exatamente agora, avisa
     const st = await getStatus(waId);
     if (st !== "ACTIVE") {
       const used = await getTrialUses(waId);
@@ -1072,7 +1005,6 @@ app.post("/asaas/webhook", async (req, res) => {
       if (token !== ASAAS_WEBHOOK_TOKEN) return;
     }
 
-    // idempotência por hash (não logar body)
     const hash = crypto.createHash("sha256").update(JSON.stringify(req.body)).digest("hex");
     const evtKey = `asaas_evt:${hash}`;
     if (await redisExists(evtKey)) return;
@@ -1080,18 +1012,13 @@ app.post("/asaas/webhook", async (req, res) => {
 
     const eventType = req.body?.event;
 
-    // =====================
-    // Confirmação de pagamento
-    // - Cartão recorrente: vem com payment.subscription
-    // - Pix avulso: vem com payment.id (sem subscription)
-    // =====================
     if (eventType === "PAYMENT_RECEIVED" || eventType === "PAYMENT_CONFIRMED") {
       const payment = req.body?.payment || null;
       if (!payment?.id) return;
 
       const subscriptionId = payment?.subscription || "";
 
-      // 1) Se for assinatura (cartão)
+      // Assinatura (cartão)
       if (subscriptionId) {
         const waId = await redisGet(kSubscriptionToWa(subscriptionId));
         if (!waId) return;
@@ -1107,13 +1034,13 @@ app.post("/asaas/webhook", async (req, res) => {
         await sendWhatsAppText(
           waId,
           `✅ Pagamento confirmado! Seu plano foi ativado${fn ? `, ${fn}` : ""}.\n` +
-            (plan ? `Plano: *${plan.name}* • ${plan.monthlyLimit} descrições/mês\n\n` : "\n") +
-            "Me mande o produto que você quer vender 🙂"
+          (plan ? `Plano: *${plan.name}* • ${plan.monthlyLimit} descrições/mês\n\n` : "\n") +
+          "Me mande o produto que você quer vender 🙂"
         );
         return;
       }
 
-      // 2) Se for Pix (pagamento avulso)
+      // Pix (pagamento avulso)
       const waId = await redisGet(kPaymentToWa(payment.id));
       if (!waId) return;
 
@@ -1130,13 +1057,12 @@ app.post("/asaas/webhook", async (req, res) => {
       await sendWhatsAppText(
         waId,
         `✅ Pagamento confirmado! Seu plano foi ativado${fn ? `, ${fn}` : ""}.\n` +
-          (plan ? `Plano: *${plan.name}* • ${plan.monthlyLimit} descrições/mês\n\n` : "\n") +
-          "Me mande o produto que você quer vender 🙂"
+        (plan ? `Plano: *${plan.name}* • ${plan.monthlyLimit} descrições/mês\n\n` : "\n") +
+        "Me mande o produto que você quer vender 🙂"
       );
       return;
     }
 
-    // Cancelamento de assinatura (cartão)
     if (eventType === "SUBSCRIPTION_INACTIVATED") {
       const subId = req.body?.subscription?.id;
       if (!subId) return;
