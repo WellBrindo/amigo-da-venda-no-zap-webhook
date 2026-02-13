@@ -1017,7 +1017,8 @@ app.post("/webhook", async (req, res) => {
           waId,
           "🧹 Reset concluído ✅\n\nSeu cadastro, plano e contadores foram zerados para teste.\n\nVamos começar do zero 🙂"
         );
-        await setStatus(waId, "WAIT_NAME");
+        // Já vamos perguntar o nome agora, então o próximo input deve ser tratado como o valor do nome
+        await setStatus(waId, "WAIT_NAME_VALUE");
         await sendWhatsAppText(waId, "Oi! 🙂\nQual é o seu *nome completo*?");
       } else {
         await sendWhatsAppText(waId, "Esse comando de reset está disponível apenas para o número de teste.");
