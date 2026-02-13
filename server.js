@@ -1280,19 +1280,6 @@ ${r.invoiceUrl || r.link || ""}
       }
       return;
     }
-      await setDoc(waId, doc);
-
-      // Após cadastro (nome + CPF/CNPJ), libera experiência de "primeiro contato":
-      // trial com 5 descrições grátis sem obrigar escolha de plano.
-      await setStatus(waId, "ACTIVE");
-      await sendWhatsAppText(
-        waId,
-        "Cadastro concluído ✅\n\nVocê tem *5 descrições grátis* para testar.\n" +
-          'Me mande agora o que você vende/serviço que oferece (ex: "Faço bolo de chocolate R$35").\n\n' +
-          "Se quiser ver planos, digite *MENU*."
-      );
-      return;
-    }
 
     if (status === "WAIT_PLAN") {
       if (!["1", "2", "3"].includes(text)) {
