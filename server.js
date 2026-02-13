@@ -1391,11 +1391,11 @@ async function sendTrialEndedFlow(waId) {
   // Fim do trial: mensagem + convite + planos
   await sendWhatsAppText(waId, "Aaa que pena 🥺\nSuas *5 descrições grátis* do teste já foram usadas — mas foi só o começo!");
   await sendWhatsAppText(
-    waId,
-    "Não fica triste 🥺🙂\nEssa nossa amizade só começou.\n\n" +
+        waId,
+        `Não fica triste 🥺🙂\nEssa nossa amizade só começou.\n\n" +
       "Você gostou das descrições que eu criei? Achou que ficou mais fácil divulgar, mais organizado e com cara mais vendável?\n\n" +
-      "Então bora escolher como a gente vai continuar daqui pra frente: 👇"
-  );
+      "Então bora escolher como a gente vai continuar daqui pra frente: 👇`
+      );
 
   await setStatus(waId, "WAIT_PLAN");
   await sendWhatsAppText(waId, plansMenuText());
@@ -1565,9 +1565,7 @@ app.post("/webhook", async (req, res) => {
       const no = ans === "2" || ans === "nao" || ans === "não" || ans === "n" || ans === "voltar" || ans === "reset";
 
       if (!pendingS || (!yes && !no)) {
-        await sendWhatsAppText(waId, "Responda com:
-1) Manter essas alterações como padrão
-2) Voltar ao modelo base do projeto");
+        await sendWhatsAppText(waId, `Responda com:\n1) Manter essas alterações como padrão\n2) Voltar ao modelo base do projeto`);
         return;
       }
 
@@ -1642,9 +1640,9 @@ app.post("/webhook", async (req, res) => {
     if (status === "PAYMENT_PENDING") {
       await sendWhatsAppText(
         waId,
-        "⏳ Estou aguardando a confirmação do seu pagamento pelo Asaas.\n\n" +
+        `⏳ Estou aguardando a confirmação do seu pagamento pelo Asaas.\n\n" +
         "Assim que confirmar, eu te aviso aqui e seu plano será ativado ✅\n\n" +
-        "Se quiser, digite *MENU* para ver seu status."
+        "Se quiser, digite *MENU* para ver seu status.`
       );
       return;
     }
@@ -1914,10 +1912,10 @@ ${r.invoiceUrl || r.link || ""}
         await redisSet(`tmp:paymethod:${waId}`, text); // guarda 1/2 para retomar depois
         await setStatus(waId, "WAIT_DOC");
         await sendWhatsAppText(
-          waId,
-          "Nossa, quase esqueci 😄\nPra eu conseguir gerar e registrar o pagamento, preciso do seu CPF ou CNPJ (somente números).\n\n" +
-            "Pode me enviar, por favor?\nFica tranquilo(a): eu uso só pra isso e não aparece em mensagens nem em logs."
-        );
+        waId,
+        `Nossa, quase esqueci 😄\nPra eu conseguir gerar e registrar o pagamento, preciso do seu CPF ou CNPJ (somente números).\n\n" +
+            "Pode me enviar, por favor?\nFica tranquilo(a): eu uso só pra isso e não aparece em mensagens nem em logs.`
+      );
         return;
       }
 
@@ -1942,19 +1940,19 @@ ${r.invoiceUrl || r.link || ""}
             );
           } else {
             await sendWhatsAppText(
-              waId,
-              "🧾 *Pagamento gerado!*\n\n" +
-              "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
-            );
+        waId,
+        `🧾 *Pagamento gerado!*\n\n" +
+              "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅`
+      );
           }
         } catch (e) {
           safeLogError("Erro criando assinatura Asaas:", e);
           await sendWhatsAppText(
-            waId,
-            "Não consegui gerar o pagamento agora.\n\n" +
+        waId,
+        `Não consegui gerar o pagamento agora.\n\n" +
             "Se quiser, digite *MENU* e tente novamente em *Mudar plano*.\n" +
-            "Ou revise seu CPF/CNPJ em *Alterar CPF/CNPJ*."
-          );
+            "Ou revise seu CPF/CNPJ em *Alterar CPF/CNPJ*.`
+      );
           await setStatus(waId, "WAIT_PLAN");
         }
         return;
@@ -1981,11 +1979,11 @@ ${r.invoiceUrl || r.link || ""}
         } catch (e) {
           safeLogError("Erro criando pagamento Pix Asaas:", e);
           await sendWhatsAppText(
-            waId,
-            "Não consegui gerar o Pix agora.\n\n" +
+        waId,
+        `Não consegui gerar o Pix agora.\n\n" +
             "Se quiser, digite *MENU* e tente novamente em *Mudar plano*.\n" +
-            "Ou revise seu CPF/CNPJ em *Alterar CPF/CNPJ*."
-          );
+            "Ou revise seu CPF/CNPJ em *Alterar CPF/CNPJ*.`
+      );
           await setStatus(waId, "WAIT_PLAN");
         }
         return;
@@ -2145,10 +2143,10 @@ Quer que eu *salve essas informações* para incluir nas descrições futuras?
       await setStatus(waId, "WAIT_STRUCT_CONFIRM");
       await sendWhatsAppText(
         waId,
-        "Antes de criar a próxima descrição: você quer *manter as alterações estruturais* que você fez (ex.: sem emojis, texto corrido, tabela, sem negrito etc.) como padrão para as próximas descrições?
+        `Antes de criar a próxima descrição: você quer *manter as alterações estruturais* que você fez (ex.: sem emojis, texto corrido, tabela, sem negrito etc.) como padrão para as próximas descrições?
 
 1) Sim, manter como padrão
-2) Não, voltar ao modelo base do projeto"
+2) Não, voltar ao modelo base do projeto`
       );
       return;
     }
