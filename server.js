@@ -33,7 +33,7 @@ const HELP_URL = "https://amigodasvendas.com.br";
 
 // Trial e limites
 const FREE_DESCRIPTIONS_LIMIT = 5;        // trial por uso
-const MAX_REFINES_PER_DESCRIPTION = 2;    // até 2 refinamentos "grátis" por descrição; o 3º conta como nova descrição
+const MAX_REFINES_PER_DESCRIPTION = 2;    // até 2 refinamentos por descrição; o 3º conta como nova descrição
 
 // Planos (descrições por mês)
 const PLANS = {
@@ -119,7 +119,6 @@ async function upstashCommand(commandArr) {
   return data;
 }
 
-
 async function redisGet(key) {
   if (!USE_UPSTASH) return null;
   const r = await upstashCommand(["GET", key]);
@@ -156,6 +155,18 @@ function kPixValidUntil(waId) { return `pixvalid:${waId}`; }    // epoch ms
 
 function kAsaasCustomerId(waId) { return `asaas:customer:${waId}`; }
 function kAsaasSubscriptionId(waId) { return `asaas:sub:${waId}`; }
+
+// índices reversos (para o webhook)
+function kAsaasCustomerToWa(customerId) { return `asaas:customer_to_wa:${customerId}`; }
+function kAsaasPaymentToWa(paymentId) { return `asaas:payment_to_wa:${paymentId}`; }
+function kAsaasSubToWa(subId) { return `asaas:sub_to_wa:${subId}`; }
+
+// pagamento pendente
+function kPendingPlan(waId) { return `pending:plan:${waId}`; }        // planCode
+function kPendingMethod(waId) { return `pending:method:${waId}`; }    // PIX | CARD
+function kPendingPaymentId(waId) { return `pending:payment:${waId}`; } // paymentId (pix)
+function kPendingSubId(waId) { return `pending:sub:${waId}`; }         // subId (cartão)
+function kPendingCreatedAt(waId) { return `pending:at:${waId}`; }      // epoch ms
 
 function kDraft(waId) { return `draft:${waId}`; }
 function kLastDesc(waId) { return `lastdesc:${waId}`; }
@@ -204,16 +215,28 @@ async function setDoc(waId, doc) {
   await setUser(waId, u);
 }
 
-// Corrige status “perdido” (ex.: após menu) sem ficar pedindo nome de novo
+/**
+ * Não “corrigir” estados intencionais (menu/compra/pagamento pendente etc.)
+ */
 async function normalizeOnboardingStatus(waId, status) {
   const name = await getFullName(waId);
   const doc = await getDoc(waId);
 
+  const doNotNormalize = new Set([
+    "MENU",
+    "MENU_CANCEL_CONFIRM",
+    "MENU_UPDATE_NAME",
+    "MENU_UPDATE_DOC",
+    "WAIT_PLAN",
+    "WAIT_PAYMETHOD",
+    "PAYMENT_PENDING",
+    "BLOCKED",
+    "ACTIVE",
+  ]);
+  if (doNotNormalize.has(status)) return status;
+
   // Se já tem nome e doc, não faz sentido voltar para WAIT_NAME/WAIT_DOC
-  if (name && doc && (status === "WAIT_NAME" || status === "WAIT_NAME_VALUE" || status === "WAIT_DOC" || status === "WAIT_PLAN" || status === "WAIT_PAYMETHOD")) {
-    // mantém ACTIVE se já tiver plano; senão deixa para a pessoa usar trial
-    const planCode = await getPlanCode(waId);
-    if (planCode) return "ACTIVE";
+  if (name && doc && (status === "WAIT_NAME" || status === "WAIT_NAME_VALUE" || status === "WAIT_DOC")) {
     return "ACTIVE";
   }
 
@@ -586,6 +609,7 @@ async function findOrCreateAsaasCustomer({ waId, name, doc }) {
   if (!customerId) throw new Error("Asaas: customerId não retornou.");
 
   await redisSet(kAsaasCustomerId(waId), customerId);
+  await redisSet(kAsaasCustomerToWa(customerId), waId); // índice reverso p/ webhook
   return customerId;
 }
 
@@ -609,12 +633,7 @@ async function createCardSubscription({ waId, plan }) {
   const subId = sub?.id;
   if (!subId) throw new Error("Asaas: subscription id não retornou.");
 
-  await redisSet(kAsaasSubscriptionId(waId), subId);
-  await setPlanCode(waId, plan.code);
-  await setQuotaMonth(waId, currentMonthKey());
-  await setQuotaUsed(waId, 0);
-  await clearPixValidUntil(waId);
-
+  await redisSet(kAsaasSubToWa(subId), waId); // índice reverso p/ webhook
   const link = sub?.invoiceUrl || sub?.paymentLink || sub?.url || "";
   return { subscriptionId: subId, link };
 }
@@ -642,14 +661,64 @@ async function createPixPayment({ waId, plan }) {
   const payId = payment?.id;
   if (!payId) throw new Error("Asaas: payment id não retornou.");
 
+  await redisSet(kAsaasPaymentToWa(payId), waId); // índice reverso p/ webhook
+
   // QR / payload (opcional)
   const pix = await asaasFetch(`/v3/payments/${payId}/pixQrCode`, "GET");
   const link = payment?.invoiceUrl || pix?.payload || "";
   return { paymentId: payId, link, invoiceUrl: payment?.invoiceUrl || "" };
 }
 
-// Webhook Asaas (opcional). No MVP, não liberamos antes do pagamento via webhook.
-// Se quiser “ativar só quando pagar”, implementamos lookup customerId->waId e liberar aqui.
+// ===================== PENDÊNCIA DE PAGAMENTO =====================
+async function clearPendingPayment(waId) {
+  await redisDel(kPendingPlan(waId));
+  await redisDel(kPendingMethod(waId));
+  await redisDel(kPendingPaymentId(waId));
+  await redisDel(kPendingSubId(waId));
+  await redisDel(kPendingCreatedAt(waId));
+}
+
+async function setPendingPayment({ waId, planCode, method, paymentId, subId }) {
+  await redisSet(kPendingPlan(waId), planCode || "");
+  await redisSet(kPendingMethod(waId), method || "");
+  if (paymentId) await redisSet(kPendingPaymentId(waId), paymentId);
+  if (subId) await redisSet(kPendingSubId(waId), subId);
+  await redisSet(kPendingCreatedAt(waId), String(Date.now()));
+}
+
+async function activatePlanAfterPayment({ waId, planCode, method, subscriptionId }) {
+  const plan = findPlanByCode(planCode);
+  if (!plan) return false;
+
+  // Ativa plano e reseta quota do mês
+  await setPlanCode(waId, plan.code);
+  await setQuotaMonth(waId, currentMonthKey());
+  await setQuotaUsed(waId, 0);
+
+  // Pix: validade de 30 dias só após confirmação
+  if (method === "PIX") {
+    const validUntil = Date.now() + 30 * 24 * 60 * 60 * 1000;
+    await setPixValidUntil(waId, validUntil);
+    // Pix não usa subscription
+    await redisDel(kAsaasSubscriptionId(waId));
+  }
+
+  // Cartão: salva subscriptionId e remove validade Pix
+  if (method === "CARD") {
+    if (subscriptionId) await redisSet(kAsaasSubscriptionId(waId), subscriptionId);
+    await clearPixValidUntil(waId);
+  }
+
+  await clearPendingPayment(waId);
+  await setStatus(waId, "ACTIVE");
+
+  await sendWhatsAppText(waId, `✅ Pagamento confirmado!\nPlano ativado: *${plan.name}* 🎉`);
+  await sendWhatsAppText(waId, "Agora é só me mandar o que você vende/serviço que oferece 🙂");
+  return true;
+}
+
+// ===================== WEBHOOK ASAAS =====================
+// Aqui é onde ativamos de fato o plano, SOMENTE após confirmação.
 app.post("/asaas/webhook", async (req, res) => {
   res.sendStatus(200);
 
@@ -658,7 +727,50 @@ app.post("/asaas/webhook", async (req, res) => {
       const token = req.header("asaas-access-token") || req.header("Authorization") || "";
       if (!token || !token.includes(ASAAS_WEBHOOK_TOKEN)) return;
     }
-    // MVP: apenas recebendo eventos (sem logs detalhados)
+
+    const payload = req.body || {};
+    const event = String(payload?.event || "").trim();
+
+    // Eventos comuns (variam por configuração do Asaas):
+    const allowedEvents = new Set([
+      "PAYMENT_CONFIRMED",
+      "PAYMENT_RECEIVED",
+      "PAYMENT_APPROVED",
+    ]);
+
+    if (!allowedEvents.has(event)) return;
+
+    const paymentId = payload?.payment?.id ? String(payload.payment.id) : "";
+    const subscriptionId = payload?.payment?.subscription ? String(payload.payment.subscription) : "";
+    const customerId = payload?.payment?.customer ? String(payload.payment.customer) : "";
+
+    // Descobre waId por índice reverso
+    let waId = "";
+    if (paymentId) waId = (await redisGet(kAsaasPaymentToWa(paymentId))) || "";
+    if (!waId && subscriptionId) waId = (await redisGet(kAsaasSubToWa(subscriptionId))) || "";
+    if (!waId && customerId) waId = (await redisGet(kAsaasCustomerToWa(customerId))) || "";
+
+    if (!waId) return;
+
+    // Só ativa se essa pessoa estava com pagamento pendente
+    const pendingPlanCode = (await redisGet(kPendingPlan(waId))) || "";
+    const pendingMethod = (await redisGet(kPendingMethod(waId))) || "";
+    const pendingPaymentId = (await redisGet(kPendingPaymentId(waId))) || "";
+    const pendingSubId = (await redisGet(kPendingSubId(waId))) || "";
+
+    if (!pendingPlanCode || !pendingMethod) return;
+
+    // Se tivermos IDs pendentes, validar coerência
+    if (pendingMethod === "PIX" && pendingPaymentId && paymentId && pendingPaymentId !== paymentId) return;
+    if (pendingMethod === "CARD" && pendingSubId && subscriptionId && pendingSubId !== subscriptionId) return;
+
+    await activatePlanAfterPayment({
+      waId,
+      planCode: pendingPlanCode,
+      method: pendingMethod,
+      subscriptionId: pendingMethod === "CARD" ? (subscriptionId || pendingSubId) : "",
+    });
+
     return;
   } catch (e) {
     safeLogError("Erro webhook Asaas:", e);
@@ -692,6 +804,20 @@ function paymentMethodText() {
   return "*Forma de pagamento* 💳\n\n1) Cartão\n2) Pix\n\nResponda com 1 ou 2.";
 }
 async function buildMySubscriptionText(waId) {
+  // Se estiver aguardando pagamento, mostra isso
+  const status = await getStatus(waId);
+  if (status === "PAYMENT_PENDING") {
+    const planCode = (await redisGet(kPendingPlan(waId))) || "";
+    const method = (await redisGet(kPendingMethod(waId))) || "";
+    const plan = findPlanByCode(planCode);
+    return (
+      "*Minha assinatura*\n\n" +
+      "Status: *Aguardando confirmação de pagamento*\n" +
+      `Plano escolhido: *${plan?.name || "—"}*\n` +
+      `Forma: *${method === "PIX" ? "Pix" : method === "CARD" ? "Cartão" : "—"}*`
+    );
+  }
+
   const planCode = await getPlanCode(waId);
   if (!planCode) {
     const used = await getFreeUsed(waId);
@@ -727,7 +853,6 @@ async function buildMySubscriptionText(waId) {
 
 // ===== menu return helpers (não trava no menu) =====
 async function setMenuReturn(waId, status) {
-  // só grava se não existir (para não ser sobrescrito por submenus)
   const cur = await redisGet(kMenuReturn(waId));
   if (!cur) await redisSet(kMenuReturn(waId), status);
 }
@@ -747,7 +872,6 @@ async function maybeCleanup() {
   const now = Date.now();
   if (now - last < 60 * 60 * 1000) return;
   await redisSet(kCleanupTick(), String(now));
-  // MVP: sem scan de keys (Upstash REST não é ótimo para scan sem custo).
 }
 
 // ===================== IDEMPOTÊNCIA =====================
@@ -821,25 +945,35 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    // ===================== SE ESTÁ AGUARDANDO PAGAMENTO =====================
+    if (status === "PAYMENT_PENDING") {
+      // Se não for "menu", mantém parado aguardando
+      await sendWhatsAppText(
+        waId,
+        "⏳ Estou aguardando a confirmação do seu pagamento pelo Asaas.\n\n" +
+        "Assim que confirmar, eu te aviso aqui e seu plano será ativado ✅\n\n" +
+        "Se quiser, digite *MENU* para ver seu status."
+      );
+      return;
+    }
+
     // ===================== MENU FLOW (não prende o usuário) =====================
     if (status === "MENU") {
-      // Se o usuário não enviar 1..6, sai do menu e trata como “nova descrição”
       if (!["1", "2", "3", "4", "5", "6"].includes(text)) {
         const back = (await popMenuReturn(waId)) || "ACTIVE";
         await setStatus(waId, back);
         status = back;
         // NÃO return: continua o processamento abaixo com o texto como descrição.
       } else {
-        // opções do menu
         if (text === "1") {
           const info = await buildMySubscriptionText(waId);
           await sendWhatsAppText(waId, info);
-          // volta ao fluxo normal (sem prender no menu)
           const back = (await popMenuReturn(waId)) || "ACTIVE";
           await setStatus(waId, back);
           return;
         }
         if (text === "2") {
+          await clearMenuReturn(waId);
           await setStatus(waId, "WAIT_PLAN");
           await sendWhatsAppText(waId, plansMenuText());
           return;
@@ -879,11 +1013,9 @@ app.post("/webhook", async (req, res) => {
         return;
       }
       if (text !== "1") {
-        // sai e volta ao fluxo
         const back = (await popMenuReturn(waId)) || "ACTIVE";
         await setStatus(waId, back);
         status = back;
-        // segue fluxo normal
       } else {
         const subId = await redisGet(kAsaasSubscriptionId(waId));
         if (!subId) {
@@ -935,7 +1067,6 @@ app.post("/webhook", async (req, res) => {
 
     // ===================== ONBOARDING =====================
     if (status === "WAIT_NAME") {
-      // pergunta só uma vez
       await sendWhatsAppText(waId, "Oi! 🙂\nQual é o seu *nome completo*?");
       await setStatus(waId, "WAIT_NAME_VALUE");
       return;
@@ -998,23 +1129,33 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Cartão (recorrente)
+      // Cartão (recorrente) — NÃO ativa aqui
       if (text === "1") {
         try {
           const r = await createCardSubscription({ waId, plan });
-          await setStatus(waId, "ACTIVE");
+
+          await setPendingPayment({
+            waId,
+            planCode: plan.code,
+            method: "CARD",
+            subId: r.subscriptionId,
+          });
+
+          await setStatus(waId, "PAYMENT_PENDING");
+
           if (r.link) {
             await sendWhatsAppText(
               waId,
-              `✅ Plano ativado: *${plan.name}*!\n\nFinalize o pagamento por aqui:\n${r.link}`
+              `🧾 *Pagamento gerado!*\n\nFinalize por aqui:\n${r.link}\n\n` +
+              "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
             );
           } else {
             await sendWhatsAppText(
               waId,
-              `✅ Plano ativado: *${plan.name}*!\n\nSe o Asaas solicitar confirmação do pagamento, conclua por lá.`
+              "🧾 *Pagamento gerado!*\n\n" +
+              "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
             );
           }
-          await sendWhatsAppText(waId, "Agora é só me mandar o que você vende/serviço que oferece 🙂");
         } catch (e) {
           safeLogError("Erro criando assinatura Asaas:", e);
           await sendWhatsAppText(
@@ -1027,24 +1168,25 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // Pix (30 dias a partir da ativação — MVP libera após gerar link)
+      // Pix — NÃO ativa aqui
       if (text === "2") {
         try {
           const r = await createPixPayment({ waId, plan });
 
-          await setPlanCode(waId, plan.code);
-          await setQuotaMonth(waId, currentMonthKey());
-          await setQuotaUsed(waId, 0);
+          await setPendingPayment({
+            waId,
+            planCode: plan.code,
+            method: "PIX",
+            paymentId: r.paymentId,
+          });
 
-          const validUntil = Date.now() + 30 * 24 * 60 * 60 * 1000;
-          await setPixValidUntil(waId, validUntil);
-          await setStatus(waId, "ACTIVE");
+          await setStatus(waId, "PAYMENT_PENDING");
 
           await sendWhatsAppText(
             waId,
-            `✅ Plano ativado: *${plan.name}*!\n\nPague via Pix neste link:\n${r.invoiceUrl || r.link || ""}`
+            `🧾 *Pagamento Pix gerado!*\n\nPague neste link:\n${r.invoiceUrl || r.link || ""}\n\n` +
+            "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
           );
-          await sendWhatsAppText(waId, "Agora é só me mandar o que você vende/serviço que oferece 🙂");
         } catch (e) {
           safeLogError("Erro criando pagamento Pix Asaas:", e);
           await sendWhatsAppText(
@@ -1101,15 +1243,12 @@ app.post("/webhook", async (req, res) => {
       const isRefine = looksLikeRefinement(text);
       const isExtraInfo = looksLikeAdditionalInfo(text);
 
-      // Se não parece refino nem info extra, é uma nova descrição (reset do contexto)
       if (!isRefine && !isExtraInfo) {
         await clearDraft(waId);
         await clearRefineCount(waId);
         await clearLastDescription(waId);
         await clearLastInput(waId);
-        // segue como nova descrição abaixo
       } else {
-        // Refino / info extra
         let instruction = "";
         let baseText = lastInput || draftToUserText(prevDraft) || "";
 
@@ -1122,7 +1261,6 @@ app.post("/webhook", async (req, res) => {
           instruction = extractImprovementInstruction(text) || text;
         }
 
-        // Após 2 refinamentos, o próximo conta como NOVA descrição (consome quota/trial)
         let nextRef = refineCount + 1;
         if (refineCount >= MAX_REFINES_PER_DESCRIPTION) {
           const okConsume = await consumeOneDescriptionOrBlock(waId);
@@ -1131,7 +1269,7 @@ app.post("/webhook", async (req, res) => {
             await sendWhatsAppText(waId, "Você atingiu o limite do seu plano/trial.\nDigite *MENU* para ver opções.");
             return;
           }
-          nextRef = 1; // começa novo ciclo
+          nextRef = 1;
         }
         await setRefineCount(waId, nextRef);
 
