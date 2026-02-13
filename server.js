@@ -229,6 +229,9 @@ async function normalizeOnboardingStatus(waId, status) {
   const name = await getFullName(waId);
   const doc = await getDoc(waId);
 
+  /**
+   * Não “corrigir” estados intencionais (menu/compra/pagamento pendente etc.)
+   */
   const doNotNormalize = new Set([
     "MENU",
     "MENU_CANCEL_CONFIRM",
@@ -236,16 +239,17 @@ async function normalizeOnboardingStatus(waId, status) {
     "MENU_UPDATE_DOC",
     "WAIT_PLAN",
     "WAIT_PAYMETHOD",
+    "WAIT_DOC", // usado para coletar CPF/CNPJ apenas na contratação do plano
     "PAYMENT_PENDING",
     "BLOCKED",
     "ACTIVE",
   ]);
   if (doNotNormalize.has(status)) return status;
 
-  if (name && doc && (status === "WAIT_NAME" || status === "WAIT_NAME_VALUE" || status === "WAIT_DOC")) {
+  // Se já tem nome, não deve ficar voltando a pedir nome novamente.
+  if (name && (status === "WAIT_NAME" || status === "WAIT_NAME_VALUE")) {
     return "ACTIVE";
   }
-  if (name && !doc && (status === "WAIT_NAME" || status === "WAIT_NAME_VALUE")) return "WAIT_DOC";
 
   return status;
 }
@@ -945,6 +949,7 @@ async function resetTestNumber(waId) {
     kMenuReturn(waId),
 
     `tmp:planchoice:${waId}`,
+    `tmp:paymethod:${waId}`,
   ];
 
   for (const k of keysToDelete) {
@@ -1163,26 +1168,144 @@ app.post("/webhook", async (req, res) => {
       }
       await setFullName(waId, name);
 
-      await sendWhatsAppText(waId, `Perfeito, ${name.split(" ")[0]}! Agora vamos ativar seu plano 🙂`);
+      // Fluxo correto: agradece o nome e libera o trial (5 descrições) sem pedir CPF/CNPJ agora.
+      await sendWhatsAppText(waId, `Perfeito, ${name.split(" ")[0]}! 🙂`);
       await sendWhatsAppText(
         waId,
-        "Me envie seu *CPF ou CNPJ* (somente números).\nÉ só para registrar o pagamento."
+        "✅ Você já pode usar *5 descrições gratuitas* para testar.
+
+" +
+          'Me mande agora o que você vende ou o serviço que oferece (ex: "Faço bolo de chocolate R$35").
+
+' +
+          "Quando as 5 acabarem, eu te mostro os planos para continuar."
       );
 
-      await setStatus(waId, "WAIT_DOC");
+      await setStatus(waId, "ACTIVE");
       return;
     }
 
     if (status === "WAIT_DOC") {
+      // Coleta CPF/CNPJ apenas para contratação / troca de plano
       const doc = cleanDoc(text);
       if (doc.length !== 11 && doc.length !== 14) {
         await sendWhatsAppText(waId, "CPF/CNPJ inválido. Me envie somente números (11 ou 14 dígitos).");
         return;
       }
+
       await setDoc(waId, doc);
 
-      await setStatus(waId, "WAIT_PLAN");
-      await sendWhatsAppText(waId, plansMenuText());
+      // Retoma o fluxo de pagamento de onde parou (Pix/Cartão)
+      const planChoice = await redisGet(`tmp:planchoice:${waId}`);
+      const payMethod = await redisGet(`tmp:paymethod:${waId}`); // "1" cartão | "2" pix
+
+      const plan = PLANS[Number(planChoice || 0)];
+      if (!plan || !["1", "2"].includes(String(payMethod || ""))) {
+        await sendWhatsAppText(waId, "CPF/CNPJ registrado ✅
+
+Agora escolha um plano para continuar:");
+        await setStatus(waId, "WAIT_PLAN");
+        await sendWhatsAppText(waId, plansMenuText());
+        return;
+      }
+
+      // Limpa o temp de método (planchoice mantemos porque ainda pode precisar)
+      await redisDel(`tmp:paymethod:${waId}`);
+
+      if (String(payMethod) === "1") {
+        try {
+          const r = await createCardSubscription({ waId, plan });
+
+          await setPendingPayment({
+            waId,
+            planCode: plan.code,
+            method: "CARD",
+            subId: r.subscriptionId,
+          });
+
+          await setStatus(waId, "PAYMENT_PENDING");
+
+          if (r.link) {
+            await sendWhatsAppText(
+              waId,
+              `🧾 *Pagamento gerado!*
+
+Finalize por aqui:
+${r.link}
+
+` +
+                "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
+            );
+          } else {
+            await sendWhatsAppText(
+              waId,
+              "🧾 *Pagamento gerado!*
+
+" +
+                "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
+            );
+          }
+        } catch (e) {
+          safeLogError("Erro criando assinatura Asaas:", e);
+          await sendWhatsAppText(
+            waId,
+            "Não consegui gerar o pagamento agora.
+
+" +
+              "Digite *MENU* e tente novamente em *Mudar plano*."
+          );
+          await setStatus(waId, "WAIT_PLAN");
+        }
+        return;
+      }
+
+      // Pix
+      try {
+        const r = await createPixPayment({ waId, plan });
+
+        await setPendingPayment({
+          waId,
+          planCode: plan.code,
+          method: "PIX",
+          paymentId: r.paymentId,
+        });
+
+        await setStatus(waId, "PAYMENT_PENDING");
+
+        await sendWhatsAppText(
+          waId,
+          `🧾 *Pagamento Pix gerado!*
+
+Pague neste link:
+${r.invoiceUrl || r.link || ""}
+
+` +
+            "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
+        );
+      } catch (e) {
+        safeLogError("Erro criando pagamento Pix Asaas:", e);
+        await sendWhatsAppText(
+          waId,
+          "Não consegui gerar o Pix agora.
+
+" +
+            "Digite *MENU* e tente novamente em *Mudar plano*."
+        );
+        await setStatus(waId, "WAIT_PLAN");
+      }
+      return;
+    }
+      await setDoc(waId, doc);
+
+      // Após cadastro (nome + CPF/CNPJ), libera experiência de "primeiro contato":
+      // trial com 5 descrições grátis sem obrigar escolha de plano.
+      await setStatus(waId, "ACTIVE");
+      await sendWhatsAppText(
+        waId,
+        "Cadastro concluído ✅\n\nVocê tem *5 descrições grátis* para testar.\n" +
+          'Me mande agora o que você vende/serviço que oferece (ex: "Faço bolo de chocolate R$35").\n\n' +
+          "Se quiser ver planos, digite *MENU*."
+      );
       return;
     }
 
@@ -1208,6 +1331,20 @@ app.post("/webhook", async (req, res) => {
       if (!plan) {
         await setStatus(waId, "WAIT_PLAN");
         await sendWhatsAppText(waId, plansMenuText());
+        return;
+      }
+
+      // Se ainda não temos CPF/CNPJ, pede agora (apenas na contratação do plano)
+      const existingDoc = await getDoc(waId);
+      if (!existingDoc) {
+        await redisSet(`tmp:paymethod:${waId}`, text); // guarda 1/2 para retomar depois
+        await setStatus(waId, "WAIT_DOC");
+        await sendWhatsAppText(
+          waId,
+          "Antes de gerar o pagamento, me envie seu *CPF ou CNPJ* (somente números).
+" +
+            "É só para registrar o pagamento (eu não mostro nem registro em logs)."
+        );
         return;
       }
 
