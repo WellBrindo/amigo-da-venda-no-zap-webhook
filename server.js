@@ -229,19 +229,74 @@ async function setDoc(waId, doc) {
 // ===================== CONDIÇÕES SALVAS / PREFERÊNCIAS =====================
 async function getPrefs(waId) {
   const u = await getUser(waId);
-  const p = u?.prefs || {};
+  const p = { ...(u?.prefs || {}), ...(u?.structBasePrefs || {}) };
   return {
-    allowBullets: p.allowBullets !== false,               // default true
-    allowConditionsBlock: p.allowConditionsBlock !== false, // default true
-    allowConditionIcons: p.allowConditionIcons !== false, // default true (📍 💰 🕒)
+    // Estrutura (defaults do projeto)
+    allowBullets: p.allowBullets !== false,                     // default true
+    allowConditionsBlock: p.allowConditionsBlock !== false,     // default true
+    allowConditionIcons: p.allowConditionIcons !== false,       // default true (📍 💰 🕒)
+
+    // Preferências gerais de formatação (defaults do projeto)
+    allowEmojis: p.allowEmojis !== false,                       // default true (afeta título, bullets e ícones)
+    allowBold: p.allowBold !== false,                           // default true (uso de *negrito*)
+    forceAllBold: p.forceAllBold === true,                      // default false
+    plainText: p.plainText === true,                            // default false (sem markdown, sem emoji, sem bullets)
+    oneParagraph: p.oneParagraph === true,                      // default false (tudo corrido / sem tabulação)
+    tableLayout: p.tableLayout === true,                        // default false (formato tabela texto)
   };
 }
-async function setPrefs(waId, patch) {
+async function setPrefs(waId, patch) {(waId, patch) {
   const u = await getUser(waId);
   u.prefs = { ...(u.prefs || {}), ...(patch || {}) };
   await setUser(waId, u);
 }
 
+
+// ===================== BASE E PENDÊNCIAS DE FORMATAÇÃO (ESTRUTURA) =====================
+// A "base do projeto" é aplicada quando não há base customizada.
+// Mudanças estruturais feitas pelo usuário em um refinamento podem ser aplicadas no momento,
+// mas antes de criar uma NOVA descrição perguntamos se ele quer manter como base.
+
+async function getStructBasePrefs(waId) {
+  const u = await getUser(waId);
+  return u?.structBasePrefs || null; // null = usar base do projeto
+}
+async function setStructBasePrefs(waId, patch) {
+  const u = await getUser(waId);
+  const cur = u?.structBasePrefs || {};
+  u.structBasePrefs = { ...cur, ...(patch || {}) };
+  await setUser(waId, u);
+}
+async function clearStructBasePrefs(waId) {
+  const u = await getUser(waId);
+  delete u.structBasePrefs;
+  await setUser(waId, u);
+}
+
+async function resetAllFormattingPrefs(waId) {
+  const u = await getUser(waId);
+  delete u.prefs;
+  delete u.structBasePrefs;
+  delete u.pendingStruct;
+  delete u.pendingStructQueuedText;
+  await setUser(waId, u);
+}
+
+async function getPendingStruct(waId) {
+  const u = await getUser(waId);
+  return u?.pendingStruct || null;
+}
+async function setPendingStruct(waId, pending) {
+  const u = await getUser(waId);
+  u.pendingStruct = pending || null;
+  await setUser(waId, u);
+}
+async function clearPendingStruct(waId) {
+  const u = await getUser(waId);
+  delete u.pendingStruct;
+  delete u.pendingStructQueuedText;
+  await setUser(waId, u);
+}
 async function getSavedConditions(waId) {
   const u = await getUser(waId);
   return u?.savedConditions || {};
@@ -604,37 +659,104 @@ function hasAnyKeys(obj) {
 }
 
 function detectPrefsUpdate(messageText) {
-  const t = String(messageText || "").toLowerCase();
+  const raw = String(messageText || "");
+  const t = raw.toLowerCase();
 
-  const patch = {};
+  const overrides = {};
+  let wantsPersist = false;
+  let wantsReset = false;
 
-  // Bullets
-  if (/(sem\s+bullets?|sem\s+lista|sem\s+t[oó]picos|tira\s+bullets?|remover\s+bullets?)/i.test(t)) {
-    patch.allowBullets = false;
-  }
-  if (/(pode\s+usar\s+bullets?|coloque\s+bullets?|com\s+bullets?)/i.test(t)) {
-    patch.allowBullets = true;
-  }
-
-  // Condições bloco
-  if (/(sem\s+condi[cç][oõ]es|tira\s+condi[cç][oõ]es|remover\s+condi[cç][oõ]es)/i.test(t)) {
-    patch.allowConditionsBlock = false;
-  }
-  if (/(pode\s+colocar\s+condi[cç][oõ]es|com\s+condi[cç][oõ]es)/i.test(t)) {
-    patch.allowConditionsBlock = true;
+  // Intenção de persistência ("use isso daqui pra frente", "sempre", etc.)
+  if (/(daqui\s+pra\s+frente|a\s+partir\s+de\s+agora|sempre|para\s+as\s+pr[oó]ximas|nas\s+pr[oó]ximas|mantenha\s+isso|guarda\s+isso|salve\s+isso|deixe\s+assim)/i.test(t)) {
+    wantsPersist = true;
   }
 
-  // Emojis das condições (📍💰🕒)
-  if (/(sem\s+emoji|sem\s+emojis|tira\s+os\s+emojis|sem\s+📍|sem\s+💰|sem\s+🕒)/i.test(t)) {
-    patch.allowConditionIcons = false;
-  }
-  if (/(pode\s+usar\s+emojis|com\s+📍|com\s+💰|com\s+🕒)/i.test(t)) {
-    patch.allowConditionIcons = true;
+  // Intenção de voltar ao modelo base
+  if (/(voltar\s+ao\s+padr[aã]o|voltar\s+ao\s+modelo\s+base|voltar\s+ao\s+projeto\s+base|pode\s+voltar\s+ao\s+normal|usar\s+o\s+padr[aã]o\s+do\s+projeto|resetar\s+formata[cç][aã]o|remover\s+prefer[eê]ncias\s+de\s+formata[cç][aã]o)/i.test(t)) {
+    wantsReset = true;
   }
 
-  return patch;
+  // Emojis (geral)
+  if (/(sem\s+emoji|sem\s+emojis|retire\s+todos\s+os\s+emojis|tira\s+os\s+emojis|n[aã]o\s+use\s+emoji|sem\s+figurinhas?\s+no\s+texto)/i.test(t)) {
+    overrides.allowEmojis = false;
+    overrides.allowConditionIcons = false;
+  }
+  if (/(pode\s+usar\s+emojis|com\s+emojis|use\s+emojis)/i.test(t)) {
+    overrides.allowEmojis = true;
+  }
+
+  // Bullets / lista
+  if (/(sem\s+bullets?|sem\s+lista|sem\s+t[oó]picos|tira\s+bullets?|remover\s+bullets?|sem\s+itens)/i.test(t)) {
+    overrides.allowBullets = false;
+  }
+  if (/(pode\s+usar\s+bullets?|coloque\s+bullets?|com\s+bullets?|pode\s+usar\s+lista)/i.test(t)) {
+    overrides.allowBullets = true;
+  }
+
+  // Condições
+  if (/(sem\s+condi[cç][oõ]es|tira\s+condi[cç][oõ]es|remover\s+condi[cç][oõ]es|sem\s+local\s+pre[cç]o\s+hor[aá]rio)/i.test(t)) {
+    overrides.allowConditionsBlock = false;
+  }
+  if (/(pode\s+colocar\s+condi[cç][oõ]es|com\s+condi[cç][oõ]es|inclua\s+local\s+pre[cç]o\s+hor[aá]rio)/i.test(t)) {
+    overrides.allowConditionsBlock = true;
+  }
+
+  // Ícones das condições (📍💰🕒) — só faz sentido se emojis estiverem liberados
+  if (/(sem\s+📍|sem\s+💰|sem\s+🕒|sem\s+icones?\s+de\s+condi[cç][oõ]es|sem\s+emojis?\s+nas\s+condi[cç][oõ]es)/i.test(t)) {
+    overrides.allowConditionIcons = false;
+  }
+  if (/(com\s+📍|com\s+💰|com\s+🕒|pode\s+usar\s+icones?\s+nas\s+condi[cç][oõ]es)/i.test(t)) {
+    overrides.allowConditionIcons = true;
+  }
+
+  // Negrito
+  if (/(sem\s+negrito|tira\s+o\s+negrito|retire\s+o\s+negrito|sem\s+asteriscos|n[aã]o\s+use\s+\*|n[aã]o\s+use\s+formata[cç][aã]o)/i.test(t)) {
+    overrides.allowBold = false;
+    overrides.forceAllBold = false;
+  }
+  if (/(tudo\s+em\s+negrito|deixe\s+tudo\s+em\s+negrito|coloque\s+tudo\s+em\s+negrito)/i.test(t)) {
+    overrides.allowBold = true;
+    overrides.forceAllBold = true;
+  }
+  if (/(pode\s+usar\s+negrito|use\s+negrito)/i.test(t)) {
+    overrides.allowBold = true;
+  }
+
+  // Texto corrido / sem tabulação / um parágrafo
+  if (/(tudo\s+corrido|texto\s+corrido|sem\s+tabula[cç][aã]o|sem\s+quebra\s+de\s+linha|um\s+par[aá]grafo|em\s+um\s+par[aá]grafo\s+s[oó])/i.test(t)) {
+    overrides.oneParagraph = true;
+    // se pediu 1 parágrafo, geralmente não quer bullets
+    if (!("allowBullets" in overrides)) overrides.allowBullets = false;
+  }
+  if (/(pode\s+quebrar\s+linha|com\s+quebras\s+de\s+linha|pode\s+ser\s+em\s+blocos)/i.test(t)) {
+    overrides.oneParagraph = false;
+  }
+
+  // Formato tabela
+  if (/(em\s+forma\s+de\s+tabela|formato\s+tabela|coloque\s+em\s+tabela)/i.test(t)) {
+    overrides.tableLayout = true;
+    overrides.oneParagraph = false;
+  }
+  if (/(n[aã]o\s+precisa\s+de\s+tabela|sem\s+tabela)/i.test(t)) {
+    overrides.tableLayout = false;
+  }
+
+  // Texto puro (sem emojis, sem negrito, sem bullets)
+  if (/(texto\s+puro|sem\s+formata[cç][aã]o\s+nenhuma|sem\s+formata[cç][aã]o|sem\s+markdown)/i.test(t)) {
+    overrides.plainText = true;
+    overrides.allowEmojis = false;
+    overrides.allowBold = false;
+    overrides.allowConditionIcons = false;
+    overrides.allowBullets = false;
+  }
+  if (/(pode\s+usar\s+formata[cç][aã]o|voltar\s+com\s+formata[cç][aã]o)/i.test(t)) {
+    overrides.plainText = false;
+  }
+
+  const hasStructural = Object.keys(overrides).length > 0 || wantsReset;
+
+  return { overrides, wantsPersist, wantsReset, hasStructural };
 }
-
 function detectRemoveSavedConditionsFields(messageText) {
   const t = String(messageText || "").toLowerCase();
   const fields = [];
@@ -692,8 +814,161 @@ function sanitizeWhatsAppMarkdown(text) {
   return t.trim();
 }
 
-async function openaiGenerateDescription({ baseUserText, previousDescription, instruction, fullName, prefs, savedConditions, styleAnchor }) {
+
+function stripEmojis(text) {
+  // Remove caracteres de emoji (Extended_Pictographic) e variações
+  let t = String(text || "");
+  try {
+    t = t.replace(/[\p{Extended_Pictographic}]/gu, "");
+  } catch {
+    // fallback simples (remove alguns emojis comuns)
+    t = t.replace(/[📍💰🕒✅❌⭐️✨🔥😍😊😉😄😃😁😂🤣🙂🙌👍👎💡📌📣]/g, "");
+  }
+  // remove variation selectors e chars invisíveis comuns
+  t = t.replace(/\uFE0F/g, "").replace(/\u200D/g, "");
+  // limpa espaços duplicados
+  t = t.replace(/[ \t]{2,}/g, " ").replace(/\n[ \t]+/g, "\n");
+  return t.trim();
+}
+
+function stripBold(text) {
+  let t = String(text || "");
+  // remove marcações de negrito do WhatsApp (*texto*)
+  t = t.replace(/\*([^*]+)\*/g, "$1");
+  t = t.replace(/\*/g, "");
+  return t;
+}
+
+function toOneParagraph(text) {
+  let t = String(text || "").trim();
+  // troca quebras por espaço
+  t = t.replace(/\s*\n\s*/g, " ");
+  t = t.replace(/[ \t]{2,}/g, " ");
+  return t.trim();
+}
+
+function stripBullets(text) {
+  let t = String(text || "");
+  // remove bullets comuns no começo da linha
+  t = t.replace(/^\s*[•\-–—]\s+/gm, "");
+  t = t.replace(/^\s*\d+[\)\.]\s+/gm, "");
+  return t;
+}
+
+function normalizeConditionsIcons(text) {
+  let t = String(text || "");
+  // troca ícones por labels
+  t = t.replace(/📍\s*/g, "Local: ");
+  t = t.replace(/💰\s*/g, "Preço: ");
+  t = t.replace(/🕒\s*/g, "Horário: ");
+  return t;
+}
+
+function applyFormattingEnforcement(text, formatting) {
+  const fmt = formatting || {};
+  let t = String(text || "");
+
+  if (fmt.plainText) {
+    // texto puro: sem emojis, sem negrito, sem bullets
+    t = stripEmojis(t);
+    t = stripBold(t);
+    t = stripBullets(t);
+    t = normalizeConditionsIcons(t);
+    // remove pipes excessivos de tabela se não solicitado
+    t = t.replace(/\|{2,}/g, "|");
+    return t.trim();
+  }
+
+  if (fmt.allowEmojis === false) {
+    t = stripEmojis(t);
+    // se pediu sem emojis, também normaliza os ícones para texto (se existirem)
+    t = normalizeConditionsIcons(t);
+  } else if (fmt.allowConditionIcons === false) {
+    t = normalizeConditionsIcons(t);
+  }
+
+  if (fmt.allowBold === false) {
+    t = stripBold(t);
+  }
+
+  if (fmt.allowBullets === false) {
+    t = stripBullets(t);
+  }
+
+  if (fmt.oneParagraph) {
+    t = stripBullets(t);
+    t = toOneParagraph(t);
+  }
+
+  if (fmt.forceAllBold && fmt.allowBold !== false) {
+    // coloca tudo em negrito com um par de asteriscos
+    t = stripBold(t);
+    t = `*${t}*`;
+  }
+
+  return t.trim();
+}
+
+
+async function openaiGenerateDescription({ baseUserText, previousDescription, instruction, fullName, prefs, savedConditions, styleAnchor, formatting }) {
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente.");
+
+  const fmt = formatting || {};
+
+  // Regras de estrutura base do projeto (serão adaptadas por fmt)
+  const structureLines = [];
+
+  if (fmt.plainText) {
+    structureLines.push("- Entregue em TEXTO PURO: sem emojis, sem negrito (sem *), sem markdown e sem bullets.");
+  } else {
+    if (fmt.allowBold) {
+      structureLines.push("- Use negrito (*...*) com moderação, a menos que o usuário peça diferente.");
+    } else {
+      structureLines.push("- NÃO use negrito, NÃO use asteriscos (*).");
+    }
+
+    if (fmt.allowEmojis) {
+      structureLines.push('- Se fizer sentido, pode usar emojis com parcimônia (3 a 6), mas SEM exageros.');
+      structureLines.push('- Título na 1ª linha pode ter 1 emoji no início, se não houver pedido contrário.');
+    } else {
+      structureLines.push("- NÃO use nenhum emoji ou símbolo gráfico do tipo emoji.");
+      structureLines.push("- Título na 1ª linha SEM emoji.");
+    }
+
+    if (fmt.tableLayout) {
+      structureLines.push("- Entregue em formato de tabela de texto simples usando '|' (sem markdown complexo), com linhas curtas.");
+    } else if (fmt.oneParagraph) {
+      structureLines.push("- Entregue tudo em UM ÚNICO PARÁGRAFO (texto corrido), sem listas e sem quebras de linha.");
+    } else {
+      // Layout padrão escaneável
+      structureLines.push("- Estrutura preferida (quando aplicável):");
+      structureLines.push("  1) Título");
+      structureLines.push("  2) Linha em branco");
+      structureLines.push("  3) Proposta de valor (até 2 linhas)");
+      if (fmt.allowBullets) {
+        structureLines.push("  4) Até 3 itens (bullets) SE fizer sentido (não é obrigatório).");
+      } else {
+        structureLines.push("  4) NÃO use bullets/listas.");
+      }
+      structureLines.push("  5) Impulso de venda");
+      if (fmt.allowConditionsBlock) {
+        structureLines.push("  6) Condições neutras (Local/Preço/Horário) apenas se houver dados ou se fizer sentido.");
+        if (fmt.allowEmojis && fmt.allowConditionIcons) {
+          structureLines.push("     Pode usar ícones 📍 💰 🕒 nas condições.");
+        } else {
+          structureLines.push("     Não use ícones nas condições; use 'Local:', 'Preço:', 'Horário:'.");
+        }
+      } else {
+        structureLines.push("  6) NÃO inclua bloco de condições.");
+      }
+      structureLines.push("  7) CTA final adequado ao segmento.");
+    }
+  }
+
+  // Âncora de estilo: quando houver, peça para manter o mesmo padrão (sem copiar texto)
+  const styleHint = styleAnchor
+    ? `\nPADRÃO APROVADO (ÂNCORA): use como referência de estrutura/tom/ritmo, sem copiar literalmente:\n---\n${styleAnchor}\n---\n`
+    : "";
 
   const system = `
 Você é o "Amigo das Vendas": cria anúncios prontos para WhatsApp (curtos, escaneáveis e vendáveis).
@@ -701,116 +976,85 @@ Você é o "Amigo das Vendas": cria anúncios prontos para WhatsApp (curtos, esc
 ENTREGA
 - Entregue SOMENTE o anúncio final. Sem explicações, sem rascunhos e sem títulos extras.
 - Nunca invente informações. Se faltar algo (local, preço, prazo, entrega, horários, etc.), use termos neutros:
-  "sob consulta", "a combinar", "conforme disponibilidade", "valores sob consulta", "entrega/atendimento sob consulta".
+  "sob consulta", "a combinar", "conforme disponibilidade", "valores sob consulta", "atendimento sob consulta".
 
-REGRAS DE FORMATAÇÃO (OBRIGATÓRIAS)
-- Título sempre na 1ª linha, em negrito, com 1 emoji no início: "🍰 *Título*"
-- Sempre pular 1 linha depois do título.
-- Frases curtas e escaneáveis (WhatsApp).
-- Emojis com moderação: 3 a 6 no total, no máximo 1 por linha.
-- Negrito apenas para palavras-chave (máx. 4 destaques no texto todo). Não colocar tudo em negrito.
-- Respeite as preferências do cliente (quando informadas):
-  - Se "allowBullets" for false: NÃO use bullets.
-  - Se "allowConditionsBlock" for false: NÃO inclua a seção de condições (📍/💰/🕒).
-  - Se "allowConditionIcons" for false: se precisar mostrar condições, use rótulos sem emojis ("Local:", "Preço:", "Horário:").
+PRIORIDADE ABSOLUTA
+- A solicitação explícita do usuário sempre vence quaisquer regras internas.
+- Se o usuário pedir "sem emojis", "texto corrido", "sem negrito", "em tabela", etc., obedeça integralmente.
 
-- Bullets (✅) APENAS se fizer sentido E se houver informações reais fornecidas pelo cliente; no máximo 3.
-- NUNCA use bullets genéricos só para “preencher”. Se não houver info suficiente, NÃO use bullets.
+REGRAS DE FORMATAÇÃO (DINÂMICAS)
+${structureLines.join("\n")}
 
-ESTRUTURA (ORDEM PADRÃO)
-[1] TÍTULO (emoji + negrito)
-[2] Proposta de valor (2 linhas)
-[3] Diferenciais (opcional): até 3 bullets (✅) SOMENTE se fizer sentido e se houver informações reais.
-[4] Impulso de venda (2–3 linhas curtas, tom de anúncio)
-[5] Condições (opcional):
-    - Só inclua se houver dados informados pelo cliente (no pedido atual) OU dados salvos do cliente.
-    - Respeite as preferências:
-      - Se allowConditionsBlock for false: NÃO inclua esta seção.
-      - Se allowConditionIcons for false: use rótulos sem emojis ("Local:", "Preço:", "Horário:").
-      - Se allowConditionIcons for true: você pode usar (📍/💰/🕒) com moderação.
-[6] CTA (1 linha final): pedir 1–2 infos objetivas adequadas ao segmento, em negrito.
-
-REGRAS DE PRODUTO x SERVIÇO
-- Identifique se é PRODUTO ou SERVIÇO pelo texto do cliente.
-- PRODUTO:
-  - Se não tiver preço, use "valores sob consulta".
-  - Se entrega/retirada não foi informada, use "entrega/retirada a combinar" (ou "sob consulta").
-- SERVIÇO:
-  - Nunca falar de entrega/retirada.
-  - Se for serviço com agendamento (ex.: sobrancelha, cabelo, manicure): incluir a ideia de "Agende seu horário".
-  - Se for serviço técnico/orçamentado (ex.: pedreiro, encanador, eletricista, manutenção): incluir a ideia de "Solicite seu orçamento".
-  - Nunca usar "Consulte entrega" para serviços.
-
-LINGUAGEM POR SEGMENTO
-- Comida: apetitoso/sabor
-- Beleza: procedimento/resultado
-- Transporte: rota/carga/segurança
-- Manutenção/técnico: solução/rapidez/confiança
-- Sempre soar como anúncio para grupo, natural e direto.
-
-IMPORTANTE
-- Use *asterisco único* para negrito no WhatsApp.
-- Se existir "Descrição anterior" e houver "o que melhorar", gere uma NOVA VERSÃO aplicando o ajuste sem trocar de assunto.
-`.trim();
-
-  const p = prefs || { allowBullets: true, allowConditionsBlock: true, allowConditionIcons: true };
-  const c = savedConditions || {};
-  const style = String(styleAnchor || "").trim();
+REGRAS INTELIGENTES
+- Produto físico: pode usar "Consulte valores" (se não houver preço).
+- Serviço com agendamento: prefira "Agende seu horário".
+- Serviço técnico: prefira "Solicite seu orçamento".
+- Nunca usar "Consulte entrega" para serviços.
+`;
 
   const user = `
-Nome do cliente (se houver): ${fullName || "—"}
+DADOS DO USUÁRIO
+- Nome completo: ${fullName || "não informado"}
 
-Preferências do cliente:
-- allowBullets: ${p.allowBullets}
-- allowConditionsBlock: ${p.allowConditionsBlock}
-- allowConditionIcons: ${p.allowConditionIcons}
+PREFERÊNCIAS DO USUÁRIO (GERAIS)
+${JSON.stringify(prefs || {}, null, 2)}
 
-Condições já salvas do cliente (use se fizer sentido; não invente nada):
-${JSON.stringify(c, null, 2)}
+CONDIÇÕES SALVAS (SE HOUVER)
+${JSON.stringify(savedConditions || {}, null, 2)}
 
-Estilo aprovado anteriormente (se existir):
-${style ? style : "—"}
+CONTEXTO / PEDIDO
+- O que o usuário vende / presta: ${baseUserText || ""}
+- Instrução atual do usuário (refinamento/pedido): ${instruction || ""}
+- Descrição anterior (se houver): ${previousDescription || ""}
 
-Pedido atual do cliente (base):
-${baseUserText || "—"}
+${styleHint}
+`;
 
-Descrição anterior (se houver):
-${previousDescription || "—"}
-
-O que o cliente quer melhorar (se houver):
-${instruction || "—"}
-
-Agora crie a DESCRIÇÃO FINAL.
-- Se houver "Estilo aprovado anteriormente", use como referência de estrutura/ritmo (sem copiar texto).
-- Se houver condições salvas (telefone/endereço/horário/valores), inclua na seção de condições apenas se allowConditionsBlock=true.
-- Se allowConditionIcons=false, NÃO use 📍💰🕒 (use rótulos).
-- Se allowBullets=false, NÃO use bullets.
-`.trim();
-
-  const body = {
+  // OpenAI Responses API
+  const payload = {
     model: OPENAI_MODEL,
     input: [
       { role: "system", content: system },
       { role: "user", content: user },
     ],
+    temperature: 0.7,
   };
 
-  const resp = await fetch("https://api.openai.com/v1/responses", {
+  const res = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
   });
 
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    throw new Error(data?.error?.message || `OpenAI ${resp.status}: erro ao gerar.`);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`OpenAI error: ${res.status} ${err}`);
+  }
+  const data = await res.json();
+
+  // Extrai texto
+  let out = "";
+  if (data.output_text) out = data.output_text;
+  if (!out && Array.isArray(data.output)) {
+    // fallback (caso output_text não exista)
+    const chunks = [];
+    for (const o of data.output) {
+      if (o?.content) {
+        for (const c of o.content) {
+          if (c?.type === "output_text" && c.text) chunks.push(c.text);
+          if (c?.type === "text" && c.text) chunks.push(c.text);
+        }
+      }
+    }
+    out = chunks.join("\n").trim();
   }
 
-  const outText = data.output_text || data?.output?.[0]?.content?.[0]?.text || "";
-  return sanitizeWhatsAppMarkdown(outText);
+  return String(out || "").trim();
 }
 
-// ===================== ASAAS =====================
 async function asaasFetch(path, method, bodyObj) {
   if (!ASAAS_API_KEY) throw new Error("ASAAS_API_KEY ausente.");
 
@@ -1285,7 +1529,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    const text = String(msg.text?.body || "").trim();
+    let text = String(msg.text?.body || "").trim();
     if (!text) return;
 
     // Reset controlado (somente para o número de teste)
@@ -1308,13 +1552,53 @@ app.post("/webhook", async (req, res) => {
     let status = await getStatus(waId);
     status = await normalizeOnboardingStatus(waId, status);
 
-    // ===================== PREFERÊNCIAS (ajustes do usuário) =====================
-    const prefPatch = detectPrefsUpdate(text);
-    if (Object.keys(prefPatch).length) {
-      await setPrefs(waId, prefPatch);
+    // ===================== FORMATAÇÃO (prioridade do usuário) =====================
+    // A mensagem atual pode conter pedidos estruturais (sem emojis, texto corrido, tabela, etc.).
+    // Esses pedidos SEMPRE têm prioridade no anúncio atual.
+    // Persistência: só salvamos como base se o usuário pedir explicitamente, ou se ele confirmar na pergunta antes da próxima descrição.
+
+    // Se estivermos aguardando confirmação de estrutura, processa aqui
+    if (status === "WAIT_STRUCT_CONFIRM") {
+      const pendingS = await getPendingStruct(waId);
+      const ans = text.trim().toLowerCase();
+      const yes = ans === "1" || ans === "sim" || ans === "s" || ans === "manter" || ans === "salvar";
+      const no = ans === "2" || ans === "nao" || ans === "não" || ans === "n" || ans === "voltar" || ans === "reset";
+
+      if (!pendingS || (!yes && !no)) {
+        await sendWhatsAppText(waId, "Responda com:
+1) Manter essas alterações como padrão
+2) Voltar ao modelo base do projeto");
+        return;
+      }
+
+      if (yes) {
+        await setStructBasePrefs(waId, pendingS.patch || {});
+      } else {
+        await resetAllFormattingPrefs(waId);
+      }
+
+      // retoma o fluxo e processa o texto que estava "na fila"
+      const queued = pendingS.queuedText || "";
+      const returnStatus = pendingS.returnStatus || "ACTIVE";
+      await clearPendingStruct(waId);
+      await setStatus(waId, returnStatus);
+      status = returnStatus;
+      text = queued;
     }
 
-    // Remoção explícita de dados salvos (ex.: "não use meu endereço")
+    const fmtIntent = detectPrefsUpdate(text);
+
+    // Reset explícito ao padrão do projeto
+    if (fmtIntent.wantsReset) {
+      await resetAllFormattingPrefs(waId);
+    }
+
+    // Se o usuário explicitou que quer manter daqui pra frente, salvamos como base imediatamente
+    if (fmtIntent.wantsPersist && Object.keys(fmtIntent.overrides).length) {
+      await setStructBasePrefs(waId, fmtIntent.overrides);
+    }
+
+    // Remoção explícita de dados salvos (ex.: "não use meu endereço") (ex.: "não use meu endereço")
     const removeFields = detectRemoveSavedConditionsFields(text);
     if (removeFields.length) {
       await clearSavedConditionsFields(waId, removeFields);
@@ -1787,7 +2071,11 @@ Digite *MENU* para ver opções.`);
         }
         await setRefineCount(waId, nextRef);
 try {
-          const gen = await openaiGenerateDescription({
+          const basePrefsNow = await getPrefs(waId);
+          const formatting = { ...(basePrefsNow || {}), ...((fmtIntent && fmtIntent.overrides) || {}) };
+          if (formatting.allowEmojis === false) formatting.allowConditionIcons = false;
+
+          const genRaw = await openaiGenerateDescription({
             baseUserText: baseText,
             previousDescription: lastDesc,
             instruction,
@@ -1795,9 +2083,21 @@ try {
             prefs: await getPrefs(waId),
             savedConditions: await getSavedConditions(waId),
             styleAnchor: await getStyleAnchor(waId),
+            formatting,
           });
+          const gen = applyFormattingEnforcement(sanitizeWhatsAppMarkdown(genRaw), formatting);
           await setLastDescription(waId, gen);
           await sendWhatsAppText(waId, gen);
+          // Se houve alteração estrutural nesta mensagem (sem emojis, texto corrido, tabela, etc.)
+          // e o usuário não pediu explicitamente para manter daqui pra frente, marcamos para perguntar
+          // antes da PRÓXIMA nova descrição.
+          if (fmtIntent && fmtIntent.hasStructural && !fmtIntent.wantsPersist && !fmtIntent.wantsReset) {
+            if (fmtIntent.overrides && Object.keys(fmtIntent.overrides).length) {
+              await setPendingStruct(waId, { patch: fmtIntent.overrides });
+            }
+          }
+
+
 
           // Se no refinamento o cliente mandou dados (telefone/endereço/horário/etc), oferecemos salvar.
           const extractedConds2 = extractConditionsFromText(text);
@@ -1837,7 +2137,23 @@ Quer que eu *salve essas informações* para incluir nas descrições futuras?
       }
     }
 
-    const draft = mergeDraftFromMessage(await getDraft(waId), text);
+    
+    // ===================== CONFIRMAÇÃO DE BASE ESTRUTURAL (antes de nova descrição) =====================
+    const pendingStruct = await getPendingStruct(waId);
+    if (pendingStruct && pendingStruct.patch && Object.keys(pendingStruct.patch).length) {
+      await setPendingStruct(waId, { ...pendingStruct, queuedText: text, returnStatus: "ACTIVE" });
+      await setStatus(waId, "WAIT_STRUCT_CONFIRM");
+      await sendWhatsAppText(
+        waId,
+        "Antes de criar a próxima descrição: você quer *manter as alterações estruturais* que você fez (ex.: sem emojis, texto corrido, tabela, sem negrito etc.) como padrão para as próximas descrições?
+
+1) Sim, manter como padrão
+2) Não, voltar ao modelo base do projeto"
+      );
+      return;
+    }
+
+const draft = mergeDraftFromMessage(await getDraft(waId), text);
     await setDraft(waId, draft);
 
     const okConsume = await consumeOneDescriptionOrBlock(waId);
@@ -1853,7 +2169,11 @@ Quer que eu *salve essas informações* para incluir nas descrições futuras?
 
     try {
       const baseText = draftToUserText(draft);
-      const gen = await openaiGenerateDescription({
+      const basePrefsNow = await getPrefs(waId);
+      const formatting = { ...(basePrefsNow || {}), ...((fmtIntent && fmtIntent.overrides) || {}) };
+      if (formatting.allowEmojis === false) formatting.allowConditionIcons = false;
+
+      const genRaw = await openaiGenerateDescription({
         baseUserText: baseText,
         previousDescription: "",
         instruction: "",
@@ -1861,7 +2181,10 @@ Quer que eu *salve essas informações* para incluir nas descrições futuras?
         prefs: await getPrefs(waId),
         savedConditions: await getSavedConditions(waId),
         styleAnchor: await getStyleAnchor(waId),
+        formatting,
       });
+
+      const gen = applyFormattingEnforcement(sanitizeWhatsAppMarkdown(genRaw), formatting);
 
       await setLastInput(waId, baseText);
       await setLastDescription(waId, gen);
