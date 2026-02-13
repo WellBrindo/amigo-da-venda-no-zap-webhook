@@ -671,6 +671,8 @@ async function createCardSubscription({ waId, plan }) {
 
   const customerId = await findOrCreateAsaasCustomer({ waId, name, doc });
 
+  // Para cobrança recorrente por cartão, criamos a assinatura e enviamos a invoiceUrl
+  // da primeira cobrança gerada (o cliente informa os dados do cartão na interface do Asaas).
   const sub = await asaasFetch("/v3/subscriptions", "POST", {
     customer: customerId,
     billingType: "CREDIT_CARD",
@@ -684,8 +686,27 @@ async function createCardSubscription({ waId, plan }) {
   if (!subId) throw new Error("Asaas: subscription id não retornou.");
 
   await redisSet(kAsaasSubToWa(subId), waId);
-  const link = sub?.invoiceUrl || sub?.paymentLink || sub?.url || "";
-  return { subscriptionId: subId, link };
+
+  // Buscar as cobranças geradas para obter invoiceUrl (checkout do cartão)
+  let invoiceUrl = "";
+  try {
+    const pays = await asaasFetch(`/v3/subscriptions/${subId}/payments`, "GET");
+    const first = Array.isArray(pays?.data) && pays.data.length ? pays.data[0] : null;
+
+    const payId = first?.id ? String(first.id) : "";
+    if (payId) await redisSet(kAsaasPaymentToWa(payId), waId);
+
+    invoiceUrl = first?.invoiceUrl ? String(first.invoiceUrl) : "";
+  } catch (e) {
+    safeLogError("Asaas subscriptions/{id}/payments falhou:", e);
+  }
+
+  if (!invoiceUrl) {
+    // fallback (algumas respostas podem vir com url em campos diferentes)
+    invoiceUrl = sub?.invoiceUrl || sub?.paymentLink || sub?.url || "";
+  }
+
+  return { subscriptionId: subId, invoiceUrl };
 }
 
 async function createPixPayment({ waId, plan }) {
@@ -1256,13 +1277,13 @@ app.post("/webhook", async (req, res) => {
 
           await setStatus(waId, "PAYMENT_PENDING");
 
-          if (r.link) {
+          if (r.invoiceUrl) {
             await sendWhatsAppText(
               waId,
               `🧾 *Pagamento gerado!*
 
 Finalize por aqui:
-${r.link}
+${r.invoiceUrl}
 
 ` +
                 "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
@@ -1368,10 +1389,10 @@ ${r.invoiceUrl || r.link || ""}
 
           await setStatus(waId, "PAYMENT_PENDING");
 
-          if (r.link) {
+          if (r.invoiceUrl) {
             await sendWhatsAppText(
               waId,
-              `🧾 *Pagamento gerado!*\n\nFinalize por aqui:\n${r.link}\n\n` +
+              `🧾 *Pagamento gerado!*\n\nFinalize por aqui:\n${r.invoiceUrl}\n\n` +
               "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
             );
           } else {
