@@ -1197,9 +1197,7 @@ app.post("/webhook", async (req, res) => {
 
       const plan = PLANS[Number(planChoice || 0)];
       if (!plan || !["1", "2"].includes(String(payMethod || ""))) {
-        await sendWhatsAppText(waId, "CPF/CNPJ registrado ✅
-
-Agora escolha um plano para continuar:");
+        await sendWhatsAppText(waId, "CPF/CNPJ registrado ✅\n\nAgora escolha um plano para continuar:");
         await setStatus(waId, "WAIT_PLAN");
         await sendWhatsAppText(waId, plansMenuText());
         return;
@@ -1235,20 +1233,14 @@ ${r.link}
           } else {
             await sendWhatsAppText(
               waId,
-              "🧾 *Pagamento gerado!*
-
-" +
-                "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
+              "🧾 *Pagamento gerado!*\n\n" + "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
             );
           }
         } catch (e) {
           safeLogError("Erro criando assinatura Asaas:", e);
           await sendWhatsAppText(
             waId,
-            "Não consegui gerar o pagamento agora.
-
-" +
-              "Digite *MENU* e tente novamente em *Mudar plano*."
+            "Não consegui gerar o pagamento agora.\n\n" + "Digite *MENU* e tente novamente em *Mudar plano*."
           );
           await setStatus(waId, "WAIT_PLAN");
         }
@@ -1282,10 +1274,7 @@ ${r.invoiceUrl || r.link || ""}
         safeLogError("Erro criando pagamento Pix Asaas:", e);
         await sendWhatsAppText(
           waId,
-          "Não consegui gerar o Pix agora.
-
-" +
-            "Digite *MENU* e tente novamente em *Mudar plano*."
+          "Não consegui gerar o Pix agora.\n\n" + "Digite *MENU* e tente novamente em *Mudar plano*."
         );
         await setStatus(waId, "WAIT_PLAN");
       }
@@ -1337,9 +1326,7 @@ ${r.invoiceUrl || r.link || ""}
         await setStatus(waId, "WAIT_DOC");
         await sendWhatsAppText(
           waId,
-          "Antes de gerar o pagamento, me envie seu *CPF ou CNPJ* (somente números).
-" +
-            "É só para registrar o pagamento (eu não mostro nem registro em logs)."
+          "Antes de gerar o pagamento, me envie seu *CPF ou CNPJ* (somente números).\n" + "É só para registrar o pagamento (eu não mostro nem registro em logs)."
         );
         return;
       }
