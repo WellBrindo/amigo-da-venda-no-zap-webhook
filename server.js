@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.8 (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+// AMIGO DAS VENDAS — server.js V15.9 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
 
 
 // Node 18+ já tem fetch global.
@@ -13,6 +13,7 @@ app.use(express.json());
 const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || "").trim();
 const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "").trim();
 const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "").trim();
+const ADMIN_SECRET = (process.env.ADMIN_SECRET || "").trim();
 
 const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
 const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
@@ -145,6 +146,217 @@ app.get("/healthz", async (_req, res) => {
     },
   });
 });
+
+// ===================== ADMIN DASHBOARD (Basic Auth) =====================
+function requireAdminBasicAuth(req, res, next) {
+  try {
+    if (!ADMIN_SECRET) {
+      return res.status(500).send("ADMIN_SECRET não configurado");
+    }
+    const auth = req.headers.authorization || "";
+    if (!auth.startsWith("Basic ")) {
+      res.setHeader("WWW-Authenticate", 'Basic realm="Admin Dashboard"');
+      return res.status(401).send("Auth required");
+    }
+    const b64 = auth.slice(6).trim();
+    const decoded = Buffer.from(b64, "base64").toString("utf8");
+    const idx = decoded.indexOf(":");
+    const user = idx >= 0 ? decoded.slice(0, idx) : "";
+    const pass = idx >= 0 ? decoded.slice(idx + 1) : "";
+    if (user !== "admin" || pass !== ADMIN_SECRET) {
+      res.setHeader("WWW-Authenticate", 'Basic realm="Admin Dashboard"');
+      return res.status(401).send("Unauthorized");
+    }
+    return next();
+  } catch (_e) {
+    res.setHeader("WWW-Authenticate", 'Basic realm="Admin Dashboard"');
+    return res.status(401).send("Unauthorized");
+  }
+}
+
+async function scanKeys(match, maxKeys = 8000) {
+  const keys = [];
+  if (!USE_UPSTASH) return keys;
+  let cursor = "0";
+  let guard = 0;
+  while (true) {
+    guard += 1;
+    if (guard > 60) break;
+    const resp = await upstashCommand(["SCAN", cursor, "MATCH", match, "COUNT", "200"]);
+    const result = resp?.result;
+    if (!Array.isArray(result) || result.length < 2) break;
+    cursor = String(result[0]);
+    const batch = result[1] || [];
+    for (const k of batch) {
+      keys.push(k);
+      if (keys.length >= maxKeys) return keys;
+    }
+    if (cursor === "0") break;
+  }
+  return keys;
+}
+
+function normalizeWaIdLike(input) {
+  const s = String(input || "").trim();
+  if (!s) return "";
+  return s.replace(/\D/g, "");
+}
+
+app.get("/admin", requireAdminBasicAuth, async (_req, res) => {
+  const html = `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Amigo das Vendas — Admin</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px}
+    .card{border:1px solid #ddd;border-radius:10px;padding:12px}
+    .muted{color:#666;font-size:13px}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    input{padding:10px;border:1px solid #ccc;border-radius:8px;min-width:280px}
+    button{padding:10px 14px;border:1px solid #111;border-radius:8px;background:#111;color:#fff;cursor:pointer}
+    pre{white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:10px;border:1px solid #eee;overflow:auto}
+    h1{margin:0 0 6px 0}
+    a{color:inherit}
+  </style>
+</head>
+<body>
+  <h1>Amigo das Vendas — Dashboard</h1>
+  <div class="muted">Acesso restrito (Basic Auth). URL: <b>/admin</b></div>
+
+  <div class="grid" id="cards"></div>
+
+  <h2 style="margin-top:22px">Consultar usuário</h2>
+  <div class="muted">Digite o waId (ex.: 55DDxxxxxxxxx) ou número com/sem símbolos (vamos normalizar).</div>
+  <div class="row" style="margin-top:10px">
+    <input id="q" placeholder="Ex.: 5511999999999" />
+    <button onclick="lookup()">Buscar</button>
+  </div>
+  <div id="userBox" style="margin-top:12px"></div>
+
+<script>
+async function loadMetrics(){
+  const r = await fetch('/admin/metrics');
+  const j = await r.json();
+  const cards = document.getElementById('cards');
+  const items = [
+    ['Usuários (status:*)', j.usersTotal ?? '-'],
+    ['Trial', j.status?.TRIAL ?? 0],
+    ['Ativos', j.status?.ACTIVE ?? 0],
+    ['Aguard. Plano', j.status?.WAIT_PLAN ?? 0],
+    ['Pag. Pendente', j.status?.PAYMENT_PENDING ?? 0],
+    ['Bloqueados', j.status?.BLOCKED ?? 0],
+    ['Descrições hoje', j.descriptionsToday ?? 0],
+    ['Descrições mês', j.descriptionsMonth ?? 0],
+    ['Upstash', j.upstashOk ? 'OK' : 'Falha'],
+    ['Uptime (min)', Math.round((j.uptimeSec||0)/60)],
+  ];
+  cards.innerHTML = items.map(([t,v]) => `<div class="card"><div class="muted">${t}</div><div style="font-size:22px;font-weight:700;margin-top:6px">${v}</div></div>`).join('');
+}
+async function lookup(){
+  const q = document.getElementById('q').value || '';
+  const r = await fetch('/admin/user?q=' + encodeURIComponent(q));
+  const box = document.getElementById('userBox');
+  if(!r.ok){
+    const t = await r.text().catch(()=> '');
+    box.innerHTML = '<div class="card">Não encontrado / erro.<div class="muted" style="margin-top:6px">' + (t || '') + '</div></div>';
+    return;
+  }
+  const j = await r.json();
+  box.innerHTML = '<pre>' + JSON.stringify(j, null, 2) + '</pre>';
+}
+loadMetrics();
+</script>
+</body>
+</html>`;
+  res.status(200).send(html);
+});
+
+app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
+  let upstashOk = false;
+  try {
+    const ping = await upstashCommand(["PING"]);
+    upstashOk = !!ping?.result;
+  } catch (_e) {
+    upstashOk = false;
+  }
+
+  const statusKeys = await scanKeys("status:*", 12000);
+  const statusCounts = { TRIAL: 0, ACTIVE: 0, WAIT_PLAN: 0, PAYMENT_PENDING: 0, BLOCKED: 0, OTHER: 0 };
+  for (const k of statusKeys) {
+    const v = await redisGet(k);
+    const vv = String(v || "").toUpperCase();
+    if (statusCounts[vv] !== undefined) statusCounts[vv] += 1;
+    else statusCounts.OTHER += 1;
+  }
+
+  const d = new Date();
+  const dayKey = `metrics:descriptions:day:${d.toISOString().slice(0,10)}`;
+  const monthKey = `metrics:descriptions:month:${d.toISOString().slice(0,7)}`;
+  const descriptionsToday = Number((await redisGet(dayKey)) || 0) || 0;
+  const descriptionsMonth = Number((await redisGet(monthKey)) || 0) || 0;
+
+  res.json({
+    ok: true,
+    uptimeSec: Math.round(process.uptime()),
+    upstashOk,
+    usersTotal: statusKeys.length,
+    status: statusCounts,
+    descriptionsToday,
+    descriptionsMonth,
+  });
+});
+
+app.get("/admin/user", requireAdminBasicAuth, async (req, res) => {
+  const q = req.query.q || "";
+  const waId = normalizeWaIdLike(q);
+  if (!waId) return res.status(400).send("missing q");
+
+  const status = await redisGet(kStatus(waId));
+  const plan = await redisGet(kPlan(waId));
+  const freeUsed = await redisGet(kFreeUsed(waId));
+  const quotaUsed = await redisGet(kQuotaUsed(waId));
+  const quotaMonth = await redisGet(kQuotaMonth(waId));
+  const lastDesc = await redisGet(kLastDesc(waId));
+  const refineCount = await redisGet(kRefineCount(waId));
+
+  const prefs = await getPrefs(waId).catch(() => null);
+  const savedConditions = await getSavedConditions(waId).catch(() => null);
+  const styleAnchor = await getStyleAnchor(waId).catch(() => null);
+
+  const pending = {
+    plan: await redisGet(kPendingPlan(waId)),
+    method: await redisGet(kPendingMethod(waId)),
+    paymentId: await redisGet(kPendingPaymentId(waId)),
+    subId: await redisGet(kPendingSubId(waId)),
+    createdAt: await redisGet(kPendingCreatedAt(waId)),
+  };
+
+  if (!status && !plan && !freeUsed && !quotaUsed && !prefs && !savedConditions && !styleAnchor) {
+    return res.status(404).json({ found: false, waId });
+  }
+
+  res.json({
+    found: true,
+    waId,
+    status,
+    plan,
+    quota: {
+      freeUsed: freeUsed ? Number(freeUsed) : 0,
+      quotaUsed: quotaUsed ? Number(quotaUsed) : 0,
+      quotaMonth,
+      refineCount: refineCount ? Number(refineCount) : 0,
+    },
+    prefs,
+    savedConditions,
+    styleAnchor,
+    lastDescriptionPreview: (lastDesc || "").slice(0, 700),
+    pending,
+  });
+});
+
 
 // ===================== WEBHOOK VERIFY (META) =====================
 app.get("/webhook", (req, res) => {
