@@ -2468,7 +2468,7 @@ ${r.invoiceUrl || r.link || ""}
         await sendWhatsAppText(
         waId,
         "Nossa, quase esqueci 😄\n\nPra eu conseguir *gerar e registrar* o pagamento, preciso do seu *CPF ou CNPJ* (somente números).\n\n" +
-            "Fica tranquilo: eu uso só pra isso e não aparece em mensagens nem em logs. É totalmente *seguro*
+            "Fica tranquilo: eu uso só pra isso e não aparece em mensagens nem em logs. É totalmente *seguro*."
       );
         return;
       }
