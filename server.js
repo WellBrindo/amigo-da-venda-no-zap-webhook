@@ -1902,7 +1902,7 @@ async function sendTrialEndedFlow(waId) {
         waId,
         "*Não fica triste* 🥺🙂\nEssa nossa amizade só começou.\n\n" +
       "Você *gostou* das descrições que eu criei? Achou que ficou mais fácil divulgar, mais organizado e com cara mais vendável?\n\n" +
-      "Então bora escolher como a gente vai continuar essa *amizade*: 👇`
+      "Então bora escolher como a gente vai continuar essa *amizade*: 👇\n"
       );
 
   await setStatus(waId, "WAIT_PLAN");
@@ -2760,15 +2760,8 @@ const draft = mergeDraftFromMessage(await getDraft(waId), text);
           await setPendingConditions(waId, extractedConds, "ACTIVE");
           await setStatus(waId, "WAIT_SAVE_CONDITIONS_CONFIRM");
 
-          await sendWhatsAppText(
-            waId,
-            `📌 Vi que você colocou alguns dados como telefone, endereço, horário, valores ou links.
-
-Quer que eu *salve essas informações* para incluir nas descrições futuras?
-
-1) Sim, pode salvar
-2) Não, não salvar`
-          );
+          // Pergunta granular (lista o que foi identificado) — prioridade ao pedido do usuário
+          await sendWhatsAppText(waId, buildSaveConditionsPrompt(extractedConds));
           return;
         }
       }
