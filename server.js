@@ -237,6 +237,7 @@ app.get("/admin", requireAdminBasicAuth, async (_req, res) => {
   <div id="userBox" style="margin-top:12px"></div>
 
 <script>
+function escapeHtml(s){return s.replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));}
 async function loadMetrics(){
   const r = await fetch('/admin/metrics');
   const j = await r.json();
@@ -253,7 +254,7 @@ async function loadMetrics(){
     ['Upstash', j.upstashOk ? 'OK' : 'Falha'],
     ['Uptime (min)', Math.round((j.uptimeSec||0)/60)],
   ];
-  cards.innerHTML = items.map(([t,v]) => `<div class="card"><div class="muted">${t}</div><div style="font-size:22px;font-weight:700;margin-top:6px">${v}</div></div>`).join('');
+  cards.innerHTML = items.map(([t,v]) => '<div class="card"><div class="muted">'+escapeHtml(String(t))+'</div><div style="font-size:22px;font-weight:700;margin-top:6px">'+escapeHtml(String(v))+'</div></div>').join('');
 }
 async function lookup(){
   const q = document.getElementById('q').value || '';
