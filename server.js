@@ -1018,7 +1018,7 @@ function buildSaveConditionsPrompt(pending) {
 
   const lines = items.map((it) => `${it.n}) ${it.label}: ${it.value}`).join("\n");
 
-  return `📌 Identifiquei estas informações na sua mensagem:\n\n${lines}\n\nQuer que eu salve alguma delas para usar automaticamente nas próximas descrições?\n\n✅ Para salvar *todas*, responda: *tudo*\n✅ Para salvar apenas algumas, responda com os números separados por espaço (ex.: *1 3 4*)\n🚫 Para não salvar nada, responda: *0*`;
+  return `📌 *Acabei de ver estas informações na sua mensagem*:\n\n${lines}\n\nQuer que eu *salve* alguma delas para usar automaticamente nas próximas descrições?\n\n✅ Para salvar *todas*, responda: *tudo*\n✅ Para salvar apenas algumas, responda com os números separados por espaço (ex.: *1 3 4*)\n\n🚫 Para não salvar nada, responda: *0*`;
 }
 
 function pickConditionsByNumbers(pending, numbers) {
@@ -1154,9 +1154,9 @@ function detectRemoveSavedConditionsFields(messageText) {
 function askFeedbackText() {
   return `💬 Quer que eu deixe ainda mais a sua cara?
 
-Me diga o que você quer ajustar (ex.: mais emoji, mudar o título, mais emocional, mais curto, mais técnico).
+Me diga o que você quer ajustar (ex.: mais emoji, mudar o título, mais emocional, mais curto, mais técnico, etc...).
 
-Se estiver tudo certinho, me manda um OK ✅`;
+Se estiver tudo certinho, me manda um *OK* que já te libero para fazer outra descrição ✅`;
 }
 
 // ===================== WHATSAPP SEND =====================
@@ -1744,7 +1744,7 @@ async function activatePlanAfterPayment({ waId, planCode, method, subscriptionId
   await setStatus(waId, "ACTIVE");
 
   await sendWhatsAppText(waId, `✅ Pagamento confirmado!\nPlano ativado: *${plan.name}* 🎉`);
-  await sendWhatsAppText(waId, "Agora é só me mandar o que você vende/serviço que oferece 🙂");
+  await sendWhatsAppText(waId, "Que essa nossa *amizade* dure para sempre.🙂\n\n Quando quiser criar outra descrição, é só me mandar. Tô aqui prontinho pra te ajudar 🙂");
   return true;
 }
 
@@ -1807,13 +1807,13 @@ function menuText() {
   return (
     "*MENU — Amigo das Vendas* 📌\n\n" +
     "1) Minha assinatura\n" +
-    "2) Mudar plano\n" +
+    "2) Ver/Mudar plano\n" +
     "3) Cancelar plano (cartão)\n" +
     "4) Alterar nome\n" +
     "5) Alterar CPF/CNPJ\n" +
     "6) Ajuda\n\n" +
-    "Responda com o número.\n" +
-    "Se quiser sair do menu, é só mandar sua próxima descrição 🙂"
+    "Responda com o *número*.\n\n" +
+    "Se quiser *sair do menu*, é só mandar sua próxima descrição 🙂"
   );
 }
 function plansMenuText() {
@@ -1822,17 +1822,17 @@ function plansMenuText() {
     `1) *${PLANS[1].name}* — R$ ${PLANS[1].price.toFixed(2)}\n   • ${PLANS[1].quotaMonthly} descrições/mês\n\n` +
     `2) *${PLANS[2].name}* — R$ ${PLANS[2].price.toFixed(2)}\n   • ${PLANS[2].quotaMonthly} descrições/mês\n\n` +
     `3) *${PLANS[3].name}* — R$ ${PLANS[3].price.toFixed(2)}\n   • ${PLANS[3].quotaMonthly} descrições/mês\n\n` +
-    "Responda com 1, 2 ou 3."
+    "*Responda com 1, 2 ou 3*."
   );
 }
 function paymentMethodText() {
-  return `Perfeito 🙂
+  return `*Uhuuuul* 🙂\n\n
 Assim que você escolher a forma de pagamento, eu já preparo tudinho pra gente continuar com as suas descrições sem parar. 💳
 
 1) Cartão
 2) Pix
 
-Me responde com 1 ou 2 🙂`;
+*Me responde com 1 ou 2* 🙂`;
 }
 async function buildMySubscriptionText(waId) {
   const status = await getStatus(waId);
@@ -1897,12 +1897,12 @@ async function clearMenuReturn(waId) {
 
 async function sendTrialEndedFlow(waId) {
   // Fim do trial: mensagem + convite + planos
-  await sendWhatsAppText(waId, "Aaa que pena 🥺\nSuas *5 descrições grátis* do teste já foram usadas — mas foi só o começo!");
+  await sendWhatsAppText(waId, "*Aaa que pena* 🥺\n\nSuas *5 descrições grátis* do teste já foram usadas.");
   await sendWhatsAppText(
         waId,
-        `Não fica triste 🥺🙂\nEssa nossa amizade só começou.\n\n" +
-      "Você gostou das descrições que eu criei? Achou que ficou mais fácil divulgar, mais organizado e com cara mais vendável?\n\n" +
-      "Então bora escolher como a gente vai continuar daqui pra frente: 👇`
+        "*Não fica triste* 🥺🙂\nEssa nossa amizade só começou.\n\n" +
+      "Você *gostou* das descrições que eu criei? Achou que ficou mais fácil divulgar, mais organizado e com cara mais vendável?\n\n" +
+      "Então bora escolher como a gente vai continuar essa *amizade*: 👇`
       );
 
   await setStatus(waId, "WAIT_PLAN");
@@ -2163,7 +2163,7 @@ app.post("/webhook", async (req, res) => {
           await setSavedConditions(waId, { ...(current || {}), ...picked });
           await sendWhatsAppText(
             waId,
-            `Combinado ✅ Vou salvar apenas o que você escolheu e usar nas próximas descrições.\n\nSe quiser tirar depois, é só me pedir (ex.: "não use meu endereço").`
+            `*Combinado* ✅\n\n Vou salvar apenas o que você escolheu e usar nas próximas descrições.\n\nSe quiser tirar depois, é só me pedir (ex.: "não use meu endereço", etc...).`
           );
         } else {
           await sendWhatsAppText(waId, buildSaveConditionsPrompt(pending));
@@ -2326,7 +2326,7 @@ app.post("/webhook", async (req, res) => {
 
 Você pode mandar *bem completo* (com preço, detalhes, entrega etc.) ou *bem simples* mesmo, tipo: “Faço bolo de chocolate R$35”. Eu organizo e deixo com cara de anúncio.
 
-*E tem mais* 😊: depois que eu te entregar a descrição, você pode pedir até *2 ajustes* (ex.: mais emoji, mais emocional, mudar o título) sem consumir uma nova descrição.
+*E tem mais* 😊: depois que eu te entregar a descrição, você pode pedir até *2 ajustes* (ex.: mais emoji, mais emocional, mudar o título, etc...) sem consumir uma nova descrição.
 
 *Me manda agora o que você vende ou o serviço que você oferece*.`
       );
@@ -2467,8 +2467,8 @@ ${r.invoiceUrl || r.link || ""}
         await setStatus(waId, "WAIT_DOC");
         await sendWhatsAppText(
         waId,
-        `Nossa, quase esqueci 😄\nPra eu conseguir gerar e registrar o pagamento, preciso do seu CPF ou CNPJ (somente números).\n\n" +
-            "Pode me enviar, por favor?\nFica tranquilo(a): eu uso só pra isso e não aparece em mensagens nem em logs.`
+        "Nossa, quase esqueci 😄\n\nPra eu conseguir *gerar e registrar* o pagamento, preciso do seu *CPF ou CNPJ* (somente números).\n\n" +
+            "Fica tranquilo: eu uso só pra isso e não aparece em mensagens nem em logs. É totalemnte *seguro*`
       );
         return;
       }
@@ -2490,7 +2490,7 @@ ${r.invoiceUrl || r.link || ""}
             await sendWhatsAppText(
               waId,
               `🧾 *Pagamento gerado!*\n\nFinalize por aqui:\n${r.invoiceUrl}\n\n` +
-              "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅"
+              "⏳ Assim que o Asaas confirmar, eu ativo seu plano automaticamente ✅\n\n😄 Só para avisar, *Simetria Group* é a empresa que me criou, então a fatura vem no nome dela."
             );
           } else {
             await sendWhatsAppText(
@@ -2575,7 +2575,7 @@ ${r.invoiceUrl || r.link || ""}
       // "OK" significa que o cliente gostou — vamos guardar como referência de estilo.
       await setStyleAnchor(waId, lastDesc);
 
-      await sendWhatsAppText(waId, "Legal! ✅\nQuando quiser criar outra descrição, é só me mandar. Tô aqui prontinho pra te ajudar 🙂");
+      await sendWhatsAppText(waId, "*Legal*! ✅\nQuando quiser *criar outra descrição*, é só me *mandar os detalhes*. Tô aqui prontinho pra te ajudar 🙂");
       await clearDraft(waId);
       await clearRefineCount(waId);
       await clearLastDescription(waId);
