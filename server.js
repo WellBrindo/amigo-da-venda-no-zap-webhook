@@ -2040,7 +2040,7 @@ app.post("/webhook", async (req, res) => {
         );
         // Já vamos perguntar o nome agora, então o próximo input deve ser tratado como o valor do nome
         await setStatus(waId, "WAIT_NAME_VALUE");
-        await sendWhatsAppText(waId, "Oi! 👋😊\nEu sou o Amigo das Vendas — pode me chamar de Amigo.\n\nVocê me diz o que você vende ou o serviço que você presta, e eu te devolvo um anúncio prontinho pra você copiar e mandar nos grupos do WhatsApp.\n\nAntes que eu esqueça 😄 qual é o seu nome completo?");
+        await sendWhatsAppText(waId, "Oi! 👋😊\nEu sou o *Amigo das Vendas* — pode me chamar de *Amigo*.\n\nVocê me diz o que você *vende ou o serviço que você presta*, e eu te devolvo um *anúncio prontinho* pra você copiar e mandar nos grupos do WhatsApp.\n\nAntes que eu esqueça 😄 qual é o seu *NOME COMPLETO*?");
       } else {
         await sendWhatsAppText(waId, "Esse comando de reset está disponível apenas para o número de teste.");
       }
@@ -2314,11 +2314,11 @@ app.post("/webhook", async (req, res) => {
         waId,
         `Pra gente se conhecer melhor 😊 você pode me pedir *5 descrições gratuitas* pra testar.
 
-Você pode mandar bem completo (com preço, detalhes, entrega etc.) ou bem simples mesmo, tipo: “Faço bolo de chocolate R$35”. Eu organizo e deixo com cara de anúncio.
+Você pode mandar *bem completo* (com preço, detalhes, entrega etc.) ou *bem simples* mesmo, tipo: “Faço bolo de chocolate R$35”. Eu organizo e deixo com cara de anúncio.
 
-E tem mais: depois que eu te entregar a descrição, você pode pedir até *2 ajustes* (ex.: mais emoji, mais emocional, mudar o título) sem consumir uma nova descrição.
+*E tem mais* 😊: depois que eu te entregar a descrição, você pode pedir até *2 ajustes* (ex.: mais emoji, mais emocional, mudar o título) sem consumir uma nova descrição.
 
-Me manda agora o que você vende ou o serviço que você oferece.`
+*Me manda agora o que você vende ou o serviço que você oferece*.`
       );
 
       await setStatus(waId, "ACTIVE");
