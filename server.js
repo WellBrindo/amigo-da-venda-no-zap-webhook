@@ -228,16 +228,45 @@ app.get("/admin", requireAdminBasicAuth, async (_req, res) => {
 
   <div class="grid" id="cards"></div>
 
-  <h2 style="margin-top:22px">Consultar usuário</h2>
-  <div class="muted">Digite o waId (ex.: 55DDxxxxxxxxx) ou número com/sem símbolos (vamos normalizar).</div>
+  <h2 style="margin-top:22px">Usuários</h2>
+  <div class="muted">Carregue a lista e selecione um usuário para visualizar os dados. Você também pode digitar manualmente o waId.</div>
+
   <div class="row" style="margin-top:10px">
-    <input id="q" placeholder="Ex.: 5511999999999" />
+    <button onclick="loadUsers()">Carregar usuários</button>
+    <select id="userSelect" onchange="onPickUser()" style="padding:10px;border:1px solid #ccc;border-radius:8px;min-width:320px">
+      <option value="">— selecione —</option>
+    </select>
+    <input id="q" placeholder="Ou digite: 5511999999999" />
     <button onclick="lookup()">Buscar</button>
   </div>
+
   <div id="userBox" style="margin-top:12px"></div>
 
 <script>
-function escapeHtml(s){return s.replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));}
+function escapeHtml(s){s=String(s??'');return s.replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));}
+async function loadUsers(){
+  const sel = document.getElementById('userSelect');
+  sel.innerHTML = '<option value="">carregando...</option>';
+  try{
+    const r = await fetch('/admin/users?limit=1000');
+    const j = await r.json();
+    const users = (j && j.users) ? j.users : [];
+    sel.innerHTML = '<option value="">— selecione —</option>' + users.map(u=>{
+      const label = (u.waId || '') + (u.status ? (' — ' + u.status) : '') + (u.plan ? (' — ' + u.plan) : '');
+      return '<option value="'+ escapeHtml(String(u.waId||'')) +'">'+ escapeHtml(label) +'</option>';
+    }).join('');
+  }catch(e){
+    sel.innerHTML = '<option value="">erro ao carregar</option>';
+  }
+}
+function onPickUser(){
+  const sel = document.getElementById('userSelect');
+  const v = sel.value || '';
+  if(!v) return;
+  document.getElementById('q').value = v;
+  lookup();
+}
+
 async function loadMetrics(){
   const r = await fetch('/admin/metrics');
   const j = await r.json();
@@ -258,8 +287,10 @@ async function loadMetrics(){
 }
 async function lookup(){
   const q = document.getElementById('q').value || '';
-  const r = await fetch('/admin/user?q=' + encodeURIComponent(q));
   const box = document.getElementById('userBox');
+  if(!q.trim()){ box.innerHTML = '<div class="card">Digite um waId para consultar.</div>'; return; }
+  box.innerHTML = '<div class="card">Carregando...</div>';
+  const r = await fetch('/admin/user?q=' + encodeURIComponent(q));
   if(!r.ok){
     const t = await r.text().catch(()=> '');
     box.innerHTML = '<div class="card">Não encontrado / erro.<div class="muted" style="margin-top:6px">' + (t || '') + '</div></div>';
@@ -308,6 +339,25 @@ app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
     descriptionsToday,
     descriptionsMonth,
   });
+});
+
+app.get("/admin/users", requireAdminBasicAuth, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || "500", 10) || 500, 5000);
+  const statusKeys = await scanKeys("status:*", 12000);
+  const waIds = statusKeys.map(k => String(k).split(":")[1]).filter(Boolean);
+
+  // sort stable (lexicographic)
+  waIds.sort();
+
+  const slice = waIds.slice(0, limit);
+  const out = [];
+  for (const waId of slice) {
+    const status = await redisGet(kStatus(waId));
+    const plan = await redisGet(kPlan(waId));
+    out.push({ waId, status: status || null, plan: plan || null });
+  }
+
+  res.status(200).json({ ok: true, total: waIds.length, returned: out.length, users: out });
 });
 
 app.get("/admin/user", requireAdminBasicAuth, async (req, res) => {
