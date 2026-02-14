@@ -1197,6 +1197,16 @@ function sanitizeWhatsAppMarkdown(text) {
 }
 
 
+
+
+// ===== Helper global clip (FIX V15.9.3) =====
+function clip(text, max) {
+  const t = String(text || "");
+  if (!max || max <= 0) return t;
+  return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
+
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 function isRetryableStatus(status) {
