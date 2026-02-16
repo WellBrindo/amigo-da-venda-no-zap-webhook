@@ -14,7 +14,7 @@ import { touch24hWindow } from "./services/window24h.js";
 import { sendWhatsAppText } from "./services/meta/whatsapp.js";
 
 const APP_NAME = "amigo-das-vendas";
-const APP_VERSION = "16.0.2-modular-fix-imports-onboarding-base";
+const APP_VERSION = "16.0.3-modular-onboarding-sendtext-fix";
 
 const app = express();
 app.set("trust proxy", true);
@@ -72,6 +72,22 @@ function getTextFromMessage(m) {
   if (!m) return "";
   if (m.type === "text") return String(m?.text?.body || "").trim();
   return "";
+}
+
+// ✅ compat: sendWhatsAppText pode ser (to,text) OU ({to,text})
+async function sendText(to, text) {
+  const waId = normalizeWaId(to);
+  const msg = String(text || "");
+
+  if (!waId) throw new Error("sendText: missing waId");
+  if (!msg) throw new Error("sendText: missing text");
+
+  // Se a função foi declarada com 1 parâmetro, assumimos assinatura objeto.
+  // Caso contrário, assumimos (to, text).
+  if (typeof sendWhatsAppText === "function" && sendWhatsAppText.length <= 1) {
+    return await sendWhatsAppText({ to: waId, text: msg });
+  }
+  return await sendWhatsAppText(waId, msg);
 }
 
 function welcomeAskNameMessage() {
@@ -137,19 +153,18 @@ app.post("/webhook", async (req, res) => {
         if (looksLikeFullName(text)) {
           await setUserFullName(waId, text);
           const firstName = text.trim().split(/\s+/)[0] || "perfeito";
-          await sendWhatsAppText(
+          await sendText(
             waId,
             `Perfeito, ${firstName}! ✅\n\nAgora me diga o que você vende ou qual serviço você presta (pode ser simples, tipo: “vendo bolo R$30”).`
           );
         } else {
-          await sendWhatsAppText(waId, welcomeAskNameMessage());
+          await sendText(waId, welcomeAskNameMessage());
         }
         continue;
       }
 
-      // Por enquanto (até ligarmos OpenAI/Asaas completo neste modular),
-      // apenas confirma recebimento.
-      await sendWhatsAppText(
+      // até ligarmos o gerador completo aqui, confirmamos recebimento
+      await sendText(
         waId,
         `✅ Recebi sua mensagem.\n\nNome cadastrado: *${fullName}*\n\nAgora me diga o que você vende ou qual serviço você presta.`
       );
