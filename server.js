@@ -216,111 +216,57 @@ app.get("/admin", requireAdminBasicAuth, async (_req, res) => {
   <title>Amigo das Vendas — Admin</title>
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
-    
-    .btn{display:inline-block;padding:10px 12px;border:1px solid #ddd;border-radius:10px;text-decoration:none;background:#fafafa}
-    .btn:hover{background:#f1f1f1}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px}
     .card{border:1px solid #ddd;border-radius:10px;padding:12px}
     .muted{color:#666;font-size:13px}
-    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-    input{padding:10px;border:1px solid #ccc;border-radius:8px;min-width:280px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    input, select{padding:10px;border:1px solid #ccc;border-radius:8px;min-width:280px}
     button{padding:10px 14px;border:1px solid #111;border-radius:8px;background:#111;color:#fff;cursor:pointer}
+    a.btn{display:inline-block;padding:10px 14px;border:1px solid #111;border-radius:8px;background:#111;color:#fff;text-decoration:none}
+    a.link{color:#111}
     pre{white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:10px;border:1px solid #eee;overflow:auto}
     h1{margin:0 0 6px 0}
-    a{color:inherit}
+    ul{margin:8px 0 0 18px}
   </style>
 </head>
 <body>
   <h1>Amigo das Vendas — Dashboard</h1>
-  <div class="row" style="margin:10px 0 14px 0;gap:10px;flex-wrap:wrap">
-    <a class="btn" href="/admin">🏠 Início</a>
-    <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
-    <a class="btn" href="/admin/broadcast-ui">📣 Enviar mensagem</a>
-    <a class="btn" href="/admin/metrics" target="_blank">📊 Métricas (JSON)</a>
-  </div>
-  <div class="muted">Acesso restrito (Basic Auth). URL: <b>/admin</b></div>
+  <div class="muted">Acesso restrito (Basic Auth). Página inicial: <b>/admin</b></div>
 
-  <div class="grid" id="cards"></div>
-
-  <h2 style="margin-top:22px">Usuários</h2>
-  <div class="muted">Carregue a lista e selecione um usuário para visualizar os dados. Você também pode digitar manualmente o waId.</div>
-
-  <div class="row" style="margin-top:10px">
-    <button onclick="loadUsers()">Carregar usuários</button>
-    <select id="userSelect" onchange="onPickUser()" style="padding:10px;border:1px solid #ccc;border-radius:8px;min-width:320px">
-      <option value="">— selecione —</option>
-    </select>
-    <input id="q" placeholder="Ou digite: 5511999999999" />
-    <button onclick="lookup()">Buscar</button>
+  <div class="card" style="margin-top:14px">
+    <div class="row">
+      <a class="btn" href="/admin/metrics">📊 Métricas (JSON)</a>
+      <a class="btn" href="/admin/users-ui">👥 Usuários</a>
+      <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
+      <a class="btn" href="/admin/broadcast-ui">📣 Broadcast</a>
+    </div>
+    <div class="muted" style="margin-top:10px">
+      Dica: se o seu navegador estiver bloqueando JavaScript/requests, use as páginas UI acima (renderizadas no servidor).
+    </div>
   </div>
 
-  <div id="userBox" style="margin-top:12px"></div>
+  <div class="card" style="margin-top:14px">
+    <div style="font-weight:700">🔎 Buscar usuário</div>
+    <div class="muted" style="margin-top:6px">Digite o waId (somente números) e abra a ficha em uma página dedicada.</div>
+    <form class="row" style="margin-top:10px" method="GET" action="/admin/user-ui">
+      <input name="q" placeholder="Ex.: 5511987654321" />
+      <button type="submit">Buscar</button>
+    </form>
+  </div>
 
-<script>
-function escapeHtml(s){s=String(s??'');return s.replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));}
-async function loadUsers(){
-  const sel = document.getElementById('userSelect');
-  sel.innerHTML = '<option value="">carregando...</option>';
-  try{
-    const r = await fetch('/admin/users?limit=1000');
-    const j = await r.json();
-    const users = (j && j.users) ? j.users : [];
-    sel.innerHTML = '<option value="">— selecione —</option>' + users.map(u=>{
-      const label = (u.waId || '') + (u.status ? (' — ' + u.status) : '') + (u.plan ? (' — ' + u.plan) : '');
-      return '<option value="'+ escapeHtml(String(u.waId||'')) +'">'+ escapeHtml(label) +'</option>';
-    }).join('');
-  }catch(e){
-    sel.innerHTML = '<option value="">erro ao carregar</option>';
-  }
-}
-function onPickUser(){
-  const sel = document.getElementById('userSelect');
-  const v = sel.value || '';
-  if(!v) return;
-  document.getElementById('q').value = v;
-  lookup();
-}
-
-async function loadMetrics(){
-  const r = await fetch('/admin/metrics');
-  const j = await r.json();
-  const cards = document.getElementById('cards');
-  const items = [
-    ['Usuários (status:*)', j.usersTotal ?? '-'],
-    ['Trial', j.status?.TRIAL ?? 0],
-    ['Ativos', j.status?.ACTIVE ?? 0],
-    ['Aguard. Plano', j.status?.WAIT_PLAN ?? 0],
-    ['Pag. Pendente', j.status?.PAYMENT_PENDING ?? 0],
-    ['Bloqueados', j.status?.BLOCKED ?? 0],
-    ['Descrições hoje', j.descriptionsToday ?? 0],
-    ['Descrições mês', j.descriptionsMonth ?? 0],
-    ['Janela 24h ativa', j.window24hActive ?? 0],
-    ['Janela 24h (ativos)', j.window24hActive ?? 0],
-    ['Upstash', j.upstashOk ? 'OK' : 'Falha'],
-    ['Uptime (min)', Math.round((j.uptimeSec||0)/60)],
-  ];
-  cards.innerHTML = items.map(([t,v]) => '<div class="card"><div class="muted">'+escapeHtml(String(t))+'</div><div style="font-size:22px;font-weight:700;margin-top:6px">'+escapeHtml(String(v))+'</div></div>').join('');
-}
-async function lookup(){
-  const q = document.getElementById('q').value || '';
-  const box = document.getElementById('userBox');
-  if(!q.trim()){ box.innerHTML = '<div class="card">Digite um waId para consultar.</div>'; return; }
-  box.innerHTML = '<div class="card">Carregando...</div>';
-  const r = await fetch('/admin/user?q=' + encodeURIComponent(q));
-  if(!r.ok){
-    const t = await r.text().catch(()=> '');
-    box.innerHTML = '<div class="card">Não encontrado / erro.<div class="muted" style="margin-top:6px">' + (t || '') + '</div></div>';
-    return;
-  }
-  const j = await r.json();
-  box.innerHTML = '<pre>' + JSON.stringify(j, null, 2) + '</pre>';
-}
-loadMetrics();
-</script>
+  <div class="card" style="margin-top:14px">
+    <div style="font-weight:700">Atalhos</div>
+    <ul>
+      <li><a class="link" href="/admin/users?limit=500">/admin/users?limit=500</a> (JSON)</li>
+      <li><a class="link" href="/admin/window24h?mode=all&limit=200">/admin/window24h</a> (JSON)</li>
+      <li><a class="link" href="/admin/broadcast-ui">/admin/broadcast-ui</a> (UI)</li>
+    </ul>
+  </div>
 </body>
 </html>`;
   res.status(200).send(html);
 });
+
 
 // ===================== ADMIN UI PAGES =====================
 
@@ -654,6 +600,148 @@ app.get("/admin/users", requireAdminBasicAuth, async (req, res) => {
 
   res.status(200).json({ ok: true, total: await redisSCard(K_USERS_ALL), returned: out.length, users: out });
 });
+
+app.get("/admin/users-ui", requireAdminBasicAuth, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || "500", 10) || 500, 5000);
+  // lista via índice (sem SCAN)
+  const { members } = await redisSScan("users:all", "0", limit);
+  const waIds = (members || []).filter(Boolean).sort();
+
+  const rows = [];
+  for (const waId of waIds) {
+    const status = await redisGet(kStatus(waId));
+    const plan = await redisGet(kPlan(waId));
+    rows.push({ waId, status: status || "", plan: plan || "" });
+  }
+
+  const html = `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin — Usuários</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
+    .muted{color:#666;font-size:13px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    input, select{padding:10px;border:1px solid #ccc;border-radius:8px;min-width:280px}
+    button{padding:10px 14px;border:1px solid #111;border-radius:8px;background:#111;color:#fff;cursor:pointer}
+    a.btn{display:inline-block;padding:10px 14px;border:1px solid #111;border-radius:8px;background:#111;color:#fff;text-decoration:none}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{border-bottom:1px solid #eee;text-align:left;padding:10px;font-size:14px}
+    th{background:#fafafa}
+    code{background:#f6f6f6;padding:2px 6px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <div class="row">
+    <a class="btn" href="/admin">⬅️ Voltar</a>
+    <a class="btn" href="/admin/metrics">📊 Métricas</a>
+    <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
+    <a class="btn" href="/admin/broadcast-ui">📣 Broadcast</a>
+  </div>
+
+  <h1 style="margin:16px 0 6px 0">👥 Usuários</h1>
+  <div class="muted">Listando até <b>${limit}</b> waIds do índice <code>users:all</code>.</div>
+
+  <form class="row" style="margin-top:12px" method="GET" action="/admin/user-ui">
+    <input name="q" placeholder="Buscar por waId (somente números)" />
+    <button type="submit">Buscar</button>
+  </form>
+
+  <table>
+    <thead><tr><th>waId</th><th>Status</th><th>Plano</th><th></th></tr></thead>
+    <tbody>
+      ${rows.map(r => `<tr>
+        <td>${escapeHtml(r.waId)}</td>
+        <td>${escapeHtml(r.status)}</td>
+        <td>${escapeHtml(r.plan)}</td>
+        <td><a href="/admin/user-ui?q=${encodeURIComponent(r.waId)}">Abrir</a></td>
+      </tr>`).join("")}
+    </tbody>
+  </table>
+</body>
+</html>`;
+  res.status(200).send(html);
+});
+
+app.get("/admin/user-ui", requireAdminBasicAuth, async (req, res) => {
+  const q = req.query.q || "";
+  const waId = normalizeWaIdLike(q);
+  if (!waId) {
+    return res.status(400).send("missing q");
+  }
+  // Reusa o JSON do /admin/user para manter consistência
+  // (sem fetch no browser, tudo server-side)
+  const status = await redisGet(kStatus(waId));
+  const plan = await redisGet(kPlan(waId));
+  const freeUsed = await redisGet(kFreeUsed(waId));
+  const quotaUsed = await redisGet(kQuotaUsed(waId));
+  const quotaMonth = await redisGet(kQuotaMonth(waId));
+  const lastDesc = await redisGet(kLastDesc(waId));
+  const refineCount = await redisGet(kRefineCount(waId));
+
+  const prefs = await getPrefs(waId).catch(() => null);
+  const savedConditions = await getSavedConditions(waId).catch(() => null);
+  const styleAnchor = await getStyleAnchor(waId).catch(() => null);
+
+  const pending = {
+    plan: await redisGet(kPendingPlan(waId)),
+    method: await redisGet(kPendingMethod(waId)),
+    paymentId: await redisGet(kPendingPaymentId(waId)),
+    subId: await redisGet(kPendingSubId(waId)),
+    createdAt: await redisGet(kPendingCreatedAt(waId)),
+  };
+
+  const payload = {
+    found: true,
+    waId,
+    status,
+    plan,
+    quota: {
+      freeUsed: freeUsed ? Number(freeUsed) : 0,
+      quotaUsed: quotaUsed ? Number(quotaUsed) : 0,
+      quotaMonth,
+      refineCount: refineCount ? Number(refineCount) : 0,
+    },
+    prefs,
+    savedConditions,
+    styleAnchor,
+    lastDescriptionPreview: (lastDesc || "").slice(0, 1200),
+    pending,
+  };
+
+  const html = `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin — Usuário</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
+    .muted{color:#666;font-size:13px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    a.btn{display:inline-block;padding:10px 14px;border:1px solid #111;border-radius:8px;background:#111;color:#fff;text-decoration:none}
+    pre{white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:10px;border:1px solid #eee;overflow:auto}
+  </style>
+</head>
+<body>
+  <div class="row">
+    <a class="btn" href="/admin">⬅️ Voltar</a>
+    <a class="btn" href="/admin/users-ui">👥 Usuários</a>
+    <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
+    <a class="btn" href="/admin/broadcast-ui">📣 Broadcast</a>
+  </div>
+
+  <h1 style="margin:16px 0 6px 0">👤 Usuário</h1>
+  <div class="muted">waId: <b>${escapeHtml(waId)}</b></div>
+
+  <pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
+</body>
+</html>`;
+  res.status(200).send(html);
+});
+
 
 app.get("/admin/user", requireAdminBasicAuth, async (req, res) => {
   const q = req.query.q || "";
