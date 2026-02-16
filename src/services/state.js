@@ -1,4 +1,4 @@
-import { redisGet, redisSet, redisSAdd } from "./redis.js";
+import { redisGet, redisSet, redisDel, redisSAdd } from "./redis.js";
 
 export const USER_STATUSES = [
   "TRIAL",
@@ -57,7 +57,9 @@ export async function ensureUserExists(waId) {
     await redisSet(keyStatus(waId), DEFAULT_NEW_USER_STATUS);
     await redisSet(keyTrialUsed(waId), "0");
     await redisSet(keyQuotaUsed(waId), "0");
-    await redisSet(keyPlan(waId), "");
+    // plano vazio: NÃO grava string vazia; garante chave ausente
+    await redisDel(keyPlan(waId));
+    await redisDel(keyLastPrompt(waId));
   }
 
   const status = await getUserStatus(waId);
@@ -73,14 +75,24 @@ export async function setUserStatus(waId, status) {
 
 export async function getUserStatus(waId) {
   const v = await redisGet(keyStatus(waId));
-  if (!v) return DEFAULT_NEW_USER_STATUS; // usuário novo sem status explícito
+  if (!v) return DEFAULT_NEW_USER_STATUS;
   return normalizeStatus(v);
 }
 
 export async function setUserPlan(waId, planCode) {
   await indexUser(waId);
-  await redisSet(keyPlan(waId), String(planCode || ""));
-  return String(planCode || "");
+
+  const plan = String(planCode || "").trim();
+
+  // ✅ Upstash REST não aceita SET com string vazia via URL.
+  // Então, plano vazio = remove a chave.
+  if (!plan) {
+    await redisDel(keyPlan(waId));
+    return "";
+  }
+
+  await redisSet(keyPlan(waId), plan);
+  return plan;
 }
 
 export async function getUserPlan(waId) {
@@ -121,8 +133,17 @@ export async function incUserTrialUsed(waId, delta = 1) {
 
 export async function setLastPrompt(waId, text) {
   await indexUser(waId);
-  await redisSet(keyLastPrompt(waId), String(text || ""));
-  return String(text || "");
+
+  const t = String(text || "").trim();
+
+  // ✅ texto vazio = remove a chave
+  if (!t) {
+    await redisDel(keyLastPrompt(waId));
+    return "";
+  }
+
+  await redisSet(keyLastPrompt(waId), t);
+  return t;
 }
 
 export async function getLastPrompt(waId) {
