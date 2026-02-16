@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { touch24hWindow } from "../services/window24h.js";
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
+import { handleInboundText } from "../services/flow.js";
 
 export function webhookRouter() {
   const router = Router();
@@ -25,7 +26,7 @@ export function webhookRouter() {
 
   // ✅ Recebimento de eventos
   router.post("/", async (req, res) => {
-    // Responde rápido para a Meta não re-tentar
+    // responde rápido para a Meta
     res.status(200).json({ ok: true });
 
     try {
@@ -50,22 +51,20 @@ export function webhookRouter() {
             // 1) marca janela 24h
             await touch24hWindow(String(waId));
 
-            // 2) pega texto (se for mensagem de texto)
+            // 2) pega texto inbound (só texto por enquanto)
             let inboundText = "";
             if (msg?.type === "text") {
               inboundText = String(msg?.text?.body || "").trim();
             }
 
-            // 3) responde (modo simples)
-            // ⚠️ evitamos responder mensagens vazias ou eventos sem texto
-            if (inboundText) {
-              const reply =
-                `👋 Oi! Recebi sua mensagem:\n\n` +
-                `“${inboundText}”\n\n` +
-                `✅ O sistema modular está ativo.\n` +
-                `Em breve vamos ligar o gerador de descrições.`;
+            if (!inboundText) continue;
 
-              await sendWhatsAppText({ to: waId, text: reply });
+            // 3) roteia para o motor de fluxo
+            const r = await handleInboundText({ waId, text: inboundText });
+
+            // 4) responde se necessário
+            if (r?.shouldReply && r?.replyText) {
+              await sendWhatsAppText({ to: waId, text: r.replyText });
             }
           }
         }
