@@ -13,16 +13,10 @@ function isRetryable(status) {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-/**
- * Geração simples e segura:
- * - retries curtos
- * - limite de tokens
- * - resposta em texto
- */
 export async function generateAdText({
   userText,
-  mode = "FIXED", // FIXED | FREE
-  maxOutputTokens = 550,
+  mode = "FIXED",
+  maxTokens = 650,
 }) {
   assertOpenAIEnv();
 
@@ -59,7 +53,8 @@ export async function generateAdText({
       { role: "system", content: system },
       { role: "user", content: clean },
     ],
-    max_output_tokens: Number(maxOutputTokens || 550),
+    max_tokens: Number(maxTokens), // 🔥 CORRIGIDO AQUI
+    temperature: 0.7,
   };
 
   const url = "https://api.openai.com/v1/chat/completions";
@@ -87,7 +82,7 @@ export async function generateAdText({
 
         if (isRetryable(status) && attempt < 3) {
           lastErr = err;
-          await sleep(350 * attempt);
+          await sleep(300 * attempt);
           continue;
         }
         throw err;
