@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.9.8 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+// AMIGO DAS VENDAS — server.js V15.9.9 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
 
 
 // Node 18+ já tem fetch global.
@@ -1589,8 +1589,12 @@ async function getAsaasSubscriptionNextDueDate(subId) {
   const id = String(subId || "").trim();
   if (!id) return "";
 
-  // cache por 10 minutos para não bater no Asaas o tempo todo
-  const CACHE_TTL_SECONDS = 600;
+  // IMPORTANTE (Asaas): cobranças de assinatura podem ser geradas com antecedência (ex.: 40 dias).
+  // Por isso, o campo subscription.nextDueDate pode apontar para uma parcela futura (ex.: 2ª),
+  // enquanto a parcela "corrente" ainda está pendente com vencimento mais próximo.
+  // Aqui retornamos o vencimento mais próximo (dueDate) dentre as cobranças PENDING da assinatura.
+  // Fallback: se não houver PENDING, tenta pegar o vencimento mais próximo de qualquer status.
+  const CACHE_TTL_SECONDS = 600; // 10 min
 
   const lastAt = Number((await redisGet(kAsaasSubNextDueCacheAt(id))) || 0);
   const cached = (await redisGet(kAsaasSubNextDueCache(id))) || "";
@@ -1598,24 +1602,74 @@ async function getAsaasSubscriptionNextDueDate(subId) {
     return cached; // YYYY-MM-DD
   }
 
-  try {
-    const sub = await asaasFetch(`/v3/subscriptions/${encodeURIComponent(id)}`, "GET");
-    const next = sub?.nextDueDate ? String(sub.nextDueDate) : "";
-    if (next) {
-      await redisSetEx(kAsaasSubNextDueCache(id), next, CACHE_TTL_SECONDS);
-      await redisSetEx(kAsaasSubNextDueCacheAt(id), String(Date.now()), CACHE_TTL_SECONDS);
-      return next;
+  const parseDateMs = (dateStr) => {
+    if (!dateStr) return NaN;
+    // fixa -03:00 para refletir a expectativa do usuário (Brasil) e evitar shift por UTC
+    const ms = Date.parse(`${dateStr}T00:00:00-03:00`);
+    return Number.isFinite(ms) ? ms : NaN;
+  };
+
+  const pickNearestDueDate = (items) => {
+    const now = Date.now();
+    let best = "";
+    let bestMs = Infinity;
+    for (const p of Array.isArray(items) ? items : []) {
+      const due = p?.dueDate ? String(p.dueDate) : "";
+      const ms = parseDateMs(due);
+      if (!Number.isFinite(ms)) continue;
+      // pega a cobrança com dueDate mais próxima no futuro (ou hoje)
+      if (ms >= now && ms < bestMs) {
+        bestMs = ms;
+        best = due;
+      }
     }
+    // se não achou nenhuma no futuro, pega a maior (mais recente) para não ficar vazio
+    if (!best) {
+      let latest = "";
+      let latestMs = -Infinity;
+      for (const p of Array.isArray(items) ? items : []) {
+        const due = p?.dueDate ? String(p.dueDate) : "";
+        const ms = parseDateMs(due);
+        if (!Number.isFinite(ms)) continue;
+        if (ms > latestMs) {
+          latestMs = ms;
+          latest = due;
+        }
+      }
+      best = latest || "";
+    }
+    return best;
+  };
+
+  try {
+    // 1) tenta pegar as PENDING (normalmente é o "plano atual" a vencer)
+    const pending = await asaasFetch(`/v3/subscriptions/${encodeURIComponent(id)}/payments?limit=20&offset=0&status=PENDING`, "GET");
+    const duePending = pickNearestDueDate(pending?.data || pending);
+
+    // 2) fallback: se não tiver PENDING, lista sem filtro (pode estar CONFIRMED/RECEIVED etc.)
+    let due = duePending;
+    if (!due) {
+      const any = await asaasFetch(`/v3/subscriptions/${encodeURIComponent(id)}/payments?limit=20&offset=0`, "GET");
+      due = pickNearestDueDate(any?.data || any);
+    }
+
+    if (due) {
+      await redisSetEx(kAsaasSubNextDueCache(id), due, CACHE_TTL_SECONDS);
+      await redisSetEx(kAsaasSubNextDueCacheAt(id), String(Date.now()), CACHE_TTL_SECONDS);
+      return due;
+    }
+
     await redisSetEx(kAsaasSubNextDueCache(id), "", Math.min(300, CACHE_TTL_SECONDS));
     await redisSetEx(kAsaasSubNextDueCacheAt(id), String(Date.now()), Math.min(300, CACHE_TTL_SECONDS));
     return "";
   } catch (e) {
-    safeLogError("Asaas nextDueDate falhou:", e);
+    safeLogError("Asaas dueDate (assinatura) falhou:", e);
     await redisSetEx(kAsaasSubNextDueCache(id), "", Math.min(300, CACHE_TTL_SECONDS));
     await redisSetEx(kAsaasSubNextDueCacheAt(id), String(Date.now()), Math.min(300, CACHE_TTL_SECONDS));
     return "";
   }
 }
+
 
 
 async function findCustomerByCpfCnpj(doc) {
@@ -1935,7 +1989,7 @@ async function buildMySubscriptionText(waId) {
     const nextDue = await getAsaasSubscriptionNextDueDate(subId);
     if (nextDue) {
       const [y, m, d] = nextDue.split("-").map((x) => Number(x));
-      const dueMs = Date.UTC(y, (m || 1) - 1, d || 1);
+      const dueMs = Date.parse(`${nextDue}T00:00:00-03:00`);
       const daysLeft = Math.max(0, Math.ceil((dueMs - Date.now()) / (1000 * 60 * 60 * 24)));
 
       const dd = String(d || "").padStart(2, "0");
