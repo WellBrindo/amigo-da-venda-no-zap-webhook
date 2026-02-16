@@ -5,6 +5,7 @@ import {
   setUserQuotaUsed,
   setUserTrialUsed,
   getUserSnapshot,
+  setLastPrompt,
 } from "../services/state.js";
 
 import {
@@ -68,7 +69,7 @@ export function adminRouter() {
 
     <div class="muted" style="margin-top:10px;">
       <b>Set (demo)</b> grava: <code>ACTIVE</code>, plano <code>DE_VEZ_EM_QUANDO</code>, quotaUsed <code>1</code>, trialUsed <code>0</code>.<br/>
-      <b>Resetar para TRIAL</b> grava: <code>TRIAL</code>, plano vazio, quotaUsed <code>0</code>, trialUsed <code>0</code>.
+      <b>Resetar para TRIAL</b> grava: <code>TRIAL</code>, plano vazio, quotaUsed <code>0</code>, trialUsed <code>0</code> e limpa <code>lastPrompt</code>.
     </div>
 
     <hr />
@@ -143,7 +144,7 @@ export function adminRouter() {
     }
   });
 
-  // RESET para TRIAL (para testar fluxo 1/5)
+  // RESET para TRIAL (limpo)
   router.get("/state-test/reset-trial", async (req, res) => {
     try {
       const waId = String(req.query.waId || "").trim();
@@ -153,6 +154,7 @@ export function adminRouter() {
       await setUserPlan(waId, "");
       await setUserQuotaUsed(waId, 0);
       await setUserTrialUsed(waId, 0);
+      await setLastPrompt(waId, ""); // ✅ limpa
 
       const snap = await getUserSnapshot(waId);
       res.json({ ok: true, action: "reset-trial", user: snap });
