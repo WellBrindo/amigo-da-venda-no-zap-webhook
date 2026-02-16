@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.9 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+// AMIGO DAS VENDAS — server.js V15.9.8 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
 
 
 // Node 18+ já tem fetch global.
@@ -51,7 +51,12 @@ const TEST_RESET_COMMANDS = new Set(["resetar", "reset", "zerar"]); // comandos 
 
 // Trial e limites
 const FREE_DESCRIPTIONS_LIMIT = 5;        // trial por uso
-const MAX_REFINES_PER_DESCRIPTION = 2;    // até 2 refinamentos por descrição; o 3º conta como nova descrição
+// ===================== REGRAS DE REFINO =====================
+// Regra oficial: até 2 refinamentos "grátis" dentro da mesma descrição.
+// No 3º, 6º, 9º... refinamento, consome +1 descrição.
+const REFINES_PER_EXTRA_DESCRIPTION = 3; // a cada 3 refinamentos, consome +1 descrição
+const FREE_REFINES_PER_DESCRIPTION = REFINES_PER_EXTRA_DESCRIPTION - 1; // 2
+
 
 // TTLs (Upstash / Redis)
 // Idempotência: evita crescer infinito (ex.: 7 dias)
@@ -479,6 +484,21 @@ async function redisIncr(key) {
   return Number(r?.result ?? 0);
 }
 
+function isoDayKey() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+}
+function isoMonthKey() {
+  return new Date().toISOString().slice(0, 7); // YYYY-MM (UTC)
+}
+
+async function incrementDescriptionMetrics() {
+  const dayKey = `metrics:descriptions:day:${isoDayKey()}`;
+  const monthKey = `metrics:descriptions:month:${isoMonthKey()}`;
+  await redisIncr("metrics:descriptions:total");
+  await redisIncr(dayKey);
+  await redisIncr(monthKey);
+}
+
 // ===================== CHAVES (REDIS) =====================
 function kUser(waId) { return `user:${waId}`; }
 function kStatus(waId) { return `status:${waId}`; }
@@ -501,6 +521,10 @@ function kAsaasSubToWa(subId) { return `asaas:sub_to_wa:${subId}`; }
 // cache rápido de status de assinatura (para evitar calls excessivas ao Asaas)
 function kAsaasSubActiveCache(subId) { return `asaas:sub_active:${subId}`; }
 function kAsaasSubActiveCacheAt(subId) { return `asaas:sub_active_at:${subId}`; }
+
+// cache rápido de próxima cobrança (nextDueDate) da assinatura
+function kAsaasSubNextDueCache(subId) { return `asaas:sub_next_due:${subId}`; }      // YYYY-MM-DD
+function kAsaasSubNextDueCacheAt(subId) { return `asaas:sub_next_due_at:${subId}`; } // epoch ms
 
 // pagamento pendente
 function kPendingPlan(waId) { return `pending:plan:${waId}`; }        // planCode
@@ -804,12 +828,14 @@ async function consumeOneDescriptionOrBlock(waId) {
     const can = await canUseByPlanNow(waId);
     if (!can) return false;
     await incQuotaUsed(waId);
+    await incrementDescriptionMetrics();
     return true;
   }
 
   const used = await getFreeUsed(waId);
   if (used >= FREE_DESCRIPTIONS_LIMIT) return false;
   await incFreeUsed(waId);
+  await incrementDescriptionMetrics();
   return true;
 }
 
@@ -1559,6 +1585,38 @@ async function isAsaasSubscriptionActive(subId) {
   }
 }
 
+async function getAsaasSubscriptionNextDueDate(subId) {
+  const id = String(subId || "").trim();
+  if (!id) return "";
+
+  // cache por 10 minutos para não bater no Asaas o tempo todo
+  const CACHE_TTL_SECONDS = 600;
+
+  const lastAt = Number((await redisGet(kAsaasSubNextDueCacheAt(id))) || 0);
+  const cached = (await redisGet(kAsaasSubNextDueCache(id))) || "";
+  if (cached && lastAt && (Date.now() - lastAt) < (CACHE_TTL_SECONDS * 1000)) {
+    return cached; // YYYY-MM-DD
+  }
+
+  try {
+    const sub = await asaasFetch(`/v3/subscriptions/${encodeURIComponent(id)}`, "GET");
+    const next = sub?.nextDueDate ? String(sub.nextDueDate) : "";
+    if (next) {
+      await redisSetEx(kAsaasSubNextDueCache(id), next, CACHE_TTL_SECONDS);
+      await redisSetEx(kAsaasSubNextDueCacheAt(id), String(Date.now()), CACHE_TTL_SECONDS);
+      return next;
+    }
+    await redisSetEx(kAsaasSubNextDueCache(id), "", Math.min(300, CACHE_TTL_SECONDS));
+    await redisSetEx(kAsaasSubNextDueCacheAt(id), String(Date.now()), Math.min(300, CACHE_TTL_SECONDS));
+    return "";
+  } catch (e) {
+    safeLogError("Asaas nextDueDate falhou:", e);
+    await redisSetEx(kAsaasSubNextDueCache(id), "", Math.min(300, CACHE_TTL_SECONDS));
+    await redisSetEx(kAsaasSubNextDueCacheAt(id), String(Date.now()), Math.min(300, CACHE_TTL_SECONDS));
+    return "";
+  }
+}
+
 
 async function findCustomerByCpfCnpj(doc) {
   const q = encodeURIComponent(doc);
@@ -1864,11 +1922,25 @@ async function buildMySubscriptionText(waId) {
 
   let extra = "";
   const subId = await redisGet(kAsaasSubscriptionId(waId));
+
   if (!subId) {
+    // PIX: mostra validade
     const until = await getPixValidUntil(waId);
     if (until) {
       const daysLeft = Math.max(0, Math.ceil((until - Date.now()) / (1000 * 60 * 60 * 24)));
       extra = `\nValidade (Pix): *${daysLeft} dia(s)* restantes`;
+    }
+  } else {
+    // CARD: mostra próxima renovação
+    const nextDue = await getAsaasSubscriptionNextDueDate(subId);
+    if (nextDue) {
+      const [y, m, d] = nextDue.split("-").map((x) => Number(x));
+      const dueMs = Date.UTC(y, (m || 1) - 1, d || 1);
+      const daysLeft = Math.max(0, Math.ceil((dueMs - Date.now()) / (1000 * 60 * 60 * 24)));
+
+      const dd = String(d || "").padStart(2, "0");
+      const mm = String(m || "").padStart(2, "0");
+      extra = `\nRenovação (Cartão): *${dd}/${mm}* — faltam *${daysLeft} dia(s)*`;
     }
   }
 
@@ -1932,6 +2004,55 @@ async function isDuplicateMessage(messageId) {
 function isMenuCommand(text) {
   return String(text || "").trim().toLowerCase() === "menu";
 }
+function isValidCPF(cpf) {
+  const s = String(cpf || "").replace(/\D/g, "");
+  if (s.length !== 11) return false;
+  if (/^(\d)\1{10}$/.test(s)) return false;
+  const digits = s.split("").map((c) => Number(c));
+  const calc1 = () => {
+    let sum = 0;
+    for (let i = 0; i < 9; i++) sum += digits[i] * (10 - i);
+    const mod = sum % 11;
+    return mod < 2 ? 0 : 11 - mod;
+  };
+  const d1 = calc1();
+  let sum2 = 0;
+  for (let i = 0; i < 10; i++) sum2 += digits[i] * (11 - i);
+  const mod2 = sum2 % 11;
+  const d2 = mod2 < 2 ? 0 : 11 - mod2;
+  return digits[9] === d1 && digits[10] === d2;
+}
+
+function isValidCNPJ(cnpj) {
+  const s = String(cnpj || "").replace(/\D/g, "");
+  if (s.length !== 14) return false;
+  if (/^(\d)\1{13}$/.test(s)) return false;
+  const digits = s.split("").map((c) => Number(c));
+  const weights1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  const weights2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  const calc = (weights, len) => {
+    let sum = 0;
+    for (let i = 0; i < len; i++) sum += digits[i] * weights[i];
+    const mod = sum % 11;
+    return mod < 2 ? 0 : 11 - mod;
+  };
+  const d1 = calc(weights1, 12);
+  const d2 = (() => {
+    let sum = 0;
+    for (let i = 0; i < 13; i++) sum += digits[i] * weights2[i];
+    const mod = sum % 11;
+    return mod < 2 ? 0 : 11 - mod;
+  })();
+  return digits[12] === d1 && digits[13] === d2;
+}
+
+function isValidDoc(doc) {
+  const s = String(doc || "").replace(/\D/g, "");
+  if (s.length === 11) return isValidCPF(s);
+  if (s.length === 14) return isValidCNPJ(s);
+  return false;
+}
+
 function cleanDoc(text) {
   return String(text || "").replace(/\D/g, "");
 }
@@ -2055,6 +2176,13 @@ app.post("/webhook", async (req, res) => {
         await sendWhatsAppText(waId, "Esse comando de reset está disponível apenas para o número de teste.");
       }
       return;
+    }
+
+    // Primeira interação: fixa status e incrementa métrica de usuários (evita contar novamente)
+    const statusRaw = await redisGet(kStatus(waId));
+    if (!statusRaw) {
+      await redisIncr("metrics:users:total");
+      await setStatus(waId, "WAIT_NAME");
     }
 
     let status = await getStatus(waId);
@@ -2297,6 +2425,17 @@ app.post("/webhook", async (req, res) => {
         await sendWhatsAppText(waId, "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\nDá uma olhadinha e me envia de novo, por favor, somente números:\n\nCPF: 11 dígitos\nCNPJ: 14 dígitos");
         return;
       }
+
+      if (!isValidDoc(doc)) {
+        await sendWhatsAppText(
+          waId,
+          "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\n\n" +
+            "Confere pra mim e me envia novamente *somente números*.\n\n" +
+            "CPF precisa estar *válido* (com dígitos verificadores).\n" +
+            "CNPJ também 🙂"
+        );
+        return;
+      }
       await setDoc(waId, doc);
       await sendWhatsAppText(waId, "CPF/CNPJ atualizado ✅");
       const back = (await popMenuReturn(waId)) || "ACTIVE";
@@ -2340,6 +2479,17 @@ Você pode mandar *bem completo* (com preço, detalhes, entrega etc.) ou *bem si
       const doc = cleanDoc(text);
       if (doc.length !== 11 && doc.length !== 14) {
         await sendWhatsAppText(waId, "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\nDá uma olhadinha e me envia de novo, por favor, somente números:\n\nCPF: 11 dígitos\nCNPJ: 14 dígitos");
+        return;
+      }
+
+      if (!isValidDoc(doc)) {
+        await sendWhatsAppText(
+          waId,
+          "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\n\n" +
+            "Confere pra mim e me envia novamente *somente números*.\n\n" +
+            "CPF precisa estar *válido* (com dígitos verificadores).\n" +
+            "CNPJ também 🙂"
+        );
         return;
       }
 
@@ -2610,13 +2760,13 @@ ${r.invoiceUrl || r.link || ""}
         // - 0,1,2 refinamentos => ainda conta como 1 descrição
         // - 3,4,5 refinamentos => passa a contar como 2 descrições
         // - 6,7,8 refinamentos => passa a contar como 3 descrições
-        // Ou seja: a cada 3 refinamentos (3º, 6º, 9º, ...) consome +1 descrição.
+        // Ou seja: a cada REFINES_PER_EXTRA_DESCRIPTION refinamentos (3º, 6º, 9º, ...) consome +1 descrição.
         const nextRef = refineCount + 1;
-        if (nextRef % 3 === 0) {
+        if (nextRef % REFINES_PER_EXTRA_DESCRIPTION === 0) {
           const okConsume = await consumeOneDescriptionOrBlock(waId);
           if (!okConsume) {
             await setStatus(waId, "WAIT_PLAN");
-            const planCodeNow = await redisGet(kPlanCode(waId));
+            const planCodeNow = await getPlanCode(waId);
             if (!planCodeNow) {
               await sendTrialEndedFlow(waId);
               return;
