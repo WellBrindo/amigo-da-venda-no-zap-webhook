@@ -210,6 +210,60 @@ function escapeHtml(str) {
     .replace(/'/g, "&#39;");
 }
 
+
+function renderAdminMetricsHtml(m) {
+  const status = m.status || {};
+  const rows = [
+    ["👥 Usuários (total)", m.usersTotal ?? 0],
+    ["✅ Ativos", status.ACTIVE ?? 0],
+    ["🎁 Trial", status.TRIAL ?? 0],
+    ["⏳ Aguard. Plano", status.WAIT_PLAN ?? 0],
+    ["💳 Pag. Pendente", status.PAYMENT_PENDING ?? 0],
+    ["⛔ Bloqueados", status.BLOCKED ?? 0],
+    ["📝 Descrições hoje", m.descriptionsToday ?? 0],
+    ["📆 Descrições mês", m.descriptionsMonth ?? 0],
+    ["⏱ Janela 24h (agora)", m.window24hActive ?? 0],
+    ["🟢 Upstash", m.upstashOk ? "OK" : "Falha"],
+    ["🧠 Uptime (min)", Math.round((m.uptimeSec || 0) / 60)],
+  ];
+  const cards = rows.map(([k, v]) => `
+    <div class="card">
+      <div class="muted">${escapeHtml(k)}</div>
+      <div style="font-size:22px;font-weight:700;margin-top:6px">${escapeHtml(String(v))}</div>
+    </div>
+  `).join("");
+
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin — Métricas</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .btn{display:inline-block;padding:10px 12px;border:1px solid #ccc;border-radius:10px;text-decoration:none;color:#111;background:#fafafa}
+    .btn:hover{background:#f2f2f2}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:14px}
+    .card{border:1px solid #ddd;border-radius:12px;padding:12px}
+    .muted{color:#666;font-size:13px}
+    code{background:#f6f6f6;padding:2px 6px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <div class="row">
+    <a class="btn" href="/admin">⬅️ Voltar</a>
+    <a class="btn" href="/admin/metrics?json=1">🧾 Ver JSON</a>
+  </div>
+
+  <h1 style="margin-top:14px">📊 Métricas</h1>
+  <div class="muted">Esta página é server-side (sem JS). Para integração use <code>/admin/metrics?json=1</code>.</div>
+
+  <div class="grid">${cards}</div>
+</body>
+</html>`;
+}
+
 function normalizeWaIdLike(input) {
   const s = String(input || "").trim();
   if (!s) return "";
@@ -275,6 +329,8 @@ app.get("/admin", requireAdminBasicAuth, async (_req, res) => {
 </html>`;
   res.status(200).send(html);
 });
+
+app.get("/admin/metrics-ui", requireAdminBasicAuth, (req, res) => res.redirect("/admin/metrics"));
 
 
 // ===================== ADMIN UI PAGES =====================
@@ -540,7 +596,7 @@ load(true);
 });
 
 
-app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
+app.get("/admin/metrics", requireAdminBasicAuth, async (req, res) => {
   let upstashOk = false;
   try {
     const ping = await upstashCommand(["PING"]);
@@ -593,7 +649,7 @@ app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
   const now = Date.now();
   const window24hActive = await redisZCount("z:window24h", String(now), "+inf");
 
-  res.json({
+  const metricsObj = {
     ok: true,
     uptimeSec: Math.round(process.uptime()),
     upstashOk,
@@ -602,7 +658,11 @@ app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
     descriptionsToday,
     descriptionsMonth,
     window24hActive,
-  });
+  };
+
+  const wantJson = String(req.query.json || "") === "1";
+  if (wantJson) return res.json(metricsObj);
+  return res.status(200).send(renderAdminMetricsHtml(metricsObj));
 });
 
 app.get("/admin/users", requireAdminBasicAuth, async (req, res) => {
