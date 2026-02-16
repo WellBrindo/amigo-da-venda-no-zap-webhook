@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.9.17 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+// AMIGO DAS VENDAS — server.js V15.9.20 (Admin UI por usuário + métricas completas)
 
 
 // Node 18+ já tem fetch global.
@@ -752,7 +752,7 @@ app.get("/admin/users-ui", requireAdminBasicAuth, async (req, res) => {
         <td>${escapeHtml(r.waId)}</td>
         <td>${escapeHtml(r.status)}</td>
         <td>${escapeHtml(r.plan)}</td>
-        <td><a href="/admin/user-ui?q=${encodeURIComponent(r.waId)}">Abrir</a></td>
+        <td><a href="/admin/user-ui?q=${encodeURIComponent(r.waId)}">Detalhes</a> · <a href="/admin/user-ui?q=${encodeURIComponent(r.waId)}#metrics">Métricas</a></td>
       </tr>`).join("")}
     </tbody>
   </table>
@@ -764,47 +764,67 @@ app.get("/admin/users-ui", requireAdminBasicAuth, async (req, res) => {
 app.get("/admin/user-ui", requireAdminBasicAuth, async (req, res) => {
   const q = req.query.q || "";
   const waId = normalizeWaIdLike(q);
-  if (!waId) {
-    return res.status(400).send("missing q");
-  }
-  // Reusa o JSON do /admin/user para manter consistência
-  // (sem fetch no browser, tudo server-side)
-  const status = await redisGet(kStatus(waId));
-  const plan = await redisGet(kPlan(waId));
-  const freeUsed = await redisGet(kFreeUsed(waId));
-  const quotaUsed = await redisGet(kQuotaUsed(waId));
-  const quotaMonth = await redisGet(kQuotaMonth(waId));
-  const lastDesc = await redisGet(kLastDesc(waId));
-  const refineCount = await redisGet(kRefineCount(waId));
+  if (!waId) return res.status(400).send("missing q");
 
+  // --- Core state ---
+  const status = (await redisGet(kStatus(waId))) || "";
+  const plan = (await redisGet(kPlan(waId))) || "";
+
+  // --- Quota/usage ---
+  const freeUsed = Number((await redisGet(kFreeUsed(waId))) || 0);
+  const quotaUsed = Number((await redisGet(kQuotaUsed(waId))) || 0);
+  const quotaMonth = (await redisGet(kQuotaMonth(waId))) || "";
+  const refineCount = Number((await redisGet(kRefineCount(waId))) || 0);
+
+  // --- Last content pointers (sem expor demais) ---
+  const lastInput = (await redisGet(kLastInput(waId))) || "";
+  const lastDesc = (await redisGet(kLastDesc(waId))) || "";
+
+  // --- Preferences / consent ---
   const prefs = await getPrefs(waId).catch(() => null);
   const savedConditions = await getSavedConditions(waId).catch(() => null);
   const styleAnchor = await getStyleAnchor(waId).catch(() => null);
 
-  const pending = {
-    plan: await redisGet(kPendingPlan(waId)),
-    method: await redisGet(kPendingMethod(waId)),
-    paymentId: await redisGet(kPendingPaymentId(waId)),
-    subId: await redisGet(kPendingSubId(waId)),
-    createdAt: await redisGet(kPendingCreatedAt(waId)),
-  };
+  // Nome pode estar dentro de prefs (se você tiver esse campo no fluxo)
+  const name = (prefs && typeof prefs.name === "string" && prefs.name.trim()) ? prefs.name.trim() : "";
 
-  const payload = {
-    found: true,
-    waId,
-    status,
-    plan,
-    quota: {
-      freeUsed: freeUsed ? Number(freeUsed) : 0,
-      quotaUsed: quotaUsed ? Number(quotaUsed) : 0,
-      quotaMonth,
-      refineCount: refineCount ? Number(refineCount) : 0,
-    },
-    prefs,
-    savedConditions,
-    styleAnchor,
-    lastDescriptionPreview: (lastDesc || "").slice(0, 1200),
-    pending,
+  // Documento (não exibir; apenas indicar se existe)
+  const docStored = await getDoc(waId).catch(() => "");
+
+  // --- Payment / Asaas ---
+  const customerId = (await redisGet(kAsaasCustomerId(waId))) || "";
+  const subscriptionId = (await redisGet(kAsaasSubscriptionId(waId))) || "";
+  const pixValidUntilMs = Number((await redisGet(kPixValidUntil(waId))) || 0);
+
+  // Pending payment (48h)
+  const pendingPlan = (await redisGet(kPendingPlan(waId))) || "";
+  const pendingMethod = (await redisGet(kPendingMethod(waId))) || "";
+  const pendingPaymentId = (await redisGet(kPendingPaymentId(waId))) || "";
+  const pendingSubId = (await redisGet(kPendingSubId(waId))) || "";
+  const pendingCreatedAtMs = Number((await redisGet(kPendingCreatedAt(waId))) || 0);
+  const pendingExpiresAtMs = pendingCreatedAtMs ? (pendingCreatedAtMs + PENDING_TTL_SECONDS * 1000) : 0;
+
+  // --- 24h window ---
+  const lastInboundTs = Number((await redisGet(kLastInboundTs(waId))) || 0);
+  const windowEndsAtMs = Number((await redisZScore("z:window24h", waId)) || 0);
+  const nowMs = Date.now();
+  const inWindow24h = windowEndsAtMs > nowMs;
+  const remainingHours = inWindow24h ? Math.max(0, Math.ceil((windowEndsAtMs - nowMs) / (1000 * 60 * 60))) : 0;
+
+  // --- Status catalog (para referência) ---
+  const ALL_STATUSES = [
+    "TRIAL","ACTIVE","WAIT_PLAN","WAIT_PAYMETHOD","WAIT_NAME","WAIT_NAME_VALUE","WAIT_DOC",
+    "WAIT_STRUCT_CONFIRM","WAIT_SAVE_CONDITIONS_CONFIRM","PAYMENT_PENDING","BLOCKED",
+    "MENU","MENU_UPDATE_DOC","MENU_UPDATE_NAME","MENU_CANCEL_CONFIRM","IDLE","OTHER"
+  ];
+
+  const fmtDateTime = (ms) => {
+    if (!ms) return "";
+    try {
+      return new Date(ms).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    } catch {
+      return String(ms);
+    }
   };
 
   const html = `<!doctype html>
@@ -818,13 +838,21 @@ app.get("/admin/user-ui", requireAdminBasicAuth, async (req, res) => {
     .muted{color:#666;font-size:13px}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     a.btn{display:inline-block;padding:10px 14px;border:1px solid #111;border-radius:8px;background:#111;color:#fff;text-decoration:none}
+    a.link{color:#111}
+    .card{border:1px solid #eee;border-radius:12px;padding:14px;margin:14px 0}
+    table{width:100%;border-collapse:collapse;margin-top:10px}
+    th,td{border-bottom:1px solid #eee;text-align:left;padding:10px;font-size:14px;vertical-align:top}
+    th{background:#fafafa}
+    code{background:#f6f6f6;padding:2px 6px;border-radius:6px}
     pre{white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:10px;border:1px solid #eee;overflow:auto}
+    .pill{display:inline-block;padding:4px 10px;border-radius:999px;border:1px solid #ddd;background:#fafafa;font-size:12px}
   </style>
 </head>
 <body>
   <div class="row">
     <a class="btn" href="/admin">⬅️ Voltar</a>
     <a class="btn" href="/admin/users-ui">👥 Usuários</a>
+    <a class="btn" href="/admin/metrics">📊 Métricas</a>
     <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
     <a class="btn" href="/admin/broadcast-ui">📣 Broadcast</a>
   </div>
@@ -832,7 +860,82 @@ app.get("/admin/user-ui", requireAdminBasicAuth, async (req, res) => {
   <h1 style="margin:16px 0 6px 0">👤 Usuário</h1>
   <div class="muted">waId: <b>${escapeHtml(waId)}</b></div>
 
-  <pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
+  <div class="card">
+    <div style="font-weight:700">Resumo</div>
+    <table>
+      <tbody>
+        <tr><th>Status atual</th><td><span class="pill">${escapeHtml(status || "—")}</span></td></tr>
+        <tr><th>Plano</th><td><span class="pill">${escapeHtml(plan || "—")}</span></td></tr>
+        <tr><th>Nome (se existir)</th><td>${escapeHtml(name || "—")}</td></tr>
+        <tr><th>CPF/CNPJ (armazenado)</th><td>${docStored ? "✅ Sim (não exibido)" : "—"}</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card" id="metrics">
+    <div style="font-weight:700">📊 Métricas e uso</div>
+    <table>
+      <tbody>
+        <tr><th>Mês de quota</th><td>${escapeHtml(quotaMonth || "—")}</td></tr>
+        <tr><th>Uso no mês (quotaUsed)</th><td>${quotaUsed}</td></tr>
+        <tr><th>Trial usado (freeUsed)</th><td>${freeUsed}</td></tr>
+        <tr><th>Refinamentos acumulados</th><td>${refineCount}</td></tr>
+        <tr><th>Janela 24h</th><td>${inWindow24h ? `✅ Ativo — faltam ~${remainingHours}h` : "❌ Fora da janela"}</td></tr>
+        <tr><th>Última mensagem inbound</th><td>${lastInboundTs ? `${fmtDateTime(lastInboundTs)} <span class="muted">(${lastInboundTs})</span>` : "—"}</td></tr>
+        <tr><th>Janela termina em</th><td>${windowEndsAtMs ? `${fmtDateTime(windowEndsAtMs)} <span class="muted">(${windowEndsAtMs})</span>` : "—"}</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700">💳 Pagamentos / Asaas</div>
+    <table>
+      <tbody>
+        <tr><th>Asaas Customer ID</th><td>${escapeHtml(customerId || "—")}</td></tr>
+        <tr><th>Asaas Subscription ID</th><td>${escapeHtml(subscriptionId || "—")}</td></tr>
+        <tr><th>Pix válido até</th><td>${pixValidUntilMs ? `${fmtDateTime(pixValidUntilMs)} <span class="muted">(${pixValidUntilMs})</span>` : "—"}</td></tr>
+        <tr><th>Pagamento pendente</th><td>${pendingPaymentId ? "✅ Sim" : "—"}</td></tr>
+        <tr><th>Pendente — plano</th><td>${escapeHtml(pendingPlan || "—")}</td></tr>
+        <tr><th>Pendente — método</th><td>${escapeHtml(pendingMethod || "—")}</td></tr>
+        <tr><th>Pendente — paymentId</th><td>${escapeHtml(pendingPaymentId || "—")}</td></tr>
+        <tr><th>Pendente — subId</th><td>${escapeHtml(pendingSubId || "—")}</td></tr>
+        <tr><th>Pendente — criado em</th><td>${pendingCreatedAtMs ? `${fmtDateTime(pendingCreatedAtMs)} <span class="muted">(${pendingCreatedAtMs})</span>` : "—"}</td></tr>
+        <tr><th>Pendente — expira em</th><td>${pendingExpiresAtMs ? `${fmtDateTime(pendingExpiresAtMs)} <span class="muted">(${pendingExpiresAtMs})</span>` : "—"}</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700">🧠 Preferências / condições / estilo</div>
+    <div class="muted" style="margin-top:6px">Conteúdo completo abaixo (JSON), útil para auditoria e suporte.</div>
+    <h3 style="margin:12px 0 6px 0;font-size:15px">prefs</h3>
+    <pre>${escapeHtml(JSON.stringify(prefs, null, 2))}</pre>
+    <h3 style="margin:12px 0 6px 0;font-size:15px">savedConditions</h3>
+    <pre>${escapeHtml(JSON.stringify(savedConditions, null, 2))}</pre>
+    <h3 style="margin:12px 0 6px 0;font-size:15px">styleAnchor</h3>
+    <pre>${escapeHtml(JSON.stringify(styleAnchor, null, 2))}</pre>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700">📝 Última interação (preview)</div>
+    <div class="muted" style="margin-top:6px">Preview limitado para suporte. (Não use para campanhas.)</div>
+    <h3 style="margin:12px 0 6px 0;font-size:15px">lastInput</h3>
+    <pre>${escapeHtml(lastInput.slice(0, 1200))}</pre>
+    <h3 style="margin:12px 0 6px 0;font-size:15px">lastDescriptionPreview</h3>
+    <pre>${escapeHtml(lastDesc.slice(0, 1200))}</pre>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700">📚 Status possíveis (referência)</div>
+    <div class="muted" style="margin-top:6px">Lista de status que o backend usa para máquina de estados.</div>
+    <pre>${escapeHtml(JSON.stringify(ALL_STATUSES, null, 2))}</pre>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700">🔌 JSON (API)</div>
+    <div class="muted" style="margin-top:6px">Para integração:</div>
+    <div><a class="link" href="/admin/user?waId=${encodeURIComponent(waId)}">/admin/user?waId=${escapeHtml(waId)}</a></div>
+  </div>
 </body>
 </html>`;
   res.status(200).send(html);
