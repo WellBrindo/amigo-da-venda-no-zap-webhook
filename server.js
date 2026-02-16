@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.9.12 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+// AMIGO DAS VENDAS — server.js V15.9.13 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
 
 
 // Node 18+ já tem fetch global.
@@ -295,6 +295,7 @@ async function loadMetrics(){
     ['Descrições hoje', j.descriptionsToday ?? 0],
     ['Descrições mês', j.descriptionsMonth ?? 0],
     ['Janela 24h ativa', j.window24hActive ?? 0],
+    ['Janela 24h (ativos)', j.window24hActive ?? 0],
     ['Upstash', j.upstashOk ? 'OK' : 'Falha'],
     ['Uptime (min)', Math.round((j.uptimeSec||0)/60)],
   ];
@@ -593,14 +594,13 @@ app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
     upstashOk = false;
   }
 
-  const statusKeys = await scanKeys("status:*", 12000);
+  const usersTotal = await redisSCard(K_USERS_ALL);
+
   const statusCounts = { TRIAL: 0, ACTIVE: 0, WAIT_PLAN: 0, PAYMENT_PENDING: 0, BLOCKED: 0, OTHER: 0 };
-  for (const k of statusKeys) {
-    const v = await redisGet(k);
-    const vv = String(v || "").toUpperCase();
-    if (statusCounts[vv] !== undefined) statusCounts[vv] += 1;
-    else statusCounts.OTHER += 1;
+  for (const b of DASH_STATUS_BUCKETS) {
+    statusCounts[b] = await redisSCard(kStatusSet(b));
   }
+  statusCounts.OTHER = await redisSCard(kStatusSet("OTHER"));
 
   const d = new Date();
   const dayKey = `metrics:descriptions:day:${d.toISOString().slice(0,10)}`;
@@ -608,14 +608,14 @@ app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
   const descriptionsToday = Number((await redisGet(dayKey)) || 0) || 0;
   const descriptionsMonth = Number((await redisGet(monthKey)) || 0) || 0;
 
-  await redisZRemRangeByScore(Z_WINDOW_24H, "-inf", String(Date.now()));
-  const window24hActive = await redisZCount(Z_WINDOW_24H, String(Date.now()), "+inf");
+  const now = Date.now();
+  const window24hActive = await redisZCount("z:window24h", String(now), "+inf");
 
   res.json({
     ok: true,
     uptimeSec: Math.round(process.uptime()),
     upstashOk,
-    usersTotal: statusKeys.length,
+    usersTotal,
     status: statusCounts,
     descriptionsToday,
     descriptionsMonth,
@@ -625,21 +625,34 @@ app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
 
 app.get("/admin/users", requireAdminBasicAuth, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || "500", 10) || 500, 5000);
-  const statusKeys = await scanKeys("status:*", 12000);
-  const waIds = statusKeys.map(k => String(k).split(":")[1]).filter(Boolean);
+
+  // Lista baseada em índice (sem SCAN)
+  let cursor = "0";
+  let waIds = [];
+  let guard = 0;
+  while (waIds.length < limit && guard < 50) {
+    guard += 1;
+    const batch = await redisSScan(K_USERS_ALL, cursor, 200);
+    cursor = batch.cursor;
+    for (const m of batch.members) {
+      const id = String(m || "");
+      if (id) waIds.push(id);
+      if (waIds.length >= limit) break;
+    }
+    if (cursor === "0") break;
+  }
 
   // sort stable (lexicographic)
-  waIds.sort();
+  waIds = Array.from(new Set(waIds)).sort();
 
-  const slice = waIds.slice(0, limit);
   const out = [];
-  for (const waId of slice) {
+  for (const waId of waIds) {
     const status = await redisGet(kStatus(waId));
     const plan = await redisGet(kPlan(waId));
     out.push({ waId, status: status || null, plan: plan || null });
   }
 
-  res.status(200).json({ ok: true, total: waIds.length, returned: out.length, users: out });
+  res.status(200).json({ ok: true, total: await redisSCard(K_USERS_ALL), returned: out.length, users: out });
 });
 
 app.get("/admin/user", requireAdminBasicAuth, async (req, res) => {
@@ -931,6 +944,36 @@ async function redisZRemRangeByScore(key, min, max) {
   return Number(r?.result ?? 0);
 }
 
+async function redisZCount(key, min, max) {
+  if (!USE_UPSTASH) return 0;
+  const r = await upstashCommand(["ZCOUNT", key, String(min), String(max)]);
+  return Number(r?.result || 0) || 0;
+}
+
+async function redisSAdd(key, member) {
+  if (!USE_UPSTASH) return null;
+  return upstashCommand(["SADD", key, String(member || "")]);
+}
+
+async function redisSRem(key, member) {
+  if (!USE_UPSTASH) return null;
+  return upstashCommand(["SREM", key, String(member || "")]);
+}
+
+async function redisSCard(key) {
+  if (!USE_UPSTASH) return 0;
+  const r = await upstashCommand(["SCARD", key]);
+  return Number(r?.result || 0) || 0;
+}
+
+async function redisSScan(key, cursor="0", count=200) {
+  if (!USE_UPSTASH) return { cursor: "0", members: [] };
+  const r = await upstashCommand(["SSCAN", key, String(cursor), "COUNT", String(count)]);
+  const result = r?.result;
+  if (!Array.isArray(result) || result.length < 2) return { cursor: "0", members: [] };
+  return { cursor: String(result[0]), members: Array.isArray(result[1]) ? result[1] : [] };
+}
+
 function isoDayKey() {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 }
@@ -949,6 +992,20 @@ async function incrementDescriptionMetrics() {
 // ===================== CHAVES (REDIS) =====================
 function kUser(waId) { return `user:${waId}`; }
 function kStatus(waId) { return `status:${waId}`; }
+const K_USERS_ALL = "users:all";
+const DASH_STATUS_BUCKETS = ["TRIAL","ACTIVE","WAIT_PLAN","PAYMENT_PENDING","BLOCKED"];
+function kStatusSet(bucket){ return `users:status:${bucket}`; }
+
+async function touchUserIndex(waId){
+  if (!waId) return;
+  await redisSAdd(K_USERS_ALL, waId);
+}
+
+function bucketizeStatus(status){
+  const s = String(status || "").toUpperCase();
+  return DASH_STATUS_BUCKETS.includes(s) ? s : "OTHER";
+}
+
 
 function kLastInboundTs(waId) { return `last_inbound_ts:${waId}`; } // epoch ms
 const Z_WINDOW_24H = "z:window24h"; // member=waId score=window_end_ms
@@ -1025,7 +1082,16 @@ async function getStatus(waId) {
   return s || "WAIT_NAME";
 }
 async function setStatus(waId, status) {
+  await touchUserIndex(waId);
   await redisSet(kStatus(waId), status);
+
+  // Mantém índices baratos para o dashboard (sem SCAN)
+  const bucket = bucketizeStatus(status);
+  const allBuckets = [...DASH_STATUS_BUCKETS, "OTHER"];
+  for (const b of allBuckets) {
+    await redisSRem(kStatusSet(b), waId);
+  }
+  await redisSAdd(kStatusSet(bucket), waId);
 }
 
 async function getUser(waId) {
@@ -2676,7 +2742,8 @@ app.post("/webhook", async (req, res) => {
     if (await isDuplicateMessage(msg.id)) return;
 
     // Marca janela de 24h (última mensagem inbound do usuário)
-    await touch24hWindow(waId);
+    await touchUserIndex(waId);
+        await touch24hWindow(waId);
 
     if (msg.type !== "text") {
       await sendWhatsAppText(
