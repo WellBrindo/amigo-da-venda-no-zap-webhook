@@ -201,6 +201,15 @@ async function scanKeys(match, maxKeys = 8000) {
   return keys;
 }
 
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function normalizeWaIdLike(input) {
   const s = String(input || "").trim();
   if (!s) return "";
