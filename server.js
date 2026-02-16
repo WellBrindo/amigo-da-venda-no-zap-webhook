@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.9.9 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+// AMIGO DAS VENDAS — server.js V15.9.10 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
 
 
 // Node 18+ já tem fetch global.
@@ -1994,14 +1994,14 @@ async function buildMySubscriptionText(waId) {
 
       const dd = String(d || "").padStart(2, "0");
       const mm = String(m || "").padStart(2, "0");
-      extra = `\nRenovação (Cartão): *${dd}/${mm}* — faltam *${daysLeft} dia(s)*`;
+      extra = `\n📅 Renovação (Cartão): *${dd}/${mm}* — faltam *${daysLeft} dia(s)*`;
     }
   }
 
   return (
     "*Minha assinatura*\n\n" +
-    `Plano: *${plan?.name || "—"}*\n` +
-    `Uso no mês: *${used}* / *${plan?.quotaMonthly || "—"}*` +
+    `📦 Plano: *${plan?.name || "—"}*\n` +
+    `📊 Uso no mês: *${used}* / *${plan?.quotaMonthly || "—"}*` +
     extra +
     `\n\nAjuda: ${HELP_URL}`
   );
