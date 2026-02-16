@@ -244,7 +244,7 @@ app.get("/admin", requireAdminBasicAuth, async (_req, res) => {
 
   <div class="card" style="margin-top:14px">
     <div class="row">
-      <a class="btn" href="/admin/metrics">📊 Métricas (JSON)</a>
+      <a class="btn" href="/admin/metrics-ui">📊 Métricas (JSON)</a>
       <a class="btn" href="/admin/users-ui">👥 Usuários</a>
       <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
       <a class="btn" href="/admin/broadcast-ui">📣 Broadcast</a>
@@ -1062,6 +1062,16 @@ async function redisZCount(key, min, max) {
   return Number(r?.result ?? 0);
 }
 
+async function redisZScore(key, member) {
+  if (!USE_UPSTASH) return null;
+  const r = await upstashCommand(["ZSCORE", key, String(member)]);
+  const v = r?.result;
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+
 async function redisZRemRangeByScore(key, min, max) {
   if (!USE_UPSTASH) return 0;
   const r = await upstashCommand(["ZREMRANGEBYSCORE", key, String(min), String(max)]);
@@ -1137,6 +1147,15 @@ async function ensureStatusIndex(waId){
   }
   await redisSAdd(kStatusSet(bucket), waId);
 }
+
+async function reindexStatusBuckets(maxUsers = 200) {
+  // Reindexa buckets de status usando apenas users:all (sem SCAN global)
+  const { members } = await redisSScan(K_USERS_ALL, "0", maxUsers);
+  for (const waId of members) {
+    await ensureStatusIndex(waId);
+  }
+}
+
 
 
 function kLastInboundTs(waId) { return `last_inbound_ts:${waId}`; } // epoch ms
