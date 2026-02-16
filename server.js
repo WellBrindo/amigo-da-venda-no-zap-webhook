@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.9.13 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+// AMIGO DAS VENDAS — server.js V15.9.17 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
 
 
 // Node 18+ já tem fetch global.
@@ -557,6 +557,33 @@ app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
   }
   statusCounts.OTHER = await redisSCard(kStatusSet("OTHER"));
 
+  // Auto-repair leve: após deploy, usuários antigos podem ter status salvo mas não indexado nos sets.
+  // Para manter baixo custo, só reindexa se houver usuários e todos os buckets estiverem zerados.
+  const _sumBuckets = Object.values(statusCounts).reduce((a,b)=>a+Number(b||0),0);
+  if (usersTotal > 0 && _sumBuckets === 0) {
+    let cursorFix = "0";
+    let fixed = 0;
+    let guardFix = 0;
+    while (fixed < Math.min(usersTotal, 200) && guardFix < 10) {
+      guardFix += 1;
+      const batchFix = await redisSScan(K_USERS_ALL, cursorFix, 200);
+      cursorFix = batchFix.cursor;
+      for (const mem of batchFix.members) {
+        const id = String(mem || "");
+        if (!id) continue;
+        await ensureStatusIndex(id);
+        fixed += 1;
+        if (fixed >= Math.min(usersTotal, 200)) break;
+      }
+      if (cursorFix === "0") break;
+    }
+    // Reconta depois do repair
+    for (const b of DASH_STATUS_BUCKETS) {
+      statusCounts[b] = await redisSCard(kStatusSet(b));
+    }
+    statusCounts.OTHER = await redisSCard(kStatusSet("OTHER"));
+  }
+
   const d = new Date();
   const dayKey = `metrics:descriptions:day:${d.toISOString().slice(0,10)}`;
   const monthKey = `metrics:descriptions:month:${d.toISOString().slice(0,7)}`;
@@ -1090,11 +1117,25 @@ function kStatusSet(bucket){ return `users:status:${bucket}`; }
 async function touchUserIndex(waId){
   if (!waId) return;
   await redisSAdd(K_USERS_ALL, waId);
+  // Garante que o usuário esteja no bucket correto para métricas sem SCAN
+  await ensureStatusIndex(waId);
 }
 
 function bucketizeStatus(status){
   const s = String(status || "").toUpperCase();
   return DASH_STATUS_BUCKETS.includes(s) ? s : "OTHER";
+}
+
+
+async function ensureStatusIndex(waId){
+  if (!waId) return;
+  const status = await getStatus(waId);
+  const bucket = bucketizeStatus(status);
+  const allBuckets = [...DASH_STATUS_BUCKETS, "OTHER"];
+  for (const b of allBuckets) {
+    await redisSRem(kStatusSet(b), waId);
+  }
+  await redisSAdd(kStatusSet(bucket), waId);
 }
 
 
