@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.9.11 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+// AMIGO DAS VENDAS — server.js V15.9.12 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
 
 
 // Node 18+ já tem fetch global.
@@ -216,6 +216,9 @@ app.get("/admin", requireAdminBasicAuth, async (_req, res) => {
   <title>Amigo das Vendas — Admin</title>
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
+    
+    .btn{display:inline-block;padding:10px 12px;border:1px solid #ddd;border-radius:10px;text-decoration:none;background:#fafafa}
+    .btn:hover{background:#f1f1f1}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px}
     .card{border:1px solid #ddd;border-radius:10px;padding:12px}
     .muted{color:#666;font-size:13px}
@@ -229,6 +232,12 @@ app.get("/admin", requireAdminBasicAuth, async (_req, res) => {
 </head>
 <body>
   <h1>Amigo das Vendas — Dashboard</h1>
+  <div class="row" style="margin:10px 0 14px 0;gap:10px;flex-wrap:wrap">
+    <a class="btn" href="/admin">🏠 Início</a>
+    <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
+    <a class="btn" href="/admin/broadcast-ui">📣 Enviar mensagem</a>
+    <a class="btn" href="/admin/metrics" target="_blank">📊 Métricas (JSON)</a>
+  </div>
   <div class="muted">Acesso restrito (Basic Auth). URL: <b>/admin</b></div>
 
   <div class="grid" id="cards"></div>
@@ -311,6 +320,269 @@ loadMetrics();
 </html>`;
   res.status(200).send(html);
 });
+
+// ===================== ADMIN UI PAGES =====================
+
+// Página: Enviar mensagem (UI). O envio real é via POST /admin/broadcast
+app.get("/admin/broadcast", requireAdminBasicAuth, (_req, res) => {
+  res.redirect(302, "/admin/broadcast-ui");
+});
+
+app.get("/admin/broadcast-ui", requireAdminBasicAuth, async (_req, res) => {
+  const html = `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin — Enviar mensagem</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
+    a{color:inherit}
+    .btn{display:inline-block;padding:10px 12px;border:1px solid #ddd;border-radius:10px;text-decoration:none;background:#fafafa}
+    .btn:hover{background:#f1f1f1}
+    .row{display:flex;gap:10px;align-items:center}
+    .card{border:1px solid #eee;border-radius:12px;padding:14px;margin:14px 0}
+    textarea,input,select{width:100%;padding:10px;border:1px solid #ddd;border-radius:10px;font:inherit}
+    pre{background:#0b1020;color:#e6e6e6;padding:12px;border-radius:12px;overflow:auto;white-space:pre-wrap}
+    .muted{color:#666;font-size:13px}
+    label{display:block;margin:10px 0 6px 0;font-weight:600}
+  </style>
+</head>
+<body>
+  <div class="row" style="flex-wrap:wrap">
+    <a class="btn" href="/admin">🏠 Início</a>
+    <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
+    <a class="btn" href="/admin/broadcast-ui">📣 Enviar mensagem</a>
+  </div>
+
+  <h1 style="margin:16px 0 6px 0">📣 Enviar mensagem (janela 24h)</h1>
+  <div class="muted">Dica: use <b>dryRun</b> primeiro para ver quantos serão atingidos. Envia apenas para usuários com janela ativa.</div>
+
+  <div class="card">
+    <label>Mensagem</label>
+    <textarea id="msg" rows="5" placeholder="Digite a mensagem..."></textarea>
+
+    <div class="row" style="margin-top:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px">
+        <label>Filtro</label>
+        <select id="mode">
+          <option value="all">Todos (janela 24h)</option>
+          <option value="paid">Pagantes</option>
+          <option value="trial">Trial</option>
+          <option value="pending">Pagamento pendente</option>
+        </select>
+      </div>
+      <div style="flex:1;min-width:200px">
+        <label>Plano (opcional)</label>
+        <input id="plan" placeholder="ex: basic / pro (deixe vazio para todos)" />
+      </div>
+      <div style="flex:1;min-width:140px">
+        <label>Limite</label>
+        <input id="limit" type="number" value="200" min="1" max="500" />
+      </div>
+      <div style="flex:1;min-width:140px">
+        <label>Delay ms</label>
+        <input id="delayMs" type="number" value="200" min="0" max="2000" />
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px;flex-wrap:wrap">
+      <button class="btn" onclick="send(true)">🧪 Dry-run</button>
+      <button class="btn" onclick="send(false)">🚀 Enviar</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="muted">Resposta</div>
+    <pre id="out">{ }</pre>
+  </div>
+
+<script>
+function esc(s){return String(s||'');}
+async function send(dry){
+  const out = document.getElementById('out');
+  out.textContent = 'Enviando...';
+  const payload = {
+    message: document.getElementById('msg').value || '',
+    mode: document.getElementById('mode').value || 'all',
+    plan: (document.getElementById('plan').value || '').trim(),
+    limit: Number(document.getElementById('limit').value || 200),
+    delayMs: Number(document.getElementById('delayMs').value || 200),
+    dryRun: !!dry
+  };
+  try{
+    const r = await fetch('/admin/broadcast', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const t = await r.text();
+    try{ out.textContent = JSON.stringify(JSON.parse(t), null, 2); }
+    catch(e){ out.textContent = t; }
+  }catch(e){
+    out.textContent = 'Erro: ' + esc(e && e.message ? e.message : e);
+  }
+}
+</script>
+</body>
+</html>`;
+  res.status(200).send(html);
+});
+
+// Página: Janela 24h (UI). Os dados vêm do GET /admin/window24h (JSON)
+app.get("/admin/window24h-ui", requireAdminBasicAuth, async (_req, res) => {
+  const html = `<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin — Janela 24h</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
+    a{color:inherit}
+    .btn{display:inline-block;padding:10px 12px;border:1px solid #ddd;border-radius:10px;text-decoration:none;background:#fafafa}
+    .btn:hover{background:#f1f1f1}
+    .row{display:flex;gap:10px;align-items:center}
+    .card{border:1px solid #eee;border-radius:12px;padding:14px;margin:14px 0}
+    input,select{padding:10px;border:1px solid #ddd;border-radius:10px;font:inherit}
+    table{width:100%;border-collapse:collapse}
+    th,td{border-bottom:1px solid #eee;padding:10px;text-align:left;font-size:14px}
+    .muted{color:#666;font-size:13px}
+    .pill{display:inline-block;padding:4px 8px;border:1px solid #ddd;border-radius:999px;font-size:12px;background:#fafafa}
+  </style>
+</head>
+<body>
+  <div class="row" style="flex-wrap:wrap">
+    <a class="btn" href="/admin">🏠 Início</a>
+    <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
+    <a class="btn" href="/admin/broadcast-ui">📣 Enviar mensagem</a>
+  </div>
+
+  <h1 style="margin:16px 0 6px 0">⏱ Usuários na janela de 24h</h1>
+  <div class="muted">Mostra usuários que enviaram mensagem nas últimas 24h (janela ativa). Use filtros para segmentar.</div>
+
+  <div class="card">
+    <div class="row" style="flex-wrap:wrap">
+      <div>
+        <div class="muted" style="margin-bottom:6px">Filtro</div>
+        <select id="mode">
+          <option value="all">Todos</option>
+          <option value="paid">Pagantes</option>
+          <option value="trial">Trial</option>
+          <option value="pending">Pagamento pendente</option>
+        </select>
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom:6px">Plano (opcional)</div>
+        <input id="plan" placeholder="basic / pro" />
+      </div>
+      <div>
+        <div class="muted" style="margin-bottom:6px">Limite</div>
+        <input id="limit" type="number" value="50" min="1" max="200" />
+      </div>
+      <div style="align-self:flex-end">
+        <a class="btn" href="#" onclick="load(true);return false;">🔄 Atualizar</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;flex-wrap:wrap">
+      <div class="muted" id="summary">—</div>
+      <div class="row">
+        <a class="btn" href="#" onclick="prev();return false;">⬅️ Anterior</a>
+        <a class="btn" href="#" onclick="next();return false;">Próximo ➡️</a>
+      </div>
+    </div>
+
+    <div style="overflow:auto;margin-top:10px">
+      <table>
+        <thead>
+          <tr>
+            <th>waId</th>
+            <th>Janela termina</th>
+            <th>Faltam</th>
+            <th>Status</th>
+            <th>Plano</th>
+            <th>Uso (mês)</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+let cursor = 0;
+let last = null;
+
+function fmt(ms){
+  const d = new Date(ms);
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  const hh = String(d.getHours()).padStart(2,'0');
+  const mi = String(d.getMinutes()).padStart(2,'0');
+  return dd+'/'+mm+' '+hh+':'+mi;
+}
+
+function humanLeft(ms){
+  const diff = ms - Date.now();
+  if(diff <= 0) return '0m';
+  const m = Math.ceil(diff/60000);
+  if(m < 60) return m+'m';
+  const h = Math.floor(m/60);
+  const mm = m%60;
+  return h+'h '+mm+'m';
+}
+
+async function load(reset){
+  if(reset){ cursor = 0; last = null; }
+  const mode = document.getElementById('mode').value || 'all';
+  const plan = (document.getElementById('plan').value || '').trim();
+  const limit = Number(document.getElementById('limit').value || 50);
+
+  const qs = new URLSearchParams();
+  qs.set('mode', mode);
+  if(plan) qs.set('plan', plan);
+  qs.set('limit', String(limit));
+  qs.set('cursor', String(cursor));
+
+  const r = await fetch('/admin/window24h?' + qs.toString());
+  const j = await r.json();
+
+  last = j;
+  document.getElementById('summary').textContent = 'Total (estimado): ' + (j.totalEstimated ?? '-') + ' | Retornados: ' + (j.count ?? 0);
+
+  const tb = document.getElementById('rows');
+  const items = j.items || [];
+  tb.innerHTML = items.map(it => {
+    const end = Number(it.windowEndsAt || 0);
+    return '<tr>' +
+      '<td><span class="pill">'+ (it.waId||'') +'</span></td>' +
+      '<td>'+ (end ? fmt(end) : '-') +'</td>' +
+      '<td>'+ (end ? humanLeft(end) : '-') +'</td>' +
+      '<td>'+ (it.status || '-') +'</td>' +
+      '<td>'+ (it.plan || '-') +'</td>' +
+      '<td>'+ (it.usageMonth ?? '-') +'</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function next(){
+  if(!last) return load(true);
+  cursor = Number(last.nextCursor || 0);
+  load(false);
+}
+
+function prev(){
+  // paginação simples: volta reduzindo cursor; se 0, fica
+  cursor = Math.max(0, cursor - 1);
+  load(false);
+}
+
+load(true);
+</script>
+</body>
+</html>`;
+  res.status(200).send(html);
+});
+
 
 app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
   let upstashOk = false;
