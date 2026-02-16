@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.9.10 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
+// AMIGO DAS VENDAS — server.js V15.9.11 (Dashboard Admin Basic Auth + métricas + consulta usuário) (Atualização: quotas/expiração + retry OpenAI + controle de custo + assinatura Asaas ativa)
 
 
 // Node 18+ já tem fetch global.
@@ -285,6 +285,7 @@ async function loadMetrics(){
     ['Bloqueados', j.status?.BLOCKED ?? 0],
     ['Descrições hoje', j.descriptionsToday ?? 0],
     ['Descrições mês', j.descriptionsMonth ?? 0],
+    ['Janela 24h ativa', j.window24hActive ?? 0],
     ['Upstash', j.upstashOk ? 'OK' : 'Falha'],
     ['Uptime (min)', Math.round((j.uptimeSec||0)/60)],
   ];
@@ -335,6 +336,9 @@ app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
   const descriptionsToday = Number((await redisGet(dayKey)) || 0) || 0;
   const descriptionsMonth = Number((await redisGet(monthKey)) || 0) || 0;
 
+  await redisZRemRangeByScore(Z_WINDOW_24H, "-inf", String(Date.now()));
+  const window24hActive = await redisZCount(Z_WINDOW_24H, String(Date.now()), "+inf");
+
   res.json({
     ok: true,
     uptimeSec: Math.round(process.uptime()),
@@ -343,6 +347,7 @@ app.get("/admin/metrics", requireAdminBasicAuth, async (_req, res) => {
     status: statusCounts,
     descriptionsToday,
     descriptionsMonth,
+    window24hActive,
   });
 });
 
@@ -411,6 +416,147 @@ app.get("/admin/user", requireAdminBasicAuth, async (req, res) => {
     lastDescriptionPreview: (lastDesc || "").slice(0, 700),
     pending,
   });
+});
+
+
+app.get("/admin/window24h", requireAdminBasicAuth, async (req, res) => {
+  try {
+    const now = Date.now();
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+    const cursor = Number(req.query.cursor || 0);
+
+    const mode = String(req.query.mode || "all").toLowerCase(); // all | paid | trial | pending
+    const planFilter = String(req.query.plan || "").trim(); // ex: "basic" ou "pro"; vazio = todos
+
+    // limpa expirados (barato)
+    await redisZRemRangeByScore(Z_WINDOW_24H, "-inf", String(now));
+
+    // buscamos em lotes e filtramos em memória (paginação por score)
+    const minScore = Math.max(now, cursor || now);
+    const raw = await redisZRangeByScore(Z_WINDOW_24H, String(minScore), "+inf", 0, 500, true); // [member, score, member, score...]
+    const items = [];
+    let nextCursor = 0;
+
+    for (let i = 0; i < raw.length; i += 2) {
+      const waId = String(raw[i] || "");
+      const endMs = Number(raw[i + 1] || 0);
+      if (!waId || !endMs) continue;
+
+      // cursor para próxima página: o maior score visto
+      nextCursor = Math.max(nextCursor, endMs);
+
+      // filtros de estado/plano
+      const planCode = (await getPlanCode(waId)) || "";
+      const hasPlan = Boolean(planCode);
+
+      if (planFilter && planCode !== planFilter) continue;
+
+      if (mode === "paid" && !hasPlan) continue;
+      if (mode === "trial" && hasPlan) continue;
+
+      if (mode === "pending") {
+        const st = await getStatus(waId);
+        if (st !== "PAYMENT_PENDING") continue;
+      }
+
+      const remainingMs = Math.max(0, endMs - now);
+      const remainingHours = Math.ceil(remainingMs / (1000 * 60 * 60));
+
+      items.push({
+        waId,
+        plan: planCode || "TRIAL",
+        status: await getStatus(waId),
+        windowEndsAtMs: endMs,
+        remainingHours,
+      });
+
+      if (items.length >= limit) break;
+    }
+
+    res.json({
+      nowMs: now,
+      count: items.length,
+      nextCursor: items.length ? nextCursor : 0,
+      items,
+    });
+  } catch (e) {
+    safeLogError("Admin window24h erro:", e);
+    res.status(500).json({ error: "Erro ao listar janela 24h" });
+  }
+});
+
+function sleepMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+app.post("/admin/broadcast", requireAdminBasicAuth, express.json({ limit: "64kb" }), async (req, res) => {
+  try {
+    const now = Date.now();
+    const body = req.body || {};
+    const message = String(body.message || "").trim();
+    if (!message) return res.status(400).json({ error: "message é obrigatório" });
+
+    const limit = Math.max(1, Math.min(500, Number(body.limit || 200)));
+    const mode = String(body.mode || "all").toLowerCase(); // all | paid | trial | pending
+    const planFilter = String(body.plan || "").trim(); // opcional
+    const dryRun = Boolean(body.dryRun);
+    const delayMs = Math.max(0, Math.min(2000, Number(body.delayMs || process.env.BROADCAST_DELAY_MS || 200)));
+
+    await redisZRemRangeByScore(Z_WINDOW_24H, "-inf", String(now));
+
+    const raw = await redisZRangeByScore(Z_WINDOW_24H, String(now), "+inf", 0, 2000, true);
+    const targets = [];
+
+    for (let i = 0; i < raw.length; i += 2) {
+      const waId = String(raw[i] || "");
+      const endMs = Number(raw[i + 1] || 0);
+      if (!waId || !endMs) continue;
+
+      const planCode = (await getPlanCode(waId)) || "";
+      const hasPlan = Boolean(planCode);
+
+      if (planFilter && planCode !== planFilter) continue;
+      if (mode === "paid" && !hasPlan) continue;
+      if (mode === "trial" && hasPlan) continue;
+      if (mode === "pending") {
+        const st = await getStatus(waId);
+        if (st !== "PAYMENT_PENDING") continue;
+      }
+
+      // segurança extra: garante que está realmente dentro da janela (pela última inbound)
+      if (!(await isIn24hWindow(waId, now))) continue;
+
+      targets.push({ waId, plan: planCode || "TRIAL" });
+      if (targets.length >= limit) break;
+    }
+
+    let sent = 0;
+    const errors = [];
+
+    if (!dryRun) {
+      for (const t of targets) {
+        try {
+          await sendWhatsAppText(t.waId, message);
+          sent += 1;
+        } catch (err) {
+          errors.push({ waId: t.waId, error: String(err?.message || err) });
+        }
+        if (delayMs) await sleepMs(delayMs);
+      }
+    }
+
+    res.json({
+      dryRun,
+      requestedLimit: limit,
+      matched: targets.length,
+      sent,
+      errorsCount: errors.length,
+      errors: errors.slice(0, 50),
+      mode,
+      plan: planFilter || null,
+    });
+  } catch (e) {
+    safeLogError("Admin broadcast erro:", e);
+    res.status(500).json({ error: "Erro ao enviar broadcast" });
+  }
 });
 
 
@@ -484,6 +630,35 @@ async function redisIncr(key) {
   return Number(r?.result ?? 0);
 }
 
+
+async function redisZAdd(key, score, member) {
+  if (!USE_UPSTASH) return null;
+  const s = String(Math.floor(Number(score || 0)));
+  const m = String(member || "");
+  return upstashCommand(["ZADD", key, s, m]);
+}
+
+async function redisZRangeByScore(key, min, max, offset = 0, count = 50, withScores = true) {
+  if (!USE_UPSTASH) return [];
+  const args = ["ZRANGEBYSCORE", key, String(min), String(max)];
+  if (withScores) args.push("WITHSCORES");
+  args.push("LIMIT", String(offset), String(count));
+  const r = await upstashCommand(args);
+  return r?.result ?? [];
+}
+
+async function redisZCount(key, min, max) {
+  if (!USE_UPSTASH) return 0;
+  const r = await upstashCommand(["ZCOUNT", key, String(min), String(max)]);
+  return Number(r?.result ?? 0);
+}
+
+async function redisZRemRangeByScore(key, min, max) {
+  if (!USE_UPSTASH) return 0;
+  const r = await upstashCommand(["ZREMRANGEBYSCORE", key, String(min), String(max)]);
+  return Number(r?.result ?? 0);
+}
+
 function isoDayKey() {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 }
@@ -502,6 +677,30 @@ async function incrementDescriptionMetrics() {
 // ===================== CHAVES (REDIS) =====================
 function kUser(waId) { return `user:${waId}`; }
 function kStatus(waId) { return `status:${waId}`; }
+
+function kLastInboundTs(waId) { return `last_inbound_ts:${waId}`; } // epoch ms
+const Z_WINDOW_24H = "z:window24h"; // member=waId score=window_end_ms
+
+function window24hEndMs(nowMs) {
+  return Number(nowMs) + (24 * 60 * 60 * 1000);
+}
+
+async function touch24hWindow(waId, nowMs = Date.now()) {
+  const n = Number(nowMs || Date.now());
+  await redisSetEx(kLastInboundTs(waId), String(n), 60 * 60 * 24 * 8); // 8 dias
+  await redisZAdd(Z_WINDOW_24H, window24hEndMs(n), waId);
+
+  // limpeza leve (amostral) para não crescer infinito
+  if (Math.random() < 0.05) {
+    await redisZRemRangeByScore(Z_WINDOW_24H, "-inf", String(Date.now()));
+  }
+}
+
+async function isIn24hWindow(waId, nowMs = Date.now()) {
+  const last = Number((await redisGet(kLastInboundTs(waId))) || 0);
+  if (!last) return false;
+  return (Number(nowMs) - last) <= (24 * 60 * 60 * 1000);
+}
 
 function kFreeUsed(waId) { return `freeused:${waId}`; }
 
@@ -2203,6 +2402,9 @@ app.post("/webhook", async (req, res) => {
     if (!waId) return;
 
     if (await isDuplicateMessage(msg.id)) return;
+
+    // Marca janela de 24h (última mensagem inbound do usuário)
+    await touch24hWindow(waId);
 
     if (msg.type !== "text") {
       await sendWhatsAppText(
