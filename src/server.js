@@ -1,4 +1,5 @@
 import express from "express";
+import { adminRouter } from "./routes/admin.js";
 
 const app = express();
 app.use(express.json());
@@ -10,6 +11,8 @@ app.get("/health", (req, res) => {
     version: "16.0.0-modular-base"
   });
 });
+
+app.use("/admin", adminRouter());
 
 const PORT = process.env.PORT || 3000;
 
