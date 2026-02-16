@@ -11,6 +11,7 @@ async function upstash(path, bodyObj) {
   assertRedisEnv();
 
   const url = `${UPSTASH_REDIS_REST_URL}${path}`;
+
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -20,7 +21,6 @@ async function upstash(path, bodyObj) {
     body: bodyObj ? JSON.stringify(bodyObj) : undefined,
   });
 
-  // Upstash retorna JSON com { result, error }
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
@@ -35,7 +35,10 @@ async function upstash(path, bodyObj) {
   return data?.result;
 }
 
-// ---- Helpers básicos ----
+// -----------------
+// Basic Commands
+// -----------------
+
 export async function redisPing() {
   return upstash("/PING");
 }
@@ -45,17 +48,24 @@ export async function redisGet(key) {
 }
 
 export async function redisSet(key, value) {
-  // value deve ser string
-  return upstash(`/SET/${encodeURIComponent(key)}/${encodeURIComponent(String(value))}`);
+  return upstash(
+    `/SET/${encodeURIComponent(key)}/${encodeURIComponent(String(value))}`
+  );
 }
 
 export async function redisDel(key) {
   return upstash(`/DEL/${encodeURIComponent(key)}`);
 }
 
-// Sets (úteis p/ índices)
+// -----------------
+// Sets
+// -----------------
+
 export async function redisSAdd(key, ...members) {
-  const encoded = members.map((m) => encodeURIComponent(String(m))).join("/");
+  const encoded = members
+    .map((m) => encodeURIComponent(String(m)))
+    .join("/");
+
   return upstash(`/SADD/${encodeURIComponent(key)}/${encoded}`);
 }
 
@@ -67,20 +77,40 @@ export async function redisSMembers(key) {
   return upstash(`/SMEMBERS/${encodeURIComponent(key)}`);
 }
 
-// Sorted Sets (janela 24h)
+// -----------------
+// Sorted Sets
+// -----------------
+
 export async function redisZAdd(key, score, member) {
-  return upstash(`/ZADD/${encodeURIComponent(key)}/${encodeURIComponent(String(score))}/${encodeURIComponent(String(member))}`);
+  return upstash(
+    `/ZADD/${encodeURIComponent(key)}/${encodeURIComponent(
+      String(score)
+    )}/${encodeURIComponent(String(member))}`
+  );
 }
 
 export async function redisZScore(key, member) {
-  return upstash(`/ZSCORE/${encodeURIComponent(key)}/${encodeURIComponent(String(member))}`);
+  return upstash(
+    `/ZSCORE/${encodeURIComponent(key)}/${encodeURIComponent(
+      String(member)
+    )}`
+  );
 }
 
 export async function redisZCount(key, min, max) {
-  return upstash(`/ZCOUNT/${encodeURIComponent(key)}/${encodeURIComponent(String(min))}/${encodeURIComponent(String(max))}`);
+  return upstash(
+    `/ZCOUNT/${encodeURIComponent(key)}/${encodeURIComponent(
+      String(min)
+    )}/${encodeURIComponent(String(max))}`
+  );
 }
 
 export async function redisZRangeByScore(key, min, max, limit = 1000) {
-  // ZRANGEBYSCORE key min max LIMIT 0 limit
-  return upstash(`/ZRANGEBYSCORE/${encodeURIComponent(key)}/${encodeURIComponent(String(min))}/${encodeURIComponent(String(max)))}/LIMIT/0/${encodeURIComponent(String(limit))}`);
+  return upstash(
+    `/ZRANGEBYSCORE/${encodeURIComponent(key)}/${encodeURIComponent(
+      String(min)
+    )}/${encodeURIComponent(String(max))}/LIMIT/0/${encodeURIComponent(
+      String(limit)
+    )}`
+  );
 }
