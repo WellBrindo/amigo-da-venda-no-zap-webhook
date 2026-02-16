@@ -1,3 +1,4 @@
+// src/services/state.js
 import { redisGet, redisSet, redisDel, redisSAdd } from "./redis.js";
 
 export const USER_STATUSES = [
@@ -39,6 +40,23 @@ function keyTemplateMode(waId) {
   return `template_mode:${waId}`; // FIXED | FREE
 }
 
+// ✅ NOVOS CAMPOS (Passo 16.1)
+function keyFullName(waId) {
+  return `full_name:${waId}`;
+}
+
+function keyDoc(waId) {
+  return `doc:${waId}`; // CPF/CNPJ somente números
+}
+
+// (já preparando próximos passos)
+function keyAsaasCustomerId(waId) {
+  return `asaas_customer_id:${waId}`;
+}
+function keyAsaasSubscriptionId(waId) {
+  return `asaas_subscription_id:${waId}`;
+}
+
 function normalizeStatus(status) {
   if (!status) return "OTHER";
   const s = String(status).toUpperCase().trim();
@@ -50,6 +68,25 @@ function normalizeTemplateMode(mode) {
   const m = String(mode || "").toUpperCase().trim();
   if (m === "FREE" || m === "LIVRE") return "FREE";
   return "FIXED";
+}
+
+function normalizeFullName(name) {
+  const n = String(name || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return n;
+}
+
+function normalizeDocDigits(doc) {
+  return String(doc || "").replace(/\D+/g, "").trim();
+}
+
+function maskDoc(docDigits) {
+  const d = normalizeDocDigits(docDigits);
+  if (!d) return { docType: "", docLast4: "" };
+  const docType = d.length === 11 ? "CPF" : d.length === 14 ? "CNPJ" : "DOC";
+  const docLast4 = d.slice(-4);
+  return { docType, docLast4 };
 }
 
 export async function indexUser(waId) {
@@ -71,6 +108,12 @@ export async function ensureUserExists(waId) {
     await redisDel(keyLastPrompt(waId));
     // padrão = FIXED
     await redisSet(keyTemplateMode(waId), "FIXED");
+
+    // ✅ novos campos iniciam vazios (não grava nada)
+    await redisDel(keyFullName(waId));
+    await redisDel(keyDoc(waId));
+    await redisDel(keyAsaasCustomerId(waId));
+    await redisDel(keyAsaasSubscriptionId(waId));
   }
 
   const status = await getUserStatus(waId);
@@ -169,16 +212,115 @@ export async function getTemplateMode(waId) {
   return normalizeTemplateMode(v || "FIXED");
 }
 
+// ===================== ✅ NOVO: NOME COMPLETO =====================
+export async function setUserFullName(waId, fullName) {
+  await indexUser(waId);
+  const n = normalizeFullName(fullName);
+
+  if (!n) {
+    await redisDel(keyFullName(waId));
+    return "";
+  }
+
+  await redisSet(keyFullName(waId), n);
+  return n;
+}
+
+export async function getUserFullName(waId) {
+  const v = await redisGet(keyFullName(waId));
+  return v ? String(v) : "";
+}
+
+export async function clearUserFullName(waId) {
+  await redisDel(keyFullName(waId));
+  return true;
+}
+
+// ===================== ✅ NOVO: DOC (CPF/CNPJ) =====================
+export async function setUserDoc(waId, docDigits) {
+  await indexUser(waId);
+  const d = normalizeDocDigits(docDigits);
+
+  if (!d) {
+    await redisDel(keyDoc(waId));
+    return "";
+  }
+
+  // aqui ainda NÃO valida dígito verificador (isso entra no Passo 16.4)
+  await redisSet(keyDoc(waId), d);
+  return d;
+}
+
+export async function getUserDoc(waId) {
+  const v = await redisGet(keyDoc(waId));
+  return v ? normalizeDocDigits(v) : "";
+}
+
+export async function clearUserDoc(waId) {
+  await redisDel(keyDoc(waId));
+  return true;
+}
+
+// ===================== (Preparação) Asaas IDs =====================
+export async function setAsaasCustomerId(waId, customerId) {
+  await indexUser(waId);
+  const id = String(customerId || "").trim();
+  if (!id) {
+    await redisDel(keyAsaasCustomerId(waId));
+    return "";
+  }
+  await redisSet(keyAsaasCustomerId(waId), id);
+  return id;
+}
+
+export async function getAsaasCustomerId(waId) {
+  const v = await redisGet(keyAsaasCustomerId(waId));
+  return v ? String(v) : "";
+}
+
+export async function setAsaasSubscriptionId(waId, subId) {
+  await indexUser(waId);
+  const id = String(subId || "").trim();
+  if (!id) {
+    await redisDel(keyAsaasSubscriptionId(waId));
+    return "";
+  }
+  await redisSet(keyAsaasSubscriptionId(waId), id);
+  return id;
+}
+
+export async function getAsaasSubscriptionId(waId) {
+  const v = await redisGet(keyAsaasSubscriptionId(waId));
+  return v ? String(v) : "";
+}
+
+// ===================== SNAPSHOT =====================
 export async function getUserSnapshot(waId) {
-  const [status, plan, quotaUsed, trialUsed, lastPrompt, templateMode] =
-    await Promise.all([
-      getUserStatus(waId),
-      getUserPlan(waId),
-      getUserQuotaUsed(waId),
-      getUserTrialUsed(waId),
-      getLastPrompt(waId),
-      getTemplateMode(waId),
-    ]);
+  const [
+    status,
+    plan,
+    quotaUsed,
+    trialUsed,
+    lastPrompt,
+    templateMode,
+    fullName,
+    docDigits,
+    asaasCustomerId,
+    asaasSubscriptionId,
+  ] = await Promise.all([
+    getUserStatus(waId),
+    getUserPlan(waId),
+    getUserQuotaUsed(waId),
+    getUserTrialUsed(waId),
+    getLastPrompt(waId),
+    getTemplateMode(waId),
+    getUserFullName(waId),
+    getUserDoc(waId),
+    getAsaasCustomerId(waId),
+    getAsaasSubscriptionId(waId),
+  ]);
+
+  const docMasked = maskDoc(docDigits);
 
   return {
     waId,
@@ -188,5 +330,13 @@ export async function getUserSnapshot(waId) {
     trialUsed,
     lastPrompt,
     templateMode,
+
+    // ✅ novos campos
+    fullName: fullName || "",
+    doc: docMasked, // NÃO retorna o doc completo no snapshot
+
+    // preparação
+    asaasCustomerId: asaasCustomerId || "",
+    asaasSubscriptionId: asaasSubscriptionId || "",
   };
 }
