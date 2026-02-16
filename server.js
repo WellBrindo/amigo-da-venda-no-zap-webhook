@@ -944,12 +944,6 @@ async function redisZRemRangeByScore(key, min, max) {
   return Number(r?.result ?? 0);
 }
 
-async function redisZCount(key, min, max) {
-  if (!USE_UPSTASH) return 0;
-  const r = await upstashCommand(["ZCOUNT", key, String(min), String(max)]);
-  return Number(r?.result || 0) || 0;
-}
-
 async function redisSAdd(key, member) {
   if (!USE_UPSTASH) return null;
   return upstashCommand(["SADD", key, String(member || "")]);
