@@ -15,6 +15,8 @@ import {
   nowMs,
 } from "../services/window24h.js";
 
+import { sendWhatsAppText } from "../services/meta/whatsapp.js";
+
 export function adminRouter() {
   const router = Router();
 
@@ -28,11 +30,11 @@ export function adminRouter() {
   <title>Admin - Amigo das Vendas</title>
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; margin:24px;}
-    .card{max-width:920px; padding:16px 18px; border:1px solid #e5e7eb; border-radius:12px;}
+    .card{max-width:980px; padding:16px 18px; border:1px solid #e5e7eb; border-radius:12px;}
     a{display:inline-block; margin:6px 10px 0 0; text-decoration:none; padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px;}
     a:hover{background:#f3f4f6;}
     .muted{color:#6b7280; font-size:14px;}
-    input{padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; width:300px;}
+    input{padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; width:320px;}
     button{padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; background:#fff; cursor:pointer;}
     button:hover{background:#f3f4f6;}
     .row{margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;}
@@ -43,7 +45,7 @@ export function adminRouter() {
 <body>
   <div class="card">
     <h2>📊 Admin (V16 Modular)</h2>
-    <div class="muted">Teste modular: Redis ✅ | State ✅ | Janela 24h (agora) ✅</div>
+    <div class="muted">Redis ✅ | State ✅ | Janela 24h ✅ | Webhook ✅ | Envio WhatsApp (agora) ✅</div>
 
     <div class="row">
       <a href="/health">✅ Health</a>
@@ -53,7 +55,7 @@ export function adminRouter() {
 
     <hr />
 
-    <h3>🧪 Teste de State (manual)</h3>
+    <h3>🧪 Usuário (State + Janela)</h3>
     <div class="muted">Digite um waId e use os botões abaixo.</div>
 
     <div class="row">
@@ -69,10 +71,26 @@ export function adminRouter() {
       <b>Touch 24h</b> grava: <code>last_inbound_ts</code> e atualiza <code>z:window24h</code>.
     </div>
 
+    <hr />
+
+    <h3>📩 Enviar mensagem (teste)</h3>
+    <div class="muted">Envia uma mensagem de texto para o waId informado usando WhatsApp Cloud API.</div>
+
+    <div class="row">
+      <input id="msg" placeholder="Texto da mensagem..." />
+      <button onclick="goSend()">Enviar</button>
+    </div>
+
+    <div class="muted" style="margin-top:10px;">
+      Isso chama: <code>/admin/send-test?waId=...&text=...</code>
+    </div>
+
     <script>
       function getWaid(){
-        const v = document.getElementById('waid').value.trim();
-        return v;
+        return document.getElementById('waid').value.trim();
+      }
+      function getMsg(){
+        return document.getElementById('msg').value.trim();
       }
       function goSet(){
         const waId = getWaid();
@@ -89,13 +107,19 @@ export function adminRouter() {
         if(!waId){ alert("Digite o waId"); return; }
         window.location.href = "/admin/window24h/touch?waId=" + encodeURIComponent(waId);
       }
+      function goSend(){
+        const waId = getWaid();
+        const text = getMsg();
+        if(!waId){ alert("Digite o waId"); return; }
+        if(!text){ alert("Digite a mensagem"); return; }
+        window.location.href = "/admin/send-test?waId=" + encodeURIComponent(waId) + "&text=" + encodeURIComponent(text);
+      }
     </script>
   </div>
 </body>
 </html>`);
   });
 
-  // SET demo
   router.get("/state-test/set", async (req, res) => {
     try {
       const waId = String(req.query.waId || "").trim();
@@ -113,7 +137,6 @@ export function adminRouter() {
     }
   });
 
-  // GET snapshot
   router.get("/state-test/get", async (req, res) => {
     try {
       const waId = String(req.query.waId || "").trim();
@@ -126,7 +149,6 @@ export function adminRouter() {
     }
   });
 
-  // Touch window 24h (simula inbound)
   router.get("/window24h/touch", async (req, res) => {
     try {
       const waId = String(req.query.waId || "").trim();
@@ -150,7 +172,6 @@ export function adminRouter() {
     }
   });
 
-  // JSON: janela 24h
   router.get("/window24h", async (req, res) => {
     try {
       const limit = Number(req.query.limit || 500);
@@ -164,6 +185,28 @@ export function adminRouter() {
         count,
         returned: waIds.length,
         items: waIds.map((waId) => ({ waId })),
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // ✅ Envio de mensagem (teste)
+  router.get("/send-test", async (req, res) => {
+    try {
+      const waId = String(req.query.waId || "").trim();
+      const text = String(req.query.text || "").trim();
+
+      if (!waId) return res.status(400).json({ ok: false, error: "Missing waId" });
+      if (!text) return res.status(400).json({ ok: false, error: "Missing text" });
+
+      const data = await sendWhatsAppText({ to: waId, text });
+
+      res.json({
+        ok: true,
+        sentTo: waId,
+        text,
+        meta: data,
       });
     } catch (err) {
       res.status(500).json({ ok: false, error: err.message });
