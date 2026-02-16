@@ -35,11 +35,21 @@ function keyLastPrompt(waId) {
   return `last_prompt:${waId}`;
 }
 
+function keyTemplateMode(waId) {
+  return `template_mode:${waId}`; // FIXED | FREE
+}
+
 function normalizeStatus(status) {
   if (!status) return "OTHER";
   const s = String(status).toUpperCase().trim();
   if (USER_STATUSES.includes(s)) return s;
   return "OTHER";
+}
+
+function normalizeTemplateMode(mode) {
+  const m = String(mode || "").toUpperCase().trim();
+  if (m === "FREE" || m === "LIVRE") return "FREE";
+  return "FIXED";
 }
 
 export async function indexUser(waId) {
@@ -57,9 +67,10 @@ export async function ensureUserExists(waId) {
     await redisSet(keyStatus(waId), DEFAULT_NEW_USER_STATUS);
     await redisSet(keyTrialUsed(waId), "0");
     await redisSet(keyQuotaUsed(waId), "0");
-    // plano vazio: NÃO grava string vazia; garante chave ausente
     await redisDel(keyPlan(waId));
     await redisDel(keyLastPrompt(waId));
+    // padrão = FIXED
+    await redisSet(keyTemplateMode(waId), "FIXED");
   }
 
   const status = await getUserStatus(waId);
@@ -83,9 +94,6 @@ export async function setUserPlan(waId, planCode) {
   await indexUser(waId);
 
   const plan = String(planCode || "").trim();
-
-  // ✅ Upstash REST não aceita SET com string vazia via URL.
-  // Então, plano vazio = remove a chave.
   if (!plan) {
     await redisDel(keyPlan(waId));
     return "";
@@ -135,8 +143,6 @@ export async function setLastPrompt(waId, text) {
   await indexUser(waId);
 
   const t = String(text || "").trim();
-
-  // ✅ texto vazio = remove a chave
   if (!t) {
     await redisDel(keyLastPrompt(waId));
     return "";
@@ -151,14 +157,28 @@ export async function getLastPrompt(waId) {
   return v ? String(v) : "";
 }
 
+export async function setTemplateMode(waId, mode) {
+  await indexUser(waId);
+  const m = normalizeTemplateMode(mode);
+  await redisSet(keyTemplateMode(waId), m);
+  return m;
+}
+
+export async function getTemplateMode(waId) {
+  const v = await redisGet(keyTemplateMode(waId));
+  return normalizeTemplateMode(v || "FIXED");
+}
+
 export async function getUserSnapshot(waId) {
-  const [status, plan, quotaUsed, trialUsed, lastPrompt] = await Promise.all([
-    getUserStatus(waId),
-    getUserPlan(waId),
-    getUserQuotaUsed(waId),
-    getUserTrialUsed(waId),
-    getLastPrompt(waId),
-  ]);
+  const [status, plan, quotaUsed, trialUsed, lastPrompt, templateMode] =
+    await Promise.all([
+      getUserStatus(waId),
+      getUserPlan(waId),
+      getUserQuotaUsed(waId),
+      getUserTrialUsed(waId),
+      getLastPrompt(waId),
+      getTemplateMode(waId),
+    ]);
 
   return {
     waId,
@@ -167,5 +187,6 @@ export async function getUserSnapshot(waId) {
     quotaUsed,
     trialUsed,
     lastPrompt,
+    templateMode,
   };
 }
