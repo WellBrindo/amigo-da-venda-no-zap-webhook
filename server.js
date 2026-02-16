@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "crypto";
-// AMIGO DAS VENDAS — server.js V15.9.20 (Admin UI por usuário + métricas completas)
+// AMIGO DAS VENDAS — server.js V15.9.21 (Campanhas com fila 24h + logs no Admin)
 
 
 // Node 18+ já tem fetch global.
@@ -302,6 +302,7 @@ app.get("/admin", requireAdminBasicAuth, async (_req, res) => {
       <a class="btn" href="/admin/users-ui">👥 Usuários</a>
       <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
       <a class="btn" href="/admin/broadcast-ui">📣 Broadcast</a>
+      <a class="btn" href="/admin/campaigns-ui">📨 Campanhas</a>
     </div>
     <div class="muted" style="margin-top:10px">
       Dica: se o seu navegador estiver bloqueando JavaScript/requests, use as páginas UI acima (renderizadas no servidor).
@@ -364,13 +365,17 @@ app.get("/admin/broadcast-ui", requireAdminBasicAuth, async (_req, res) => {
   <div class="row" style="flex-wrap:wrap">
     <a class="btn" href="/admin">🏠 Início</a>
     <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
-    <a class="btn" href="/admin/broadcast-ui">📣 Enviar mensagem</a>
+    <a class="btn" href="/admin/broadcast-ui">📣 Nova campanha</a>
+    <a class="btn" href="/admin/campaigns-ui">📨 Campanhas</a>
   </div>
 
   <h1 style="margin:16px 0 6px 0">📣 Enviar mensagem (janela 24h)</h1>
-  <div class="muted">Dica: use <b>dryRun</b> primeiro para ver quantos serão atingidos. Envia apenas para usuários com janela ativa.</div>
+  <div class="muted">Dica: use <b>dryRun</b> primeiro. A campanha envia agora para quem estiver na janela de 24h e deixa <b>pendente</b> para quem estiver fora — o envio acontece automaticamente quando o usuário voltar à janela.</div>
 
   <div class="card">
+    <label>Assunto</label>
+    <input id="subject" placeholder="Ex.: Novidades no seu plano" />
+
     <label>Mensagem</label>
     <textarea id="msg" rows="5" placeholder="Digite a mensagem..."></textarea>
 
@@ -415,6 +420,7 @@ async function send(dry){
   const out = document.getElementById('out');
   out.textContent = 'Enviando...';
   const payload = {
+    subject: (document.getElementById('subject').value || '').trim(),
     message: document.getElementById('msg').value || '',
     mode: document.getElementById('mode').value || 'all',
     plan: (document.getElementById('plan').value || '').trim(),
@@ -437,7 +443,203 @@ async function send(dry){
   res.status(200).send(html);
 });
 
-// Página: Janela 24h (UI). Os dados vêm do GET /admin/window24h (JSON)
+
+// ===================== CAMPANHAS — UI & JSON =====================
+
+function renderAdminCampaignsHtml(rows) {
+  const items = (rows || []).map((r) => {
+    const dt = new Date(Number(r.atMs || 0));
+    const when = isFinite(dt.getTime()) ? dt.toLocaleString("pt-BR") : "-";
+    const plan = r.plan ? escapeHtml(String(r.plan)) : "<span class='muted'>—</span>";
+    return `<tr>
+      <td><a class="link" href="/admin/campaign-ui?id=${encodeURIComponent(r.id)}">${escapeHtml(r.id)}</a></td>
+      <td>${escapeHtml(when)}</td>
+      <td>${escapeHtml(r.subject || "")}</td>
+      <td>${escapeHtml(r.mode || "")}</td>
+      <td>${plan}</td>
+      <td>${Number(r.total || 0)}</td>
+      <td>${Number(r.sent || 0)}</td>
+      <td>${Number(r.pending || 0)}</td>
+      <td>${Number(r.errors || 0)}</td>
+    </tr>`;
+  }).join("");
+
+  return `<!doctype html>
+<html lang="pt-BR"><head>
+<meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Admin — Campanhas</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
+  a{color:inherit}
+  .btn{display:inline-block;padding:10px 12px;border:1px solid #ddd;border-radius:10px;text-decoration:none;background:#fafafa}
+  .btn:hover{background:#f1f1f1}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .card{border:1px solid #eee;border-radius:12px;padding:14px;margin:14px 0}
+  table{width:100%;border-collapse:collapse}
+  th,td{border-bottom:1px solid #eee;padding:10px;text-align:left;font-size:14px;vertical-align:top}
+  th{background:#fafafa}
+  .muted{color:#666;font-size:13px}
+  .link{text-decoration:underline}
+</style>
+</head><body>
+  <div class="row">
+    <a class="btn" href="/admin">🏠 Início</a>
+    <a class="btn" href="/admin/broadcast-ui">📣 Nova campanha</a>
+  </div>
+  <h1 style="margin:16px 0 6px 0">📨 Campanhas</h1>
+  <div class="muted">Histórico das campanhas criadas. Clique no ID para ver detalhes e métricas.</div>
+
+  <div class="card">
+    <table>
+      <thead><tr>
+        <th>ID</th><th>Criada em</th><th>Assunto</th><th>Filtro</th><th>Plano</th>
+        <th>Alvos</th><th>Enviadas</th><th>Pendentes</th><th>Erros</th>
+      </tr></thead>
+      <tbody>${items || `<tr><td colspan="9" class="muted">Nenhuma campanha ainda.</td></tr>`}</tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="muted">JSON:</div>
+    <div><a class="link" href="/admin/campaigns?limit=50">/admin/campaigns</a></div>
+  </div>
+</body></html>`;
+}
+
+function renderAdminCampaignHtml(meta, stats, errorLog) {
+  const m = meta || {};
+  const s = stats || {};
+  const dt = new Date(Number(m.createdAtMs || 0));
+  const when = isFinite(dt.getTime()) ? dt.toLocaleString("pt-BR") : "-";
+  const msg = escapeHtml(String(m.message || ""));
+
+  const errors = (errorLog || []).map((e) => {
+    const d = new Date(Number(e.atMs || 0));
+    const w = isFinite(d.getTime()) ? d.toLocaleString("pt-BR") : "-";
+    return `<tr><td>${escapeHtml(String(e.waId || ""))}</td><td>${escapeHtml(w)}</td><td>${escapeHtml(String(e.error || ""))}</td></tr>`;
+  }).join("");
+
+  return `<!doctype html>
+<html lang="pt-BR"><head>
+<meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Admin — Campanha</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;line-height:1.35}
+  a{color:inherit}
+  .btn{display:inline-block;padding:10px 12px;border:1px solid #ddd;border-radius:10px;text-decoration:none;background:#fafafa}
+  .btn:hover{background:#f1f1f1}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .card{border:1px solid #eee;border-radius:12px;padding:14px;margin:14px 0}
+  .muted{color:#666;font-size:13px}
+  table{width:100%;border-collapse:collapse}
+  th,td{border-bottom:1px solid #eee;padding:10px;text-align:left;font-size:14px;vertical-align:top}
+  th{background:#fafafa}
+  pre{background:#0b1020;color:#e6e6e6;padding:12px;border-radius:12px;overflow:auto;white-space:pre-wrap}
+  .link{text-decoration:underline}
+</style>
+</head><body>
+  <div class="row">
+    <a class="btn" href="/admin">🏠 Início</a>
+    <a class="btn" href="/admin/campaigns-ui">📨 Campanhas</a>
+    <a class="btn" href="/admin/broadcast-ui">📣 Nova campanha</a>
+  </div>
+
+  <h1 style="margin:16px 0 6px 0">📨 Campanha ${escapeHtml(String(m.id || ""))}</h1>
+  <div class="muted">Criada em ${escapeHtml(when)}</div>
+
+  <div class="card">
+    <div><b>Assunto:</b> ${escapeHtml(String(m.subject || ""))}</div>
+    <div style="margin-top:6px"><b>Filtro:</b> ${escapeHtml(String(m.mode || ""))} ${m.plan ? `(plano ${escapeHtml(String(m.plan))})` : ""}</div>
+    <div style="margin-top:10px"><b>Mensagem:</b></div>
+    <pre>${msg}</pre>
+  </div>
+
+  <div class="card">
+    <div><b>Alvos:</b> ${Number(m.totalTargets || 0)}</div>
+    <div style="margin-top:6px">✅ <b>Enviadas:</b> ${Number(s.sent || 0)} &nbsp; ⏳ <b>Pendentes:</b> ${Number(s.pending || 0)} &nbsp; ⚠️ <b>Erros:</b> ${Number(s.errors || 0)}</div>
+  </div>
+
+  <div class="card">
+    <div style="font-weight:700">Erros recentes (máx. 200)</div>
+    <table style="margin-top:10px">
+      <thead><tr><th>waId</th><th>Quando</th><th>Erro</th></tr></thead>
+      <tbody>${errors || `<tr><td colspan="3" class="muted">Sem erros registrados.</td></tr>`}</tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="muted">JSON:</div>
+    <div><a class="link" href="/admin/campaign?id=${encodeURIComponent(String(m.id||""))}">/admin/campaign?id=${escapeHtml(String(m.id||""))}</a></div>
+  </div>
+</body></html>`;
+}
+
+app.get("/admin/campaigns", requireAdminBasicAuth, async (req, res) => {
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+  const raw = await redisZRangeByScore(Z_CAMPAIGNS, "-inf", "+inf", 0, 4000, true);
+  const pairs = [];
+  for (let i = 0; i < raw.length; i += 2) pairs.push({ id: String(raw[i] || ""), atMs: Number(raw[i + 1] || 0) });
+  pairs.sort((a, b) => b.atMs - a.atMs);
+
+  const out = [];
+  for (const p of pairs.slice(0, limit)) {
+    const meta = await getCampaignMeta(p.id);
+    if (!meta) continue;
+    const sent = await redisSCard(kCampaignSentUsers(p.id));
+    const pending = await redisSCard(kCampaignPendingUsers(p.id));
+    const errors = await redisSCard(kCampaignErrorUsers(p.id));
+    out.push({ ...meta, sent, pending, errors });
+  }
+  res.json({ ok: true, returned: out.length, campaigns: out });
+});
+
+app.get("/admin/campaign", requireAdminBasicAuth, async (req, res) => {
+  const id = String(req.query.id || "").trim();
+  if (!id) return res.status(400).json({ error: "id obrigatório" });
+  const meta = await getCampaignMeta(id);
+  if (!meta) return res.status(404).json({ error: "campanha não encontrada" });
+
+  const sent = await redisSCard(kCampaignSentUsers(id));
+  const pending = await redisSCard(kCampaignPendingUsers(id));
+  const errors = await redisSCard(kCampaignErrorUsers(id));
+  const errorLogRaw = await redisGet(kCampaignErrorLog(id));
+  let errorLog = [];
+  try { errorLog = errorLogRaw ? JSON.parse(errorLogRaw) : []; } catch { errorLog = []; }
+
+  res.json({ ok: true, meta, stats: { sent, pending, errors }, errorLog });
+});
+
+app.get("/admin/campaigns-ui", requireAdminBasicAuth, async (_req, res) => {
+  const raw = await redisZRangeByScore(Z_CAMPAIGNS, "-inf", "+inf", 0, 4000, true);
+  const pairs = [];
+  for (let i = 0; i < raw.length; i += 2) pairs.push({ id: String(raw[i] || ""), atMs: Number(raw[i + 1] || 0) });
+  pairs.sort((a, b) => b.atMs - a.atMs);
+
+  const rows = [];
+  for (const p of pairs.slice(0, 50)) {
+    const meta = await getCampaignMeta(p.id);
+    if (!meta) continue;
+    const sent = await redisSCard(kCampaignSentUsers(p.id));
+    const pending = await redisSCard(kCampaignPendingUsers(p.id));
+    const errors = await redisSCard(kCampaignErrorUsers(p.id));
+    rows.push({ id: p.id, atMs: p.atMs, subject: meta.subject || "", mode: meta.mode || "", plan: meta.plan || "", total: meta.totalTargets || 0, sent, pending, errors });
+  }
+  res.status(200).send(renderAdminCampaignsHtml(rows));
+});
+
+app.get("/admin/campaign-ui", requireAdminBasicAuth, async (req, res) => {
+  const id = String(req.query.id || "").trim();
+  if (!id) return res.redirect(302, "/admin/campaigns-ui");
+  const meta = await getCampaignMeta(id);
+  if (!meta) return res.status(404).send(renderAdminCampaignHtml({ id, subject: "Não encontrada", message: "" }, { sent: 0, pending: 0, errors: 0 }, []));
+  const sent = await redisSCard(kCampaignSentUsers(id));
+  const pending = await redisSCard(kCampaignPendingUsers(id));
+  const errors = await redisSCard(kCampaignErrorUsers(id));
+  const errorLogRaw = await redisGet(kCampaignErrorLog(id));
+  let errorLog = [];
+  try { errorLog = errorLogRaw ? JSON.parse(errorLogRaw) : []; } catch { errorLog = []; }
+  res.status(200).send(renderAdminCampaignHtml(meta, { sent, pending, errors }, errorLog));
+});
 app.get("/admin/window24h-ui", requireAdminBasicAuth, async (_req, res) => {
   const html = `<!doctype html>
 <html lang="pt-BR">
@@ -463,7 +665,8 @@ app.get("/admin/window24h-ui", requireAdminBasicAuth, async (_req, res) => {
   <div class="row" style="flex-wrap:wrap">
     <a class="btn" href="/admin">🏠 Início</a>
     <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
-    <a class="btn" href="/admin/broadcast-ui">📣 Enviar mensagem</a>
+    <a class="btn" href="/admin/broadcast-ui">📣 Nova campanha</a>
+    <a class="btn" href="/admin/campaigns-ui">📨 Campanhas</a>
   </div>
 
   <h1 style="margin:16px 0 6px 0">⏱ Usuários na janela de 24h</h1>
@@ -735,6 +938,7 @@ app.get("/admin/users-ui", requireAdminBasicAuth, async (req, res) => {
     <a class="btn" href="/admin/metrics">📊 Métricas</a>
     <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
     <a class="btn" href="/admin/broadcast-ui">📣 Broadcast</a>
+      <a class="btn" href="/admin/campaigns-ui">📨 Campanhas</a>
   </div>
 
   <h1 style="margin:16px 0 6px 0">👥 Usuários</h1>
@@ -855,6 +1059,7 @@ app.get("/admin/user-ui", requireAdminBasicAuth, async (req, res) => {
     <a class="btn" href="/admin/metrics">📊 Métricas</a>
     <a class="btn" href="/admin/window24h-ui">⏱ Janela 24h</a>
     <a class="btn" href="/admin/broadcast-ui">📣 Broadcast</a>
+      <a class="btn" href="/admin/campaigns-ui">📨 Campanhas</a>
   </div>
 
   <h1 style="margin:16px 0 6px 0">👤 Usuário</h1>
@@ -1059,77 +1264,126 @@ app.get("/admin/window24h", requireAdminBasicAuth, async (req, res) => {
 
 function sleepMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-app.post("/admin/broadcast", requireAdminBasicAuth, express.json({ limit: "64kb" }), async (req, res) => {
+app.post("/admin/broadcast", requireAdminBasicAuth, express.json({ limit: "128kb" }), async (req, res) => {
   try {
     const now = Date.now();
     const body = req.body || {};
+
+    const subject = String(body.subject || "").trim() || "Comunicado";
     const message = String(body.message || "").trim();
     if (!message) return res.status(400).json({ error: "message é obrigatório" });
 
-    const limit = Math.max(1, Math.min(500, Number(body.limit || 200)));
+    // limite total de usuários alvo (matching filtros), não só janela 24h
+    const limit = Math.max(1, Math.min(5000, Number(body.limit || 500)));
     const mode = String(body.mode || "all").toLowerCase(); // all | paid | trial | pending
     const planFilter = String(body.plan || "").trim(); // opcional
     const dryRun = Boolean(body.dryRun);
-    const delayMs = Math.max(0, Math.min(2000, Number(body.delayMs || process.env.BROADCAST_DELAY_MS || 200)));
+    const delayMs = Math.max(0, Math.min(2000, Number(body.delayMs || process.env.BROADCAST_DELAY_MS || 100)));
 
-    await redisZRemRangeByScore(Z_WINDOW_24H, "-inf", String(now));
-
-    const raw = await redisZRangeByScore(Z_WINDOW_24H, String(now), "+inf", 0, 2000, true);
-    const targets = [];
-
-    for (let i = 0; i < raw.length; i += 2) {
-      const waId = String(raw[i] || "");
-      const endMs = Number(raw[i + 1] || 0);
-      if (!waId || !endMs) continue;
-
-      const planCode = (await getPlanCode(waId)) || "";
-      const hasPlan = Boolean(planCode);
-
-      if (planFilter && planCode !== planFilter) continue;
-      if (mode === "paid" && !hasPlan) continue;
-      if (mode === "trial" && hasPlan) continue;
-      if (mode === "pending") {
-        const st = await getStatus(waId);
-        if (st !== "PAYMENT_PENDING") continue;
-      }
-
-      // segurança extra: garante que está realmente dentro da janela (pela última inbound)
-      if (!(await isIn24hWindow(waId, now))) continue;
-
-      targets.push({ waId, plan: planCode || "TRIAL" });
-      if (targets.length >= limit) break;
-    }
-
-    let sent = 0;
-    const errors = [];
-
-    if (!dryRun) {
-      for (const t of targets) {
-        try {
-          await sendWhatsAppText(t.waId, message);
-          sent += 1;
-        } catch (err) {
-          errors.push({ waId: t.waId, error: String(err?.message || err) });
-        }
-        if (delayMs) await sleepMs(delayMs);
-      }
-    }
-
-    res.json({
-      dryRun,
-      requestedLimit: limit,
-      matched: targets.length,
-      sent,
-      errorsCount: errors.length,
-      errors: errors.slice(0, 50),
+    // cria campanha
+    const campaignId = newCampaignId();
+    const meta = {
+      id: campaignId,
+      createdAtMs: now,
+      subject,
+      message,
       mode,
       plan: planFilter || null,
+      totalTargets: 0,
+      sentNow: 0,
+      pendingNow: 0,
+      errorsNow: 0,
+      dryRun: !!dryRun,
+    };
+    await saveCampaignMeta(campaignId, meta);
+
+    // varre usuários indexados (sem SCAN)
+    let cursor = "0";
+    const targets = []; // para retorno (limitado)
+    const maxReturn = 200;
+
+    do {
+      const scan = await redisSScan(K_USERS_ALL, cursor, 250);
+      cursor = scan.cursor || "0";
+      const members = scan.members || [];
+
+      for (const waId of members) {
+        if (!waId) continue;
+
+        // filtros
+        const planCode = (await getPlanCode(waId)) || "";
+        const hasPlan = Boolean(planCode);
+
+        if (planFilter && planCode !== planFilter) continue;
+        if (mode === "paid" && !hasPlan) continue;
+        if (mode === "trial" && hasPlan) continue;
+        if (mode === "pending") {
+          const st = await getStatus(waId);
+          if (st !== "PAYMENT_PENDING") continue;
+        }
+
+        meta.totalTargets += 1;
+
+        // checa janela
+        const inWin = await isIn24hWindow(waId, now);
+        if (inWin) {
+          if (!dryRun) {
+            try {
+              await sendWhatsAppText(waId, message);
+              meta.sentNow += 1;
+              await redisSAdd(kCampaignSentUsers(campaignId), waId);
+            } catch (e) {
+              meta.errorsNow += 1;
+              await redisSAdd(kCampaignErrorUsers(campaignId), waId);
+              await appendCampaignError(campaignId, { waId, atMs: Date.now(), error: String(e?.message || e) });
+            }
+            if (delayMs) await sleepMs(delayMs);
+          }
+        } else {
+          // pendente
+          meta.pendingNow += 1;
+          if (!dryRun) {
+            await redisSAdd(kCampaignPendingUsers(campaignId), waId);
+            await redisSAdd(kUserPendingCampaigns(waId), campaignId);
+          }
+        }
+
+        if (targets.length < maxReturn) targets.push({ waId, status: await getStatus(waId), plan: planCode || "TRIAL", inWindow24h: !!inWin });
+
+        if (meta.totalTargets >= limit) break;
+      }
+      if (meta.totalTargets >= limit) break;
+    } while (cursor !== "0");
+
+    await saveCampaignMeta(campaignId, meta);
+
+    const sentUsers = dryRun ? 0 : await redisSCard(kCampaignSentUsers(campaignId));
+    const pendingUsers = dryRun ? 0 : await redisSCard(kCampaignPendingUsers(campaignId));
+    const errorUsers = dryRun ? 0 : await redisSCard(kCampaignErrorUsers(campaignId));
+
+    return res.json({
+      ok: true,
+      campaignId,
+      dryRun,
+      subject,
+      mode,
+      plan: planFilter || null,
+      totalTargets: meta.totalTargets,
+      sentNow: meta.sentNow,
+      pendingNow: meta.pendingNow,
+      errorsNow: meta.errorsNow,
+      sentUsers,
+      pendingUsers,
+      errorUsers,
+      sample: targets,
+      hint: "Acompanhe em /admin/campaigns-ui (UI) ou /admin/campaigns (JSON). JSON completo em /admin/campaign?id=...",
     });
   } catch (e) {
-    safeLogError("Admin broadcast erro:", e);
-    res.status(500).json({ error: "Erro ao enviar broadcast" });
+    safeLogError("Admin broadcast/campaign erro:", e);
+    return res.status(500).json({ error: "Erro ao criar/enviar campanha" });
   }
 });
+
 
 
 // ===================== WEBHOOK VERIFY (META) =====================
@@ -1339,6 +1593,112 @@ async function touch24hWindow(waId, nowMs = Date.now()) {
   }
 }
 
+
+// ===================== CAMPANHAS (Broadcast com fila 24h) =====================
+// Objetivo: enviar para usuários dentro da janela de 24h; quem estiver fora fica pendente e é enviado assim que o usuário voltar para a janela.
+// Escala: sem SCAN global — usa índices (users:all + z:window24h) e sets por campanha.
+//
+// Índice de campanhas: ZSET (score=createdAtMs member=campaignId)
+const Z_CAMPAIGNS = "z:campaigns";
+
+function newCampaignId() {
+  return "c_" + crypto.randomBytes(8).toString("hex");
+}
+
+function kCampaignMeta(id) { return `campaign:meta:${id}`; } // JSON
+function kCampaignPendingUsers(id) { return `campaign:pending:${id}`; } // SET waId
+function kCampaignSentUsers(id) { return `campaign:sent:${id}`; } // SET waId
+function kCampaignErrorUsers(id) { return `campaign:errors:${id}`; } // SET waId
+function kCampaignErrorLog(id) { return `campaign:errorlog:${id}`; } // JSON (array cap)
+function kUserPendingCampaigns(waId) { return `user:pendingCampaigns:${waId}`; } // SET campaignId
+
+const CAMPAIGN_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 dias
+
+async function saveCampaignMeta(id, metaObj) {
+  await redisSetEx(kCampaignMeta(id), JSON.stringify(metaObj || {}), CAMPAIGN_TTL_SECONDS);
+  await redisZAdd(Z_CAMPAIGNS, metaObj?.createdAtMs || Date.now(), id);
+}
+
+async function getCampaignMeta(id) {
+  const raw = await redisGet(kCampaignMeta(id));
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+async function appendCampaignError(id, entry) {
+  // guarda poucos para UI (evitar crescer sem limite)
+  const raw = await redisGet(kCampaignErrorLog(id));
+  let arr = [];
+  try { arr = raw ? JSON.parse(raw) : []; } catch { arr = []; }
+  arr.unshift(entry);
+  if (arr.length > 200) arr = arr.slice(0, 200);
+  await redisSetEx(kCampaignErrorLog(id), JSON.stringify(arr), CAMPAIGN_TTL_SECONDS);
+}
+
+async function deliverPendingCampaignsForUser(waId, nowMs = Date.now(), maxToProcess = 10) {
+  // Só dispara se usuário estiver na janela
+  const inWin = await isIn24hWindow(waId, nowMs);
+  if (!inWin) return { processed: 0, sent: 0, errors: 0 };
+
+  const pendingCount = await redisSCard(kUserPendingCampaigns(waId));
+  if (!pendingCount) return { processed: 0, sent: 0, errors: 0 };
+
+  let cursor = "0";
+  let processed = 0;
+  let sent = 0;
+  let errors = 0;
+
+  // varre poucos por inbound para não aumentar custo
+  do {
+    const scan = await redisSScan(kUserPendingCampaigns(waId), cursor, 50);
+    cursor = scan.cursor || "0";
+    const ids = scan.members || [];
+    for (const id of ids) {
+      if (!id) continue;
+      processed += 1;
+      try {
+        // se já foi enviado, limpa
+        const already = await redisSIsMember(kCampaignSentUsers(id), waId);
+        if (already) {
+          await redisSRem(kUserPendingCampaigns(waId), id);
+          await redisSRem(kCampaignPendingUsers(id), waId);
+          continue;
+        }
+
+        const meta = await getCampaignMeta(id);
+        if (!meta || !meta.message) {
+          // campanha não existe mais -> limpar
+          await redisSRem(kUserPendingCampaigns(waId), id);
+          await redisSRem(kCampaignPendingUsers(id), waId);
+          continue;
+        }
+
+        // segurança extra: ainda está pendente?
+        const isPending = await redisSIsMember(kCampaignPendingUsers(id), waId);
+        if (!isPending) {
+          await redisSRem(kUserPendingCampaigns(waId), id);
+          continue;
+        }
+
+        // envia
+        await sendWhatsAppText(waId, String(meta.message));
+        sent += 1;
+
+        await redisSAdd(kCampaignSentUsers(id), waId);
+        await redisSRem(kCampaignPendingUsers(id), waId);
+        await redisSRem(kUserPendingCampaigns(waId), id);
+      } catch (e) {
+        errors += 1;
+        await redisSAdd(kCampaignErrorUsers(id), waId);
+        await appendCampaignError(id, { waId, atMs: Date.now(), error: String(e?.message || e) });
+      }
+
+      if (sent + errors >= maxToProcess) return { processed, sent, errors };
+    }
+  } while (cursor !== "0" && (sent + errors) < maxToProcess);
+
+  return { processed, sent, errors };
+}
 async function isIn24hWindow(waId, nowMs = Date.now()) {
   const last = Number((await redisGet(kLastInboundTs(waId))) || 0);
   if (!last) return false;
