@@ -1,16 +1,17 @@
 import express from "express";
 import { adminRouter } from "./routes/admin.js";
+import { webhookRouter } from "./routes/webhook.js";
 import { redisPing } from "./services/redis.js";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 // Health básico
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
     service: "amigo-das-vendas",
-    version: "16.0.1-modular-redis-test"
+    version: "16.0.2-modular-webhook-safe",
   });
 });
 
@@ -20,21 +21,23 @@ app.get("/health-redis", async (req, res) => {
     const result = await redisPing();
     res.json({
       ok: true,
-      redis: result
+      redis: result,
     });
   } catch (err) {
     res.status(500).json({
       ok: false,
-      error: err.message
+      error: err.message,
     });
   }
 });
+
+// Webhook WhatsApp
+app.use("/webhook", webhookRouter());
 
 // Admin
 app.use("/admin", adminRouter());
 
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
   console.log("Server listening on port", PORT);
 });
