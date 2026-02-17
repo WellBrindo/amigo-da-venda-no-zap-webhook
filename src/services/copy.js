@@ -52,22 +52,18 @@ export const DEFAULT_COPY = Object.freeze({
 
   // FLOW — Fallback de planos (quando o Redis não tem planos cadastrados)
   FLOW_PLANS_FALLBACK_STATIC:
-    "Para continuar, escolha um plano:
+    `Para continuar, escolha um plano:
 
-"
-    + "1) De Vez em Quando — R$ 24.90
+1) De Vez em Quando — R$ 24.90
    • 20 descrições/mês
 
-"
-    + "2) Sempre por Perto — R$ 34.90
+2) Sempre por Perto — R$ 34.90
    • 60 descrições/mês
 
-"
-    + "3) Melhor Amigo — R$ 49.90
+3) Melhor Amigo — R$ 49.90
    • 200 descrições/mês
 
-"
-    + "Responda com *1*, *2* ou *3*.",
+Responda com *1*, *2* ou *3*.`,
 
   FLOW_QUOTA_BLOCKED:
     "Você atingiu o limite do seu plano neste mês 😕\n\nSe quiser, posso te ajudar a escolher um plano maior.\n\nResponda: *PLANOS*",
