@@ -1,10 +1,9 @@
 // src/server.js
 import express from "express";
-
 import { asaasRouter } from "./routes/asaas.js";
 
 const APP_NAME = "amigo-das-vendas";
-const APP_VERSION = "16.0.4-modular-waitname-plans-auto";
+const APP_VERSION = "16.0.5-modular-fix-waitname-loop";
 
 const app = express();
 app.set("trust proxy", true);
@@ -113,6 +112,60 @@ function validateDoc(raw) {
   return { ok: false, type: "UNKNOWN", doc };
 }
 
+// ===================== Name validation (anti-loop) =====================
+function normalizeSpaces(s) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+
+function looksLikeRealFullName(text) {
+  const t = normalizeSpaces(text);
+  if (t.length < 8) return false;
+
+  // precisa de pelo menos 2 palavras
+  const parts = t.split(" ").filter(Boolean);
+  if (parts.length < 2) return false;
+
+  // não pode ter números
+  if (/\d/.test(t)) return false;
+
+  const lower = t.toLowerCase();
+
+  // Bloqueia mensagens típicas de descrição de produto/serviço
+  const blockedStarts = [
+    "vendo",
+    "vendo bolo",
+    "vendo doces",
+    "faço",
+    "trabalho",
+    "sou",
+    "promoção",
+    "preço",
+    "valor",
+  ];
+  for (const s of blockedStarts) {
+    if (lower.startsWith(s)) return false;
+  }
+
+  const blockedContains = [
+    "r$",
+    "reais",
+    "entrego",
+    "entrega",
+    "mooca",
+    "whatsapp",
+    "grupo",
+    "por ",
+    "apenas",
+    "cupom",
+    "frete",
+  ];
+  for (const c of blockedContains) {
+    if (lower.includes(c)) return false;
+  }
+
+  return true;
+}
+
 // ===================== Redis (Upstash REST) =====================
 async function upstash(path, { method = "GET", body = null } = {}) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) {
@@ -218,13 +271,13 @@ async function ensureUser(waId) {
   if (!u) {
     u = {
       waId,
-      status: "WAIT_NAME", // ✅ novo estado explícito
+      status: "WAIT_NAME", // WAIT_NAME | TRIAL | WAIT_PLAN | WAIT_PAYMENT_METHOD | WAIT_DOC | PAYMENT_PENDING | ACTIVE
       plan: "",
       trialUsed: 0,
       quotaUsed: 0,
       fullName: "",
       doc: "",
-      payMethod: "", // CARD | PIX
+      payMethod: "",
       createdAtMs: nowMs(),
       updatedAtMs: nowMs(),
       lastInboundAtMs: 0,
@@ -235,7 +288,13 @@ async function ensureUser(waId) {
     await saveUser(u);
   }
 
-  // Se já existia mas não tem nome, força o estado WAIT_NAME
+  // ✅ Auto-correção: se já tem nome, nunca pode ficar em WAIT_NAME
+  if (u.fullName && u.status === "WAIT_NAME") {
+    u.status = "TRIAL";
+    await saveUser(u);
+  }
+
+  // Se não tem nome, força WAIT_NAME
   if (!u.fullName && u.status !== "WAIT_NAME") {
     u.status = "WAIT_NAME";
     await saveUser(u);
@@ -257,7 +316,8 @@ function welcomeAskNameText() {
 
 function plansMenuText() {
   return (
-    `😄 Perfeito! Agora escolha um plano:\n\n` +
+    `😄 Seu trial gratuito foi concluído!\n\n` +
+    `Para continuar, escolha um plano:\n\n` +
     `1) ${PLANS.DE_VEZ_EM_QUANDO.label} — R$ ${PLANS.DE_VEZ_EM_QUANDO.price.toFixed(2)}\n   • ${PLANS.DE_VEZ_EM_QUANDO.quota} descrições/mês\n\n` +
     `2) ${PLANS.SEMPRE_POR_PERTO.label} — R$ ${PLANS.SEMPRE_POR_PERTO.price.toFixed(2)}\n   • ${PLANS.SEMPRE_POR_PERTO.quota} descrições/mês\n\n` +
     `3) ${PLANS.MELHOR_AMIGO.label} — R$ ${PLANS.MELHOR_AMIGO.price.toFixed(2)}\n   • ${PLANS.MELHOR_AMIGO.quota} descrições/mês\n\n` +
@@ -310,21 +370,17 @@ app.get("/admin", basicAuth, (req, res) => {
         .card { max-width: 920px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
         a { display: inline-block; margin: 6px 0; }
         .muted { color: #666; }
-        code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
         .row { display:flex; gap: 14px; flex-wrap: wrap; }
         .pill { border:1px solid #eee; border-radius: 10px; padding: 10px 12px; }
       </style>
     </head>
     <body>
       <div class="card">
-        <h2>Admin (V16.3)</h2>
-        <p class="muted">Menu:</p>
+        <h2>Admin</h2>
+        <p class="muted">Version: ${escapeHtml(APP_VERSION)}</p>
         <div class="row">
           <div class="pill"><a href="/health">✅ Health</a></div>
           <div class="pill"><a href="/admin/redis-ping">🧠 Redis Ping</a></div>
-          <div class="pill"><a href="/admin/users">👥 Users (JSON)</a></div>
-          <div class="pill"><a href="/admin/validate-doc?doc=52998224725">🧾 Validate Doc</a></div>
-          <div class="pill"><a href="/asaas/test">💳 Asaas Test</a></div>
         </div>
       </div>
     </body>
@@ -343,32 +399,6 @@ app.get("/admin/redis-ping", basicAuth, async (req, res) => {
   }
 });
 
-app.get("/admin/users", basicAuth, async (req, res) => {
-  try {
-    const idxRaw = (await redisGet(usersIndexKey())) || "[]";
-    let idx = [];
-    try {
-      idx = JSON.parse(idxRaw) || [];
-    } catch {
-      idx = [];
-    }
-    const users = [];
-    for (const waId of idx) {
-      const u = await loadUser(waId);
-      if (u) users.push({ waId: u.waId, status: u.status, plan: u.plan, trialUsed: u.trialUsed, quotaUsed: u.quotaUsed });
-    }
-    return res.json({ ok: true, total: users.length, users });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/admin/validate-doc", basicAuth, (req, res) => {
-  const doc = req.query.doc || "";
-  const v = validateDoc(doc);
-  return res.json({ ok: true, input: String(doc), normalized: v.doc, type: v.type, valid: v.ok });
-});
-
 // ===================== Meta webhook verify =====================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -383,7 +413,6 @@ app.get("/webhook", (req, res) => {
 // ===================== Meta webhook receive =====================
 app.post("/webhook", async (req, res) => {
   try {
-    // responde rápido
     res.json({ ok: true });
 
     const entry = req.body?.entry?.[0];
@@ -396,25 +425,23 @@ app.post("/webhook", async (req, res) => {
     if (!waId) return;
 
     const text = (msg.type === "text" ? msg.text?.body : "") || "";
-    const body = String(text || "").trim();
+    const body = normalizeSpaces(text);
 
     const u = await ensureUser(waId);
     u.lastInboundAtMs = nowMs();
     u.windowEndsAtMs = u.lastInboundAtMs + 24 * 60 * 60 * 1000;
     await saveUser(u);
 
-    // ===================== FLOW =====================
-
-    // (A) WAIT_NAME: aqui NÃO tem adivinhação, é sempre nome.
+    // ===== WAIT_NAME =====
     if (u.status === "WAIT_NAME") {
-      // Se o usuário mandou algo muito curto, pede de novo
-      if (body.length < 6) {
+      // só aceita nome se parecer NOME REAL
+      if (!looksLikeRealFullName(body)) {
         await sendWhatsAppText(waId, welcomeAskNameText());
         return;
       }
 
       u.fullName = body;
-      u.status = "TRIAL"; // vai para trial automaticamente
+      u.status = "TRIAL";
       await saveUser(u);
 
       const firstName = u.fullName.split(/\s+/)[0] || "perfeito";
@@ -425,33 +452,22 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // (B) TRIAL
+    // ===== TRIAL =====
     if (u.status === "TRIAL") {
-      // Se já estourou o trial, manda planos direto (sem pedir "PLANOS")
       if ((u.trialUsed || 0) >= 5) {
         u.status = "WAIT_PLAN";
         await saveUser(u);
-        await sendWhatsAppText(
-          waId,
-          `😄 Seu trial gratuito foi concluído!\n\nPara continuar, escolha um plano:\n\n${plansMenuText()}`
-        );
+        await sendWhatsAppText(waId, plansMenuText());
         return;
       }
 
-      // Consumir 1 uso no trial (qualquer mensagem de descrição)
       u.trialUsed = Number(u.trialUsed || 0) + 1;
       await saveUser(u);
 
-      // Se acabou agora, já manda os planos direto
       if (u.trialUsed >= 5) {
         u.status = "WAIT_PLAN";
         await saveUser(u);
-        await sendWhatsAppText(
-          waId,
-          `✅ Recebi sua solicitação.\n\n🎁 Trial: ${u.trialUsed}/5\n\n` +
-            `😄 Seu trial gratuito foi concluído!\n\n` +
-            `Para continuar, escolha um plano:\n\n${plansMenuText()}`
-        );
+        await sendWhatsAppText(waId, plansMenuText());
         return;
       }
 
@@ -462,7 +478,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // (C) WAIT_PLAN
+    // ===== WAIT_PLAN =====
     if (u.status === "WAIT_PLAN") {
       let planKey = "";
       if (body === "1") planKey = "DE_VEZ_EM_QUANDO";
@@ -482,7 +498,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // (D) WAIT_PAYMENT_METHOD
+    // ===== WAIT_PAYMENT_METHOD =====
     if (u.status === "WAIT_PAYMENT_METHOD") {
       if (body !== "1" && body !== "2") {
         await sendWhatsAppText(waId, `Só pra eu registrar certinho 😄\n\n${payMethodText()}`);
@@ -496,37 +512,32 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // (E) WAIT_DOC (valida DV antes do Asaas)
+    // ===== WAIT_DOC =====
     if (u.status === "WAIT_DOC") {
       const v = validateDoc(body);
       if (!v.ok) {
         await sendWhatsAppText(waId, invalidDocText());
         return;
       }
+
       u.doc = v.doc;
-      u.status = "PAYMENT_PENDING"; // aqui entraremos no 16.4 com criação Asaas real
+      u.status = "PAYMENT_PENDING";
       await saveUser(u);
 
-      const plan = PLANS[u.plan] || null;
       await sendWhatsAppText(
         waId,
-        `✅ Documento confirmado (${v.type}).\n\n` +
-          `📦 Plano: ${plan ? plan.label : u.plan}\n` +
-          `💳 Pagamento: ${u.payMethod === "CARD" ? "Cartão (assinatura)" : "PIX (mensal)"}\n\n` +
-          `Perfeito! No próximo passo (16.4) vamos criar automaticamente a cobrança/assinatura no Asaas aqui mesmo.`
+        `✅ Documento confirmado (${v.type}).\n\nPerfeito! Próximo passo: gerar sua cobrança/assinatura no Asaas.`
       );
       return;
     }
 
-    // fallback
     await sendWhatsAppText(waId, `✅ Recebi sua mensagem!`);
   } catch (err) {
     console.error("Webhook error:", err?.message || err);
-    // webhook já respondeu ok
   }
 });
 
-// ===================== ASAAS routes (já existe no seu projeto) =====================
+// ===================== ASAAS routes =====================
 app.use("/asaas", asaasRouter());
 app.get("/asaas/test", basicAuth, (req, res) => {
   return res.json({ ok: true, asaasWebhookRoute: "/asaas/webhook", env: ASAAS_ENV, hasApiKey: !!ASAAS_API_KEY });
