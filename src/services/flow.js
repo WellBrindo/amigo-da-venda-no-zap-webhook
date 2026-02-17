@@ -232,7 +232,7 @@ export async function handleInboundText({ waId, text }) {
   // 1) Onboarding: nome
   if (status === ST.WAIT_NAME) {
     const name = inbound;
-    if (name.length < 3) return reply("Me envia seu *nome completo* por favor 🙂");
+    if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
     await setUserFullName(id, name);
     await setUserStatus(id, ST.WAIT_PRODUCT);
     return reply(await msgAskProduct(id));
@@ -265,7 +265,7 @@ export async function handleInboundText({ waId, text }) {
   // 5) Forma de pagamento
   if (status === ST.WAIT_PAYMENT_METHOD) {
     const c = normalizeChoice(inbound);
-    if (c !== "1" && c !== "2") return reply("Me diga *1* (Cartão) ou *2* (PIX), por favor 🙂");
+    if (c !== "1" && c !== "2") return reply(await getCopyText("FLOW_INVALID_PAYMENT_METHOD", { waId: id }));
 
     const pm = c === "1" ? "CARD" : "PIX";
     await setPaymentMethod(id, pm);
@@ -311,10 +311,14 @@ export async function handleInboundText({ waId, text }) {
       await setUserStatus(id, ST.PAYMENT_PENDING);
 
       const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
-      const line1 = "✅ Pronto! Gerei sua cobrança via *PIX*.\n\n";
-      const line2 = url ? `Pague por aqui: ${url}\n\n` : "Pague pelo link dentro do Asaas.\n\n";
-      const line3 = "Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀";
-      return reply(line1 + line2 + line3);
+      const methodTitle = "Gerei sua cobrança via *PIX*.";
+      const linkLine = url ? `Pague por aqui: ${url}
+
+` : "Pague pelo link dentro do Asaas.
+
+";
+      const msg = await getCopyText("FLOW_PAYMENT_SUCCESS", { waId: id, vars: { methodTitle, linkLine } });
+      return reply(msg);
     }
 
     // Cartão recorrente: Payment Link
@@ -329,10 +333,14 @@ export async function handleInboundText({ waId, text }) {
     await setUserStatus(id, ST.PAYMENT_PENDING);
 
     const url = link?.url || link?.paymentLink || link?.link || "";
-    const line1 = "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).\n\n";
-    const line2 = url ? `Finalize por aqui: ${url}\n\n` : "Finalize pelo link no Asaas.\n\n";
-    const line3 = "Assim que confirmar, seu plano ativa automaticamente. 🚀";
-    return reply(line1 + line2 + line3);
+    const methodTitle = "Agora é só concluir no *Cartão* (assinatura).";
+    const linkLine = url ? `Finalize por aqui: ${url}
+
+` : "Finalize pelo link no Asaas.
+
+";
+    const msg = await getCopyText("FLOW_PAYMENT_SUCCESS", { waId: id, vars: { methodTitle, linkLine } });
+    return reply(msg);
   }
 
   // 7) Pagamento pendente
@@ -340,7 +348,7 @@ export async function handleInboundText({ waId, text }) {
     const planCode = await getUserPlan(id);
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     const planTxt = plan ? `Plano: *${plan.name}*.` : "";
-    return reply(`Seu pagamento ainda está *pendente* no Asaas. ${planTxt}\n\nAssim que confirmar, eu libero automaticamente. 🚀`);
+    return reply(await getCopyText("FLOW_PAYMENT_PENDING", { waId: id, vars: { planTxt } }));
   }
 
   // 8) ACTIVE
@@ -350,7 +358,7 @@ export async function handleInboundText({ waId, text }) {
   }
 
   // fallback seguro
-  return reply("Não entendi 😅\n\nMe diga o que você vende ou qual serviço você presta, e eu monto o anúncio.");
+  return reply(await getCopyText("FLOW_FALLBACK_UNKNOWN", { waId: id }));
 }
 
 // -------------------- Generate Ad --------------------
@@ -377,7 +385,9 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     const used = await getUserQuotaUsed(id);
     if (used >= Number(plan.monthlyQuota || 0)) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply("Você atingiu seu limite mensal 😅\n\n" + (await msgPlansOnly()));
+      return reply((await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id })) + "
+
+" + (await msgPlansOnly()));
     }
   }
 
@@ -389,7 +399,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     const r = await generateAdText({ userText, mode });
     ad = r.text;
   } catch {
-    return reply("Tive um probleminha técnico para gerar sua descrição agora 😕\n\nPode tentar novamente em alguns instantes?");
+    return reply(await getCopyText("FLOW_OPENAI_ERROR", { waId: id }));
   }
 
   // salva prompt
@@ -414,7 +424,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     );
   }
 
-  return reply(ad + msgAfterAdAskTemplateChoice(mode));
+  return reply(ad + (await msgAfterAdAskTemplateChoice(id, mode)));
 }
 
 // -------------------- Asaas helpers --------------------
