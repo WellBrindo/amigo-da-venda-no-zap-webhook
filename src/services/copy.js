@@ -48,6 +48,27 @@ export const DEFAULT_COPY = Object.freeze({
   FLOW_TRIAL_BLOCKED:
     "Seu teste grátis acabou 😄\n\nPara continuar, escolha um plano:\n\n1️⃣ *De Vez em Quando* — R$ 24,90 (20 descrições/mês)\n2️⃣ *Sempre por Perto* — R$ 34,90 (60 descrições/mês)\n3️⃣ *Melhor Amigo* — R$ 49,90 (200 descrições/mês)\n\nResponda com *1*, *2* ou *3*.",
 
+  FLOW_TRIAL_PREFIX: "Não entendi 😅",
+
+  // FLOW — Fallback de planos (quando o Redis não tem planos cadastrados)
+  FLOW_PLANS_FALLBACK_STATIC:
+    "Para continuar, escolha um plano:
+
+"
+    + "1) De Vez em Quando — R$ 24.90
+   • 20 descrições/mês
+
+"
+    + "2) Sempre por Perto — R$ 34.90
+   • 60 descrições/mês
+
+"
+    + "3) Melhor Amigo — R$ 49.90
+   • 200 descrições/mês
+
+"
+    + "Responda com *1*, *2* ou *3*.",
+
   FLOW_QUOTA_BLOCKED:
     "Você atingiu o limite do seu plano neste mês 😕\n\nSe quiser, posso te ajudar a escolher um plano maior.\n\nResponda: *PLANOS*",
 
@@ -138,6 +159,8 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_TEMPLATE_SET_FIXED", label: "Confirma FIXO" },
   { category: "Flow", key: "FLOW_TEMPLATE_SET_FREE", label: "Confirma LIVRE" },
   { category: "Flow", key: "FLOW_TRIAL_BLOCKED", label: "Trial acabou / mostrar planos" },
+  { category: "Flow", key: "FLOW_TRIAL_PREFIX", label: "Trial: prefixo (não entendi)" },
+  { category: "Flow", key: "FLOW_PLANS_FALLBACK_STATIC", label: "Planos: fallback estático (sem planos no Redis)" },
   { category: "Flow", key: "FLOW_QUOTA_BLOCKED", label: "Limite do plano" },
   { category: "Flow", key: "FLOW_UNKNOWN_COMMAND", label: "Comando não entendido" },
   { category: "Flow", key: "FLOW_ASK_PAYMENT_METHOD", label: "Escolher forma de pagamento" },
