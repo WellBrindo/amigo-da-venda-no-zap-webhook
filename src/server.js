@@ -3,7 +3,7 @@ import express from "express";
 import { asaasRouter } from "./routes/asaas.js";
 
 const APP_NAME = "amigo-das-vendas";
-const APP_VERSION = "16.0.6-modular-fix-name-persistence";
+const APP_VERSION = "16.0.7-modular-fix-upstash-pipeline-user-repair";
 
 const app = express();
 app.set("trust proxy", true);
@@ -116,7 +116,7 @@ function validateDoc(raw) {
   return { ok: false, type: "UNKNOWN", doc };
 }
 
-// ===================== Name validation (anti-descrition-as-name) =====================
+// ===================== Name validation =====================
 function looksLikeRealFullName(text) {
   const t = normalizeSpaces(text);
   if (t.length < 8) return false;
@@ -135,7 +135,8 @@ function looksLikeRealFullName(text) {
 }
 
 // ===================== Redis (Upstash REST) =====================
-async function upstash(path, { method = "GET", body = null } = {}) {
+// ✅ agora usando /pipeline para SET (evita qualquer bug de URL encoding)
+async function upstashFetch(path, { method = "GET", body = null } = {}) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) {
     throw new Error("Missing Upstash env (UPSTASH_REDIS_REST_URL / TOKEN)");
   }
@@ -154,17 +155,29 @@ async function upstash(path, { method = "GET", body = null } = {}) {
     throw new Error(`Redis error: ${msg}`);
   }
   if (data?.error) throw new Error(`Upstash: ${data.error}`);
-  return data?.result;
+  return data;
 }
 
 async function redisGet(key) {
-  return upstash(`/get/${encodeURIComponent(key)}`);
+  const data = await upstashFetch(`/get/${encodeURIComponent(key)}`);
+  return data?.result ?? null;
 }
+
+async function redisPipeline(commands) {
+  // commands: array of arrays, e.g. [["SET", "k", "v"], ["GET", "k"]]
+  const data = await upstashFetch(`/pipeline`, { method: "POST", body: commands });
+  // Upstash returns { result: [ ... ] }
+  return data?.result ?? [];
+}
+
 async function redisSet(key, value) {
-  return upstash(`/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}`);
+  await redisPipeline([["SET", key, String(value)]]);
+  return "OK";
 }
+
 async function redisPing() {
-  return upstash(`/ping`);
+  const data = await upstashFetch(`/ping`);
+  return data?.result ?? "PONG";
 }
 
 // ===================== WhatsApp send =====================
@@ -204,20 +217,48 @@ function userKey(waId) {
   return `user:${waId}`;
 }
 function userNameKey(waId) {
-  return `user_name:${waId}`; // ✅ chave separada só para o nome
+  return `user_name:${waId}`;
 }
 function usersIndexKey() {
   return `users:index`;
+}
+
+function isPlainObject(x) {
+  return !!x && typeof x === "object" && !Array.isArray(x);
 }
 
 async function loadUser(waId) {
   const raw = await redisGet(userKey(waId));
   if (!raw) return null;
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // ✅ rejeita usuário “corrompido” (string, {}, array, etc.)
+    if (!isPlainObject(parsed)) return null;
+    if (String(parsed.waId || "") !== String(waId)) return null;
+    if (!parsed.status) return null;
+    return parsed;
   } catch {
     return null;
   }
+}
+
+function newUser(waId) {
+  return {
+    waId,
+    status: "WAIT_NAME", // WAIT_NAME | TRIAL | WAIT_PLAN | WAIT_PAYMENT_METHOD | WAIT_DOC | PAYMENT_PENDING | ACTIVE
+    plan: "",
+    trialUsed: 0,
+    quotaUsed: 0,
+    fullName: "",
+    doc: "",
+    payMethod: "",
+    createdAtMs: nowMs(),
+    updatedAtMs: nowMs(),
+    lastInboundAtMs: 0,
+    windowEndsAtMs: 0,
+    asaasCustomerId: "",
+    asaasRef: "",
+  };
 }
 
 async function saveUser(user) {
@@ -226,12 +267,12 @@ async function saveUser(user) {
   // salva JSON principal
   await redisSet(userKey(user.waId), JSON.stringify(user));
 
-  // ✅ salva nome em key separado (robusto)
+  // salva nome em key separado
   if (user.fullName) {
     await redisSet(userNameKey(user.waId), String(user.fullName));
   }
 
-  // index simples
+  // index
   const idxRaw = (await redisGet(usersIndexKey())) || "[]";
   let idx = [];
   try {
@@ -248,48 +289,28 @@ async function saveUser(user) {
 async function ensureUser(waId) {
   let u = await loadUser(waId);
 
+  // ✅ Se user estava corrompido, recria do zero
   if (!u) {
-    u = {
-      waId,
-      status: "WAIT_NAME", // WAIT_NAME | TRIAL | WAIT_PLAN | WAIT_PAYMENT_METHOD | WAIT_DOC | PAYMENT_PENDING | ACTIVE
-      plan: "",
-      trialUsed: 0,
-      quotaUsed: 0,
-      fullName: "",
-      doc: "",
-      payMethod: "",
-      createdAtMs: nowMs(),
-      updatedAtMs: nowMs(),
-      lastInboundAtMs: 0,
-      windowEndsAtMs: 0,
-      asaasCustomerId: "",
-      asaasRef: "",
-    };
+    u = newUser(waId);
     await saveUser(u);
   }
 
-  // ✅ Se JSON veio sem nome, tenta recuperar do key separado
+  // Se JSON veio sem nome, tenta recuperar do key separado
   if (!u.fullName) {
     const name = await redisGet(userNameKey(waId));
     if (name) {
       u.fullName = String(name);
-      if (u.status === "WAIT_NAME") u.status = "TRIAL";
-      await saveUser(u);
     }
   }
 
-  // Se ainda sem nome, força WAIT_NAME
+  // Ajuste de estado baseado em nome
   if (!u.fullName) {
     u.status = "WAIT_NAME";
-    await saveUser(u);
-  } else {
-    // se tem nome, nunca pode ficar WAIT_NAME
-    if (u.status === "WAIT_NAME") {
-      u.status = "TRIAL";
-      await saveUser(u);
-    }
+  } else if (u.status === "WAIT_NAME") {
+    u.status = "TRIAL";
   }
 
+  await saveUser(u);
   return u;
 }
 
@@ -357,7 +378,7 @@ app.get("/admin", basicAuth, (req, res) => {
       <title>Admin - ${escapeHtml(APP_NAME)}</title>
       <style>
         body { font-family: Arial, sans-serif; padding: 24px; }
-        .card { max-width: 920px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+        .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
         a { display: inline-block; margin: 6px 0; }
         .muted { color: #666; }
         .row { display:flex; gap: 14px; flex-wrap: wrap; }
@@ -372,7 +393,8 @@ app.get("/admin", basicAuth, (req, res) => {
         <div class="row">
           <div class="pill"><a href="/health">✅ Health</a></div>
           <div class="pill"><a href="/admin/redis-ping">🧠 Redis Ping</a></div>
-          <div class="pill"><a href="/admin/debug-user?waId=5511960765975">🧪 Debug User</a></div>
+          <div class="pill"><a href="/admin/raw-user?waId=5511960765975">🧪 Raw User</a></div>
+          <div class="pill"><a href="/admin/debug-user?waId=5511960765975">🔎 Debug User</a></div>
         </div>
       </div>
     </body>
@@ -391,11 +413,52 @@ app.get("/admin/redis-ping", basicAuth, async (req, res) => {
   }
 });
 
-// ✅ Debug sem expor CPF/doc
+// ✅ Raw do redis para investigar (não mostra CPF)
+app.get("/admin/raw-user", basicAuth, async (req, res) => {
+  try {
+    const waId = String(req.query.waId || "").trim();
+    if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+
+    const raw = await redisGet(userKey(waId));
+    const nameRaw = await redisGet(userNameKey(waId));
+
+    const rawStr = raw ? String(raw) : "";
+    const nameStr = nameRaw ? String(nameRaw) : "";
+
+    return res.json({
+      ok: true,
+      waId,
+      rawExists: !!raw,
+      rawLen: rawStr.length,
+      rawPreview: rawStr.slice(0, 200), // só início
+      nameKeyExists: !!nameRaw,
+      nameLen: nameStr.length,
+      namePreview: nameStr.slice(0, 120),
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ✅ Debug amigável
 app.get("/admin/debug-user", basicAuth, async (req, res) => {
   try {
     const waId = String(req.query.waId || "").trim();
     if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+
+    const raw = await redisGet(userKey(waId));
+    let parsedType = "";
+    let parsedOk = false;
+
+    if (raw) {
+      try {
+        const p = JSON.parse(String(raw));
+        parsedType = Array.isArray(p) ? "array" : typeof p;
+        parsedOk = !!(p && typeof p === "object");
+      } catch {
+        parsedType = "invalid_json";
+      }
+    }
 
     const u = await loadUser(waId);
     const nameKey = await redisGet(userNameKey(waId));
@@ -403,11 +466,14 @@ app.get("/admin/debug-user", basicAuth, async (req, res) => {
     return res.json({
       ok: true,
       waId,
-      userExists: !!u,
+      rawExists: !!raw,
+      parsedType,
+      parsedOk,
+      userLoaded: !!u,
       status: u?.status || "",
       plan: u?.plan || "",
       trialUsed: u?.trialUsed || 0,
-      fullNameInJson: u?.fullName ? true : false,
+      fullNameInJson: !!u?.fullName,
       fullNameValue: u?.fullName ? u.fullName : "",
       fullNameKeyExists: !!nameKey,
       fullNameKeyValue: nameKey ? String(nameKey) : "",
@@ -446,6 +512,7 @@ app.post("/webhook", async (req, res) => {
     const body = normalizeSpaces(text);
 
     const u = await ensureUser(waId);
+
     u.lastInboundAtMs = nowMs();
     u.windowEndsAtMs = u.lastInboundAtMs + 24 * 60 * 60 * 1000;
     await saveUser(u);
