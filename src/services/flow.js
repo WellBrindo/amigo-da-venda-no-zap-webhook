@@ -18,6 +18,7 @@
  */
 
 import { generateAdText } from "./openai/generate.js";
+import { incDescriptionMetrics } from "./metrics.js";
 
 import {
   ensureUserExists,
@@ -417,6 +418,21 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
   // conta uso
   if (isTrial) await incUserTrialUsed(id, 1);
   else await incUserQuotaUsed(id, 1);
+
+  // métricas globais + por usuário (best-effort; não pode quebrar produção)
+  try {
+    await incDescriptionMetrics(id, 1);
+  } catch (err) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        tag: "metrics_inc_failed",
+        waId: id,
+        isTrial: !!isTrial,
+        error: String(err?.message || err),
+      })
+    );
+  }
 
   return reply(ad + msgAfterAdAskTemplateChoice(mode));
 }
