@@ -133,19 +133,22 @@ async function msgAskProduct(waId){
   return await getCopyText("FLOW_ASK_PRODUCT", { waId });
 }
 
-async function msgTrialOverAndPlans(waId) {
+async function msgTrialOverAndPlans() {
   // renderPlansMenu já vem com o cabeçalho do trial concluído
-  const prefix = await getCopyText("FLOW_TRIAL_PREFIX", { waId });
-  return prefix + "
-
-" + (await renderPlansMenu());
+  return "Não entendi 😅\n\n" + (await renderPlansMenu());
 }
 
-async function msgPlansOnly(waId) {
+async function msgPlansOnly() {
   // Versão sem o "trial concluído"
   const menu = await getMenuPlans();
   if (!menu || menu.length === 0) {
-    return await getCopyText("FLOW_PLANS_FALLBACK_STATIC", { waId });
+    return (
+      "Para continuar, escolha um plano:\n\n" +
+      "1) De Vez em Quando — R$ 24.90\n   • 20 descrições/mês\n\n" +
+      "2) Sempre por Perto — R$ 34.90\n   • 60 descrições/mês\n\n" +
+      "3) Melhor Amigo — R$ 49.90\n   • 200 descrições/mês\n\n" +
+      "Responda com *1*, *2* ou *3*."
+    );
   }
 
   const lines = [];
@@ -229,7 +232,7 @@ export async function handleInboundText({ waId, text }) {
   // 1) Onboarding: nome
   if (status === ST.WAIT_NAME) {
     const name = inbound;
-    if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
+    if (name.length < 3) return reply("Me envia seu *nome completo* por favor 🙂");
     await setUserFullName(id, name);
     await setUserStatus(id, ST.WAIT_PRODUCT);
     return reply(await msgAskProduct(id));
@@ -251,7 +254,7 @@ export async function handleInboundText({ waId, text }) {
   if (status === ST.WAIT_PLAN) {
     const choice = normalizeChoice(inbound);
     const plan = await getPlanByChoice(choice);
-    if (!plan) return reply(await msgPlansOnly(id));
+    if (!plan) return reply(await msgPlansOnly());
 
     await setUserPlan(id, plan.code);
     await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
@@ -262,7 +265,7 @@ export async function handleInboundText({ waId, text }) {
   // 5) Forma de pagamento
   if (status === ST.WAIT_PAYMENT_METHOD) {
     const c = normalizeChoice(inbound);
-    if (c !== "1" && c !== "2") return reply(await getCopyText("FLOW_INVALID_PAYMENT_METHOD", { waId: id }));
+    if (c !== "1" && c !== "2") return reply("Me diga *1* (Cartão) ou *2* (PIX), por favor 🙂");
 
     const pm = c === "1" ? "CARD" : "PIX";
     await setPaymentMethod(id, pm);
@@ -283,7 +286,7 @@ export async function handleInboundText({ waId, text }) {
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     if (!plan) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly(id));
+      return reply(await msgPlansOnly());
     }
 
     const pm = await getPaymentMethod(id);
@@ -308,14 +311,10 @@ export async function handleInboundText({ waId, text }) {
       await setUserStatus(id, ST.PAYMENT_PENDING);
 
       const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
-      const methodTitle = "Gerei sua cobrança via *PIX*.";
-      const linkLine = url ? `Pague por aqui: ${url}
-
-` : "Pague pelo link dentro do Asaas.
-
-";
-      const msg = await getCopyText("FLOW_PAYMENT_SUCCESS", { waId: id, vars: { methodTitle, linkLine } });
-      return reply(msg);
+      const line1 = "✅ Pronto! Gerei sua cobrança via *PIX*.\n\n";
+      const line2 = url ? `Pague por aqui: ${url}\n\n` : "Pague pelo link dentro do Asaas.\n\n";
+      const line3 = "Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀";
+      return reply(line1 + line2 + line3);
     }
 
     // Cartão recorrente: Payment Link
@@ -330,14 +329,10 @@ export async function handleInboundText({ waId, text }) {
     await setUserStatus(id, ST.PAYMENT_PENDING);
 
     const url = link?.url || link?.paymentLink || link?.link || "";
-    const methodTitle = "Agora é só concluir no *Cartão* (assinatura).";
-    const linkLine = url ? `Finalize por aqui: ${url}
-
-` : "Finalize pelo link no Asaas.
-
-";
-    const msg = await getCopyText("FLOW_PAYMENT_SUCCESS", { waId: id, vars: { methodTitle, linkLine } });
-    return reply(msg);
+    const line1 = "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).\n\n";
+    const line2 = url ? `Finalize por aqui: ${url}\n\n` : "Finalize pelo link no Asaas.\n\n";
+    const line3 = "Assim que confirmar, seu plano ativa automaticamente. 🚀";
+    return reply(line1 + line2 + line3);
   }
 
   // 7) Pagamento pendente
@@ -345,7 +340,7 @@ export async function handleInboundText({ waId, text }) {
     const planCode = await getUserPlan(id);
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     const planTxt = plan ? `Plano: *${plan.name}*.` : "";
-    return reply(await getCopyText("FLOW_PAYMENT_PENDING", { waId: id, vars: { planTxt } }));
+    return reply(`Seu pagamento ainda está *pendente* no Asaas. ${planTxt}\n\nAssim que confirmar, eu libero automaticamente. 🚀`);
   }
 
   // 8) ACTIVE
@@ -355,7 +350,7 @@ export async function handleInboundText({ waId, text }) {
   }
 
   // fallback seguro
-  return reply(await getCopyText("FLOW_FALLBACK_UNKNOWN", { waId: id }));
+  return reply("Não entendi 😅\n\nMe diga o que você vende ou qual serviço você presta, e eu monto o anúncio.");
 }
 
 // -------------------- Generate Ad --------------------
@@ -368,7 +363,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     const used = await getUserTrialUsed(id);
     if (used >= TRIAL_LIMIT) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgTrialOverAndPlans(id));
+      return reply(await msgTrialOverAndPlans());
     }
   } else {
     // ACTIVE: checa quota do plano
@@ -376,15 +371,13 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     if (!plan) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly(id));
+      return reply(await msgPlansOnly());
     }
 
     const used = await getUserQuotaUsed(id);
     if (used >= Number(plan.monthlyQuota || 0)) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply((await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id })) + "
-
-" + (await msgPlansOnly(id)));
+      return reply("Você atingiu seu limite mensal 😅\n\n" + (await msgPlansOnly()));
     }
   }
 
@@ -396,7 +389,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     const r = await generateAdText({ userText, mode });
     ad = r.text;
   } catch {
-    return reply(await getCopyText("FLOW_OPENAI_ERROR", { waId: id }));
+    return reply("Tive um probleminha técnico para gerar sua descrição agora 😕\n\nPode tentar novamente em alguns instantes?");
   }
 
   // salva prompt
@@ -421,7 +414,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     );
   }
 
-  return reply(ad + (await msgAfterAdAskTemplateChoice(id, mode)));
+  return reply(ad + msgAfterAdAskTemplateChoice(mode));
 }
 
 // -------------------- Asaas helpers --------------------
