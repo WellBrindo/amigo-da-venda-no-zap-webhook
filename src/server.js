@@ -1,6 +1,7 @@
 // src/server.js
 import express from "express";
 import { asaasRouter } from "./routes/asaas.js";
+import { adminRouter } from "./routes/admin.js";
 
 const APP_NAME = "amigo-das-vendas";
 const APP_VERSION = "16.0.8-modular-openai-on-template-toggle";
@@ -86,7 +87,7 @@ function isValidCPF(raw) {
 
   const calcDV = (base, factor) => {
     let sum = 0;
-    for (let i = 0; i < base.length; i++) sum += Number(base[i]) * (factor - i);
+    for (let i = 0; i < base.length; i++) sum += Number(base[i]) * factor--;
     const mod = sum % 11;
     return mod < 2 ? 0 : 11 - mod;
   };
@@ -103,7 +104,7 @@ function isValidCNPJ(raw) {
 
   const calcDV = (base, weights) => {
     let sum = 0;
-    for (let i = 0; i < base.length; i++) sum += Number(base[i]) * weights[i];
+    for (let i = 0; i < weights.length; i++) sum += Number(base[i]) * weights[i];
     const mod = sum % 11;
     return mod < 2 ? 0 : 11 - mod;
   };
@@ -245,254 +246,137 @@ async function openaiChat({ system, user, maxTokens = 420 }) {
     const errMsg = data?.error?.message || `OpenAI HTTP ${res.status}`;
     throw new Error(errMsg);
   }
+  const txt = data?.choices?.[0]?.message?.content || "";
+  return String(txt).trim();
+}
 
-  const content = data?.choices?.[0]?.message?.content || "";
-  return String(content).trim();
+function buildSystemPrompt(formatMode) {
+  const base =
+    "Você é um assistente especialista em criar anúncios curtos e de alta conversão para WhatsApp. " +
+    "Você deve devolver um texto pronto para copiar e colar. " +
+    "Seja claro, objetivo e persuasivo. Não invente dados (ex: endereço, horário) se o usuário não informou. " +
+    "Se faltar algo importante, use 'Sob consulta'.";
+  if (formatMode === "LIVRE") return base + " Formatação livre (sem template fixo).";
+  return base + " Use um template fixo com emojis, bullets e chamada para ação (CTA).";
 }
 
 async function generateAdText({ productDesc, formatMode }) {
-  const isTemplate = formatMode !== "FREE";
-  const system =
-    `Você é um redator especialista em anúncios para WhatsApp no Brasil. ` +
-    `Seu objetivo é criar um anúncio curto, persuasivo e pronto para copiar e colar. ` +
-    `Use linguagem simples, emocional e orientada a conversão. ` +
-    `Nunca invente informações específicas (ex.: endereço exato, horários exatos) se não forem informadas; use "Sob consulta".`;
-
-  const templateInstruction = isTemplate
-    ? `Use OBRIGATORIAMENTE o template abaixo (estrutura e campos):\n` +
-      `1) Uma linha de título com emoji + texto em negrito usando asteriscos, ex: 🍰 *Delicie-se com...*\n` +
-      `2) Um parágrafo curto de oferta\n` +
-      `3) 3 bullets com emojis\n` +
-      `4) Bloco final com:\n` +
-      `💰 Preço: ...\n` +
-      `📍 Local: ...\n` +
-      `🕒 Horário: ...\n` +
-      `5) CTA final ("Peça já o seu!" ou similar) com 📞\n`
-    : `Formatação livre, mas ainda agradável para WhatsApp. Pode usar emojis e quebras de linha.`;
-
+  const system = buildSystemPrompt(formatMode);
   const user =
-    `Crie um anúncio para esta descrição do usuário:\n` +
-    `"${productDesc}"\n\n` +
-    `${templateInstruction}\n\n` +
-    `Importante:\n` +
-    `- Se preço não estiver claro, use "Sob consulta".\n` +
-    `- Se local não estiver claro, use "Sob consulta".\n` +
-    `- Não coloque hashtags.\n` +
-    `- Não use markdown além de *negrito* (quando usar template).\n`;
+    "Crie um anúncio pronto para WhatsApp com base na descrição abaixo.\n\n" +
+    `Descrição do usuário: ${productDesc}\n\n` +
+    "Regras:\n" +
+    "- Não diga que é IA.\n" +
+    "- Não peça para o usuário mandar mais dados.\n" +
+    "- Se faltar local/horário, use 'Sob consulta'.\n" +
+    "- Mantenha em até ~900 caracteres.\n";
 
-  // 2 tentativas rápidas (sem exagero)
-  try {
-    return await openaiChat({ system, user, maxTokens: 520 });
-  } catch (e1) {
-    // retry 1
-    return await openaiChat({ system, user, maxTokens: 520 });
-  }
+  return openaiChat({ system, user, maxTokens: 450 });
 }
 
-// ===================== User State =====================
-function userKey(waId) {
-  return `user:${waId}`;
-}
-function userNameKey(waId) {
-  return `user_name:${waId}`;
-}
-function usersIndexKey() {
-  return `users:index`;
-}
-
-function isPlainObject(x) {
-  return !!x && typeof x === "object" && !Array.isArray(x);
-}
-
-async function loadUser(waId) {
-  const raw = await redisGet(userKey(waId));
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (!isPlainObject(parsed)) return null;
-    if (String(parsed.waId || "") !== String(waId)) return null;
-    if (!parsed.status) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function newUser(waId) {
-  return {
-    waId,
-    status: "WAIT_NAME", // WAIT_NAME | TRIAL | WAIT_PLAN | WAIT_PAYMENT_METHOD | WAIT_DOC | PAYMENT_PENDING | ACTIVE
-    plan: "",
-    trialUsed: 0,
-    quotaUsed: 0,
-    fullName: "",
-    doc: "",
-    payMethod: "",
-    formatMode: "TEMPLATE", // TEMPLATE | FREE
-    askFormatChoicePending: false,
-    createdAtMs: nowMs(),
-    updatedAtMs: nowMs(),
-    lastInboundAtMs: 0,
-    windowEndsAtMs: 0,
-    asaasCustomerId: "",
-    asaasRef: "",
-    lastUserProductDesc: "",
-    lastGeneratedAd: "",
-  };
-}
-
-async function saveUser(user) {
-  user.updatedAtMs = nowMs();
-
-  await redisSet(userKey(user.waId), JSON.stringify(user));
-  if (user.fullName) await redisSet(userNameKey(user.waId), String(user.fullName));
-
-  const idxRaw = (await redisGet(usersIndexKey())) || "[]";
-  let idx = [];
-  try {
-    idx = JSON.parse(idxRaw) || [];
-  } catch {
-    idx = [];
-  }
-  if (!idx.includes(user.waId)) idx.push(user.waId);
-  await redisSet(usersIndexKey(), JSON.stringify(idx));
-
-  return user;
-}
-
-async function ensureUser(waId) {
-  let u = await loadUser(waId);
-  if (!u) {
-    u = newUser(waId);
-    await saveUser(u);
-  }
-
-  if (!u.fullName) {
-    const name = await redisGet(userNameKey(waId));
-    if (name) u.fullName = String(name);
-  }
-
-  if (!u.fullName) {
-    u.status = "WAIT_NAME";
-  } else if (u.status === "WAIT_NAME") {
-    u.status = "TRIAL";
-  }
-
-  // defaults
-  if (!u.formatMode) u.formatMode = "TEMPLATE";
-  if (typeof u.askFormatChoicePending !== "boolean") u.askFormatChoicePending = false;
-
-  await saveUser(u);
-  return u;
-}
-
-// ===================== Copy texts =====================
-function welcomeAskNameText() {
-  return (
-    `Oi! 👋😊\n` +
-    `Eu sou o *Amigo das Vendas* — pode me chamar de *Amigo*.\n\n` +
-    `Você me diz o que você vende ou o serviço que você presta, e eu te devolvo um anúncio prontinho pra você copiar e mandar nos grupos do WhatsApp.\n\n` +
-    `Antes que eu esqueça 😄\n` +
-    `Qual é o seu *NOME COMPLETO*?`
-  );
-}
-
+// ===================== Copy (mensagens) =====================
 function plansMenuText() {
   return (
-    `😄 Seu trial gratuito foi concluído!\n\n` +
-    `Para continuar, escolha um plano:\n\n` +
-    `1) ${PLANS.DE_VEZ_EM_QUANDO.label} — R$ ${PLANS.DE_VEZ_EM_QUANDO.price.toFixed(2)}\n   • ${PLANS.DE_VEZ_EM_QUANDO.quota} descrições/mês\n\n` +
-    `2) ${PLANS.SEMPRE_POR_PERTO.label} — R$ ${PLANS.SEMPRE_POR_PERTO.price.toFixed(2)}\n   • ${PLANS.SEMPRE_POR_PERTO.quota} descrições/mês\n\n` +
-    `3) ${PLANS.MELHOR_AMIGO.label} — R$ ${PLANS.MELHOR_AMIGO.price.toFixed(2)}\n   • ${PLANS.MELHOR_AMIGO.quota} descrições/mês\n\n` +
-    `Responda com 1, 2 ou 3.`
+    "😄 Seu trial gratuito foi concluído!\n\n" +
+    "Para continuar, escolha um plano:\n\n" +
+    "1) De Vez em Quando — R$ 24.90\n" +
+    "   • 20 descrições/mês\n\n" +
+    "2) Sempre por Perto — R$ 34.90\n" +
+    "   • 60 descrições/mês\n\n" +
+    "3) Melhor Amigo — R$ 49.90\n" +
+    "   • 200 descrições/mês\n\n" +
+    "Responda com 1, 2 ou 3."
   );
 }
 
 function payMethodText() {
   return (
-    `Show! ✅\n\n` +
-    `Agora escolha a forma de pagamento:\n\n` +
-    `1) Cartão (assinatura mensal) 💳 *(recomendado)*\n` +
-    `2) PIX (cobrança mensal avulsa) 🧾\n\n` +
-    `Responda com 1 ou 2.`
+    "Perfeito 😄\n\n" +
+    "Como você prefere pagar?\n\n" +
+    "1) Cartão (assinatura recorrente)\n" +
+    "2) PIX (mensal avulso)\n\n" +
+    "Responda com 1 ou 2."
   );
 }
 
 function askDocText() {
   return (
-    `Nossa, quase esqueci 😄\n` +
-    `Pra eu conseguir gerar e registrar o pagamento, preciso do seu *CPF ou CNPJ* (somente números).\n\n` +
-    `Pode me enviar, por favor?\n` +
-    `Fica tranquilo(a): eu uso só pra isso e não exibo em logs.`
+    "Nossa, quase esqueci 😄\n" +
+    "Pra eu conseguir gerar e registrar o pagamento, preciso do seu CPF ou CNPJ (somente números).\n\n" +
+    "Pode me enviar, por favor?\n" +
+    "Fica tranquilo(a): eu uso só pra isso e não aparece em mensagens nem em logs."
   );
 }
 
 function invalidDocText() {
   return (
-    `Uhmm… acho que algum dígito ficou diferente aí 🥺😄\n` +
-    `Dá uma olhadinha e me envia de novo, por favor, somente números:\n\n` +
-    `CPF: 11 dígitos\n\n` +
-    `CNPJ: 14 dígitos`
+    "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\n" +
+    "Dá uma olhadinha e me envia de novo, por favor, somente números:\n\n" +
+    "CPF: 11 dígitos\n\n" +
+    "CNPJ: 14 dígitos"
   );
 }
 
 function askFormatChoiceText() {
   return (
-    `📌 Só uma perguntinha rápida:\n\n` +
-    `Esse *template* (com emojis, bullets e campos) é o formato que *comprovadamente* costuma ter melhor conversão em vendas.\n\n` +
-    `Você quer manter esse template nas próximas descrições?\n\n` +
-    `1) Sim, manter o template ✅\n` +
-    `2) Prefiro formatação livre ✨\n\n` +
-    `Responda com 1 ou 2.`
+    "Quer manter o template? 😄\n\n" +
+    "1) Sim (recomendado — geralmente converte mais)\n" +
+    "2) Não, quero formatação livre\n\n" +
+    "Você também pode digitar: TEMPLATE ou LIVRE quando quiser."
   );
 }
 
-function formatSetText(mode) {
-  if (mode === "FREE") {
-    return `Fechado! ✨\nA partir de agora vou usar *formatação livre*.\n\nSe quiser voltar ao template depois, é só digitar: TEMPLATE ✅`;
-  }
-  return `Perfeito! ✅\nVou manter o *template de alta conversão* nas próximas descrições.\n\nSe quiser deixar livre depois, é só digitar: LIVRE ✨`;
+// ===================== User state (via Redis JSON string) =====================
+function kUser(waId) {
+  return `user:${waId}`;
 }
 
-// ===================== Routes =====================
-app.get("/", (req, res) => res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION }));
-app.get("/health", (req, res) => res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION }));
+async function ensureUser(waId) {
+  const raw = await redisGet(kUser(waId));
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      // cai pro default
+    }
+  }
+  const u = {
+    waId,
+    status: "ASK_NAME",
+    fullName: "",
+    plan: "",
+    payMethod: "",
+    doc: "",
+    trialUsed: 0,
+    quotaUsed: 0,
+    formatMode: "TEMPLATE",
+    askFormatChoicePending: false,
+    lastInboundAtMs: 0,
+    windowEndsAtMs: 0,
+  };
+  await redisSet(kUser(waId), JSON.stringify(u));
+  return u;
+}
 
-app.get("/admin", basicAuth, (req, res) => {
-  const html = `
-  <!doctype html>
-  <html>
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>Admin - ${escapeHtml(APP_NAME)}</title>
-      <style>
-        body { font-family: Arial, sans-serif; padding: 24px; }
-        .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-        a { display: inline-block; margin: 6px 0; }
-        .muted { color: #666; }
-        .row { display:flex; gap: 14px; flex-wrap: wrap; }
-        .pill { border:1px solid #eee; border-radius: 10px; padding: 10px 12px; }
-        code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h2>Admin</h2>
-        <p class="muted">Version: <code>${escapeHtml(APP_VERSION)}</code></p>
-        <div class="row">
-          <div class="pill"><a href="/health">✅ Health</a></div>
-          <div class="pill"><a href="/admin/redis-ping">🧠 Redis Ping</a></div>
-          <div class="pill"><a href="/asaas/test">🧾 Asaas Test</a></div>
-        </div>
-      </div>
-    </body>
-  </html>
-  `;
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  return res.status(200).send(html);
+async function saveUser(u) {
+  await redisSet(kUser(u.waId), JSON.stringify(u));
+  return u;
+}
+
+// ===================== Health =====================
+app.get("/", (req, res) => {
+  return res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION });
 });
 
+app.get("/health", (req, res) => {
+  return res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION });
+});
+
+// ===================== Admin (Linha A) =====================
+// Tudo em /admin agora é o router modular + Basic Auth
+app.use("/admin", basicAuth, adminRouter());
+
+// Mantém o redis ping que você já usava (não depende do services/redis.js)
 app.get("/admin/redis-ping", basicAuth, async (req, res) => {
   try {
     const r = await redisPing();
@@ -542,60 +426,42 @@ app.post("/webhook", async (req, res) => {
         u.formatMode = "TEMPLATE";
         u.askFormatChoicePending = false;
         await saveUser(u);
-        await sendWhatsAppText(waId, formatSetText("TEMPLATE"));
+        await sendWhatsAppText(waId, "Fechado 😄 Vou manter o *template* daqui pra frente.");
         return;
       }
       if (lower === "livre") {
-        u.formatMode = "FREE";
+        u.formatMode = "LIVRE";
         u.askFormatChoicePending = false;
         await saveUser(u);
-        await sendWhatsAppText(waId, formatSetText("FREE"));
+        await sendWhatsAppText(waId, "Boa 😄 Vou usar *formatação livre* daqui pra frente.");
         return;
       }
     }
 
-    // ===== If we are waiting for format choice =====
-    if (u.askFormatChoicePending) {
-      if (body === "1") {
-        u.formatMode = "TEMPLATE";
-        u.askFormatChoicePending = false;
-        await saveUser(u);
-        await sendWhatsAppText(waId, formatSetText("TEMPLATE"));
-        return;
-      }
-      if (body === "2") {
-        u.formatMode = "FREE";
-        u.askFormatChoicePending = false;
-        await saveUser(u);
-        await sendWhatsAppText(waId, formatSetText("FREE"));
-        return;
-      }
-
-      await sendWhatsAppText(waId, askFormatChoiceText());
-      return;
-    }
-
-    // ===== WAIT_NAME =====
-    if (u.status === "WAIT_NAME") {
+    // ===== ASK_NAME =====
+    if (u.status === "ASK_NAME") {
       if (!looksLikeRealFullName(body)) {
-        await sendWhatsAppText(waId, welcomeAskNameText());
+        await sendWhatsAppText(
+          waId,
+          "Antes que eu esqueça 😄\nQual é o seu *NOME COMPLETO*?"
+        );
         return;
       }
-
       u.fullName = body;
-      u.status = "TRIAL";
+      u.status = "ASK_PRODUCT";
       await saveUser(u);
-
-      const firstName = u.fullName.split(/\s+/)[0] || "perfeito";
       await sendWhatsAppText(
         waId,
-        `Perfeito, ${firstName}! ✅\n\nAgora me diga *o que você vende* ou *o serviço que você presta* (pode ser simples, tipo: "vendo bolo R$30").`
+        `Prazer, ${u.fullName.split(" ")[0]}! 😄\n\nAgora me diga: o que você vende ou qual serviço você presta?`
       );
       return;
     }
 
-    // ===== TRIAL (OpenAI ON) =====
-    if (u.status === "TRIAL") {
+    // ===== ASK_PRODUCT (TRIAL) =====
+    if (u.status === "ASK_PRODUCT") {
+      if (!body) return;
+
+      // Se acabou o trial, vai direto pro menu de planos
       if ((u.trialUsed || 0) >= 5) {
         u.status = "WAIT_PLAN";
         await saveUser(u);
@@ -603,38 +469,47 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      // gera com OpenAI
-      u.lastUserProductDesc = body;
+      // Consome 1 do trial e gera anúncio
+      u.trialUsed = (u.trialUsed || 0) + 1;
+      await saveUser(u);
 
       let ad = "";
       try {
         ad = await generateAdText({ productDesc: body, formatMode: u.formatMode });
-      } catch (e) {
-        // fallback amigável (sem travar o usuário)
+      } catch {
         await sendWhatsAppText(
           waId,
-          `Tive uma instabilidade rapidinha ao gerar sua descrição 😅\n\nPode me enviar a descrição novamente?`
+          `Tive uma instabilidade ao gerar sua descrição 😅\n\nPode tentar de novo?`
         );
         return;
       }
 
-      u.trialUsed = Number(u.trialUsed || 0) + 1;
-      u.lastGeneratedAd = ad;
-      await saveUser(u);
-
       await sendWhatsAppText(waId, ad);
 
-      // pergunta de template/livre após a primeira geração (ou sempre, se preferir)
+      // pergunta template/livre pós-geração
       u.askFormatChoicePending = true;
       await saveUser(u);
       await sendWhatsAppText(waId, askFormatChoiceText());
+      return;
+    }
 
-      // se completou trial agora, manda planos na próxima interação (menos “spam” no mesmo instante)
-      if (u.trialUsed >= 5) {
-        u.status = "WAIT_PLAN";
+    // ===== Pergunta template/livre pendente =====
+    if (u.askFormatChoicePending) {
+      if (body === "1") {
+        u.formatMode = "TEMPLATE";
+        u.askFormatChoicePending = false;
         await saveUser(u);
+        await sendWhatsAppText(waId, "Perfeito 😄 Vou manter o *template*.");
+        return;
       }
-
+      if (body === "2") {
+        u.formatMode = "LIVRE";
+        u.askFormatChoicePending = false;
+        await saveUser(u);
+        await sendWhatsAppText(waId, "Fechado 😄 Vou usar *formatação livre*.");
+        return;
+      }
+      await sendWhatsAppText(waId, askFormatChoiceText());
       return;
     }
 
@@ -680,7 +555,7 @@ app.post("/webhook", async (req, res) => {
         return;
       }
 
-      u.doc = v.doc;
+      u.doc = v.doc; // ⚠️ não logar
       u.status = "PAYMENT_PENDING";
       await saveUser(u);
 
@@ -693,7 +568,6 @@ app.post("/webhook", async (req, res) => {
 
     // ===== ACTIVE (OpenAI ON também) =====
     if (u.status === "ACTIVE") {
-      // aqui depois conectamos quota, refinamentos etc.
       let ad = "";
       try {
         ad = await generateAdText({ productDesc: body, formatMode: u.formatMode });
