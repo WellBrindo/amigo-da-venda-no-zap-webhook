@@ -1,5 +1,9 @@
 // src/services/state.js
-// ✅ V16.4.1 — Migração segura do users:index (WRONGTYPE) em produção
+// ✅ V16.4.2 — Correções de Produção (sem remover funções):
+// - Mantém migração segura do users:index (WRONGTYPE)
+// - Elimina redisSet(key, "") (evita Upstash: ERR wrong number of arguments for 'set')
+// - Normaliza valores sujos do tipo "\"\"" (plan/paymentMethod) na leitura e escrita
+
 import {
   redisGet,
   redisSet,
@@ -67,6 +71,31 @@ function safeStr(v) {
 function toInt(v, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
+}
+
+/**
+ * Normaliza lixo do tipo "\"\"" (string JSON de string vazia) e afins.
+ * - Se vier "\"PIX\"" vira "PIX"
+ * - Se vier "\"\"" vira ""
+ * - Se não for JSON válido, retorna a string original
+ */
+function normalizeMaybeJsonString(raw) {
+  const s = safeStr(raw);
+  if (!s) return "";
+
+  if (s.startsWith('"') && s.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(s);
+      if (typeof parsed === "string") return parsed.trim();
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  // caso extremo: só aspas
+  if (/^"+$/.test(s)) return "";
+
+  return s;
 }
 
 function maskDocFromParts(docType, docLast4) {
@@ -144,13 +173,10 @@ export async function ensureUserExists(waId) {
   const curQuota = await redisGet(keyQuotaUsed(id));
   if (!curQuota) await redisSet(keyQuotaUsed(id), "0");
 
-  // plan default
-  const curPlan = await redisGet(keyPlan(id));
-  if (!curPlan) await redisSet(keyPlan(id), "");
-
-  // paymentMethod default
-  const curPm = await redisGet(keyPaymentMethod(id));
-  if (!curPm) await redisSet(keyPaymentMethod(id), "");
+  // ✅ IMPORTANTE (V16.4.2):
+  // NÃO setar plan/paymentMethod como "".
+  // Ausência da key já representa vazio e evita "SET key" sem valor no Upstash REST.
+  // (plan/paymentMethod serão normalizados na leitura)
 
   // Migração do doc legado, se existir (docDigits completo)
   await migrateLegacyDocIfNeeded(id);
@@ -179,12 +205,24 @@ export async function setUserStatus(waId, status) {
 
 export async function getUserPlan(waId) {
   const v = await redisGet(keyPlan(waId));
-  return safeStr(v);
+  const normalized = normalizeMaybeJsonString(v);
+  // Se estiver vazio ou sujo, tratamos como sem plano
+  const p = safeStr(normalized).toUpperCase();
+  return p === '""' ? "" : p;
 }
 
 export async function setUserPlan(waId, planCode) {
   await indexUser(waId);
-  const p = safeStr(planCode).toUpperCase();
+
+  const normalized = normalizeMaybeJsonString(planCode);
+  const p = safeStr(normalized).toUpperCase();
+
+  // ✅ V16.4.2: Sem plano => DEL (não SET "")
+  if (!p || p === '""') {
+    await redisDel(keyPlan(waId));
+    return "";
+  }
+
   await redisSet(keyPlan(waId), p);
   return p;
 }
@@ -346,14 +384,24 @@ async function migrateLegacyDocIfNeeded(waId) {
 // ===================== Payment Method =====================
 export async function getPaymentMethod(waId) {
   const v = await redisGet(keyPaymentMethod(waId));
-  const m = safeStr(v).toUpperCase();
+  const normalized = normalizeMaybeJsonString(v);
+  const m = safeStr(normalized).toUpperCase();
   return m === "PIX" ? "PIX" : m === "CARD" ? "CARD" : "";
 }
 
 export async function setPaymentMethod(waId, method) {
   await indexUser(waId);
-  const m = safeStr(method).toUpperCase();
+
+  const normalized = normalizeMaybeJsonString(method);
+  const m = safeStr(normalized).toUpperCase();
   const v = m === "PIX" ? "PIX" : m === "CARD" ? "CARD" : "";
+
+  // ✅ V16.4.2: Sem método => DEL (não SET "")
+  if (!v) {
+    await redisDel(keyPaymentMethod(waId));
+    return "";
+  }
+
   await redisSet(keyPaymentMethod(waId), v);
   return v;
 }
@@ -402,15 +450,15 @@ export async function resetUserToTrial(waId) {
   await ensureUserExists(waId);
   await Promise.all([
     setUserStatus(waId, "TRIAL"),
-    setUserPlan(waId, ""),
+    setUserPlan(waId, ""), // ✅ agora faz DEL internamente, não SET ""
     resetUserQuotaUsed(waId),
     resetUserTrialUsed(waId),
     clearLastPrompt(waId),
     setTemplateMode(waId, "FIXED"),
     clearPaymentMethod(waId),
     clearUserDoc(waId),
-    setAsaasCustomerId(waId, ""),
-    setAsaasSubscriptionId(waId, ""),
+    setAsaasCustomerId(waId, ""), // já faz DEL internamente
+    setAsaasSubscriptionId(waId, ""), // já faz DEL internamente
   ]);
   return true;
 }
