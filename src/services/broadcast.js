@@ -44,6 +44,15 @@ function normalizePlanTargets(planTargets) {
     .filter((p) => /^[A-Z0-9_]{3,40}$/.test(p));
 }
 
+function buildMessage({ subject, text }) {
+  const s = safeStr(subject);
+  const t = safeStr(text);
+  if (s && t) return `*${s}*\n\n${t}`;
+  if (s) return `*${s}*`;
+  return t;
+}
+
+
 function campaignKeyMeta(id) {
   return `campaign:${id}:meta`;
 }
@@ -128,8 +137,7 @@ export async function createCampaignAndDispatch({
 }) {
   const subj = safeStr(subject);
   const body = safeStr(text);
-  if (!subj) throw new Error("Missing subject");
-  if (!body) throw new Error("Missing text");
+  if (!subj && !body) throw new Error("Missing subject or text");
 
   const id = makeCampaignId();
   const createdAt = new Date().toISOString();
@@ -167,7 +175,8 @@ export async function createCampaignAndDispatch({
     // envia agora + registra sent
     for (const waId of sendNow) {
       try {
-        await sendWhatsAppText({ to: waId, text: body });
+        const msg = buildMessage({ subject: subj, text: body });
+      await sendWhatsAppText({ to: waId, text: msg });
         await redisSAdd(campaignKeySent(id), waId);
       } catch (err) {
         await recordError(id, waId, err?.message || err);
@@ -242,18 +251,14 @@ export async function listCampaigns(limit = 30) {
  */
 
 /**
- * ✅ Reprocessa (reenviar) APENAS pendências da campanha para usuários que JÁ estão na janela 24h agora.
- * - Não move usuários para janela.
- * - Não toca em usuários fora da janela (continuam pendentes).
- * - Útil quando você criou a campanha e, por algum motivo, o envio imediato falhou/foi interrompido.
+ * ✅ Reprocessa uma campanha APENAS para usuários que já estão na janela 24h AGORA.
+ * - Não toca em usuários fora da janela.
+ * - Só tenta reenviar para waIds que ainda estão pendentes nessa campanha.
  */
-export async function reprocessCampaignForActiveWindow(campaignId, opts = {}) {
+export async function reprocessCampaignForActiveWindow(campaignId, { limit = 5000 } = {}) {
   const id = safeStr(campaignId);
   if (!id) throw new Error("campaignId required");
 
-  const limit = Math.max(1, Math.min(20000, Number(opts.limit || 5000)));
-
-  // Pega meta (para recuperar texto)
   const rawMeta = await redisGet(campaignKeyMeta(id)).catch(() => "");
   let meta = null;
   try {
@@ -261,67 +266,64 @@ export async function reprocessCampaignForActiveWindow(campaignId, opts = {}) {
   } catch {
     meta = null;
   }
+  if (!meta) throw new Error("campaign meta not found");
 
-  const text = safeStr(meta?.text);
-  if (!text) {
-    await recordError(id, "-", "Campaign meta missing text (reprocess skipped)");
-    return { ok: true, campaignId: id, attempted: 0, sent: 0, errors: 1, pendingBefore: 0, pendingAfter: 0 };
-  }
+  // lista waIds ativos na janela
+  const windowWaIds = await listWindow24hActive(nowMs(), Number(limit || 5000));
+  const windowList = Array.isArray(windowWaIds) ? windowWaIds.map((x) => String(x)) : [];
+  const windowSet = new Set(windowList);
 
-  const pendingList = await redisSMembers(campaignKeyPending(id)).catch(() => []);
-  const pending = Array.isArray(pendingList) ? pendingList.map((x) => safeStr(x)).filter(Boolean) : [];
-  const pendingBefore = pending.length;
+  // pendentes atuais da campanha
+  const pendingWaIds = await redisSMembers(campaignKeyPending(id)).catch(() => []);
+  const pendList = Array.isArray(pendingWaIds) ? pendingWaIds.map((x) => String(x)) : [];
 
-  if (pendingBefore === 0) {
-    return { ok: true, campaignId: id, attempted: 0, sent: 0, errors: 0, pendingBefore: 0, pendingAfter: 0 };
-  }
-
-  const windowWaIds = await listWindow24hActive(nowMs(), limit);
-  const windowSet = new Set((windowWaIds || []).map((x) => safeStr(x)));
-
-  const targets = pending.filter((waId) => windowSet.has(safeStr(waId)));
-  const attempted = targets.length;
-
+  let attempted = 0;
   let sent = 0;
   let errors = 0;
 
-  for (const waId of targets) {
+  const subj = safeStr(meta?.subject);
+  const text = safeStr(meta?.text);
+  const msg = buildMessage({ subject: subj, text });
+
+  if (!msg) {
+    throw new Error("campaign message empty");
+  }
+
+  for (const waId of pendList) {
+    if (!waId) continue;
+    if (!windowSet.has(waId)) continue; // 🔒 apenas janela 24h
+
+    attempted += 1;
     try {
-      await sendWhatsAppText({ to: waId, text });
+      await sendWhatsAppText({ to: waId, text: msg });
       await redisSAdd(campaignKeySent(id), waId);
       await redisSRem(campaignKeyPending(id), waId);
       sent += 1;
     } catch (err) {
       errors += 1;
       await recordError(id, waId, err?.message || err);
-      // mantém pendente para tentar novamente
     }
   }
 
-  const pendingAfter = Number(await redisSCard(campaignKeyPending(id)).catch(() => pendingBefore)) || 0;
-
-  // Se zerou pendências, remove do índice global de campanhas pendentes
-  if (pendingAfter === 0) {
+  // se zerou pendências na campanha, remove do índice global
+  const pendingLeft = await redisSCard(campaignKeyPending(id)).catch(() => 0);
+  if (Number(pendingLeft || 0) === 0) {
     await redisSRem(PENDING_CAMPAIGNS_SET, id).catch(() => 0);
-  } else {
-    // garante que a campanha está indexada como pendente
-    await redisSAdd(PENDING_CAMPAIGNS_SET, id).catch(() => 0);
   }
 
   await ensureCampaignTTL(id);
 
-  await pushSystemAlert("CAMPAIGN_REPROCESS_WINDOW24H", {
-    id,
-    pendingBefore,
+  return {
+    ok: true,
+    campaignId: id,
+    windowActive: windowList.length,
+    pendingBefore: pendList.length,
     attempted,
     sent,
     errors,
-    pendingAfter,
-  });
-
-  return { ok: true, campaignId: id, pendingBefore, attempted, sent, errors, pendingAfter };
+    pendingAfter: Number(pendingLeft || 0),
+  };
 }
-
 
 export async function processPendingForWaId(waId) {
   const id = safeStr(waId);
@@ -349,17 +351,20 @@ export async function processPendingForWaId(waId) {
       meta = null;
     }
 
+    const subj = safeStr(meta?.subject);
     const text = safeStr(meta?.text);
-    if (!text) {
+    const msg = buildMessage({ subject: subj, text });
+
+    if (!msg) {
       // meta corrompida — remove do pending e registra erro
       await redisSRem(campaignKeyPending(cpId), id).catch(() => 0);
-      await recordError(cpId, id, "Campaign meta missing text (auto-send skipped)");
+      await recordError(cpId, id, "Campaign meta missing subject/text (auto-send skipped)");
       processed += 1;
       continue;
     }
 
     try {
-      await sendWhatsAppText({ to: id, text });
+      await sendWhatsAppText({ to: id, text: msg });
       await redisSAdd(campaignKeySent(cpId), id);
       await redisSRem(campaignKeyPending(cpId), id);
       processed += 1;
