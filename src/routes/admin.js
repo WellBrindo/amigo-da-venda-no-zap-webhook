@@ -20,7 +20,16 @@ import {
   nowMs,
 } from "../services/window24h.js";
 
-import { getGlobalDescriptionMetrics, getUserDescriptionMetrics } from "../services/metrics.js";
+import {
+  getGlobalDescriptionMetrics,
+  getUserDescriptionMetrics,
+  getGlobalLastNDays,
+  getGlobalLastNMonths,
+  getGlobalDaysRange,
+  getUserLastNDays,
+  getUserLastNMonths,
+  getUserDaysRange,
+} from "../services/metrics.js";
 
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import {
@@ -153,7 +162,47 @@ export function adminRouter() {
     });
   });
 
-  router.get("/dashboard", async (req, res) => {
+  
+  // ✅ Histórico do Dashboard (global + opcional por usuário)
+  // GET /admin/dashboard/history?days=30&months=12&start=YYYY-MM-DD&end=YYYY-MM-DD&waId=...
+  router.get("/dashboard/history", async (req, res) => {
+    try {
+      const waId = String(req.query?.waId || "").trim();
+      const days = Number(req.query?.days || 30);
+      const months = Number(req.query?.months || 12);
+      const start = String(req.query?.start || "").trim();
+      const end = String(req.query?.end || "").trim();
+
+      // Global daily
+      let globalDays;
+      if (start && end) globalDays = await getGlobalDaysRange({ start, end });
+      else globalDays = await getGlobalLastNDays(days);
+
+      // Global monthly (sempre últimos N meses)
+      const globalMonths = await getGlobalLastNMonths(months);
+
+      // User series (optional)
+      let user = null;
+      if (waId) {
+        let userDays;
+        if (start && end) userDays = await getUserDaysRange({ waId, start, end });
+        else userDays = await getUserLastNDays(waId, days);
+        const userMonths = await getUserLastNMonths(waId, months);
+        user = { waId, days: userDays, months: userMonths };
+      }
+
+      return res.json({
+        ok: true,
+        params: { waId: waId || undefined, days, months, start: start || undefined, end: end || undefined },
+        global: { days: globalDays, months: globalMonths },
+        user,
+      });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+router.get("/dashboard", async (req, res) => {
     const html = `<!doctype html>
 <html>
 <head>
@@ -188,6 +237,19 @@ export function adminRouter() {
       <input id="waId" placeholder="waId (opcional) para métricas individuais" style="min-width: 360px;" />
       <button onclick="load()">Atualizar</button>
     </div>
+    <div class="row" style="margin: 0 0 14px 0;">
+      <input id="days" type="number" min="1" max="365" value="30" style="width:120px;" />
+      <span class="muted">dias</span>
+      <input id="months" type="number" min="1" max="36" value="12" style="width:120px;" />
+      <span class="muted">meses</span>
+      <span class="muted" style="margin-left:8px;">ou intervalo:</span>
+      <input id="start" type="date" />
+      <input id="end" type="date" />
+      <button onclick="applyRange()">Aplicar intervalo</button>
+      <button onclick="resetRange()">Reset 30d/12m</button>
+      <span class="muted">Histórico global + opcional por usuário (se informar waId).</span>
+    </div>
+
 
     <div class="grid">
       <div class="kpi">
@@ -228,6 +290,41 @@ export function adminRouter() {
     <h3 style="margin-top:18px;">Métricas por usuário (opcional)</h3>
     <div id="userBox" class="muted">Informe um waId acima para ver métricas individuais.</div>
 
+    <h3 style="margin-top:18px;">Histórico (Global)</h3>
+    <p class="muted">Série diária (dias / intervalo) e série mensal (últimos meses). Use o seletor acima para ajustar.</p>
+
+    <div class="grid" style="grid-template-columns: 1fr 1fr;">
+      <div class="kpi">
+        <h3>Série diária (Global)</h3>
+        <canvas id="chartDays" width="520" height="220" style="width:100%; border:1px solid #eee; border-radius:12px;"></canvas>
+        <div class="muted" id="daysLabel" style="margin-top:6px;"></div>
+        <div id="daysTable"></div>
+      </div>
+      <div class="kpi">
+        <h3>Série mensal (Global)</h3>
+        <canvas id="chartMonths" width="520" height="220" style="width:100%; border:1px solid #eee; border-radius:12px;"></canvas>
+        <div class="muted" id="monthsLabel" style="margin-top:6px;"></div>
+        <div id="monthsTable"></div>
+      </div>
+    </div>
+
+    <h3 style="margin-top:18px;">Histórico (Usuário — opcional)</h3>
+    <p class="muted">Informe um <code>waId</code> no topo para ver a série diária/mensal daquele usuário.</p>
+    <div class="grid" style="grid-template-columns: 1fr 1fr;">
+      <div class="kpi">
+        <h3>Série diária (Usuário)</h3>
+        <canvas id="chartUserDays" width="520" height="220" style="width:100%; border:1px solid #eee; border-radius:12px;"></canvas>
+        <div class="muted" id="userDaysLabel" style="margin-top:6px;"></div>
+        <div id="userDaysTable"></div>
+      </div>
+      <div class="kpi">
+        <h3>Série mensal (Usuário)</h3>
+        <canvas id="chartUserMonths" width="520" height="220" style="width:100%; border:1px solid #eee; border-radius:12px;"></canvas>
+        <div class="muted" id="userMonthsLabel" style="margin-top:6px;"></div>
+        <div id="userMonthsTable"></div>
+      </div>
+    </div>
+
     <hr style="margin-top:18px;"/>
     <details>
       <summary class="muted">Ver JSON bruto</summary>
@@ -240,8 +337,129 @@ function esc(s){
   return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'","&#39;");
 }
 
-async function load(){
+
+function qs(){
   const waId = (document.getElementById('waId').value || '').trim();
+  const days = (document.getElementById('days').value || '30').trim();
+  const months = (document.getElementById('months').value || '12').trim();
+  const start = (document.getElementById('start').value || '').trim();
+  const end = (document.getElementById('end').value || '').trim();
+  const p = new URLSearchParams();
+  if(waId) p.set('waId', waId);
+  if(start && end){ p.set('start', start); p.set('end', end); }
+  else { p.set('days', days); }
+  p.set('months', months);
+  return p.toString();
+}
+
+function resetRange(){
+  document.getElementById('days').value = 30;
+  document.getElementById('months').value = 12;
+  document.getElementById('start').value = '';
+  document.getElementById('end').value = '';
+  load();
+}
+
+function applyRange(){
+  // se start/end preenchidos, o backend usa intervalo; se não, usa days
+  load();
+}
+
+function drawLine(canvasId, points, labelKey){
+  const c = document.getElementById(canvasId);
+  if(!c) return;
+  const ctx = c.getContext('2d');
+  const w = c.width, h = c.height;
+  ctx.clearRect(0,0,w,h);
+
+  if(!points || !points.length){
+    ctx.fillText('Sem dados', 10, 20);
+    return;
+  }
+
+  const vals = points.map(p => Number(p.count||0));
+  const max = Math.max(1, ...vals);
+  const min = Math.min(0, ...vals);
+
+  // padding
+  const padL = 36, padR = 10, padT = 10, padB = 24;
+  const iw = w - padL - padR;
+  const ih = h - padT - padB;
+
+  // axes
+  ctx.beginPath();
+  ctx.moveTo(padL, padT);
+  ctx.lineTo(padL, padT + ih);
+  ctx.lineTo(padL + iw, padT + ih);
+  ctx.stroke();
+
+  // line
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = padL + (iw * (i / Math.max(1, points.length - 1)));
+    const v = Number(p.count||0);
+    const y = padT + ih - (ih * ((v - min) / (max - min || 1)));
+    if(i===0) ctx.moveTo(x,y);
+    else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+
+  // labels (first/last)
+  ctx.fillText(String(points[0][labelKey] || ''), padL, h - 8);
+  const last = points[points.length-1];
+  const lastLabel = String(last[labelKey] || '');
+  const tw = ctx.measureText(lastLabel).width;
+  ctx.fillText(lastLabel, w - padR - tw, h - 8);
+
+  // max value
+  ctx.fillText(String(max), 6, 16);
+}
+
+function renderMiniTable(containerId, points, labelKey){
+  const el = document.getElementById(containerId);
+  if(!el) return;
+  if(!points || !points.length){ el.innerHTML = '<span class="muted">Sem dados.</span>'; return; }
+  const last = points.slice(-10);
+  const rows = last.map(p => '<tr><td><code>'+esc(p[labelKey])+'</code></td><td><b>'+esc(p.count)+'</b></td></tr>').join('');
+  el.innerHTML = '<table><thead><tr><th>Período</th><th>Qtd</th></tr></thead><tbody>'+rows+'</tbody></table><div class="muted">Mostrando últimos 10 pontos.</div>';
+}
+
+async function loadHistory(){
+  const query = qs();
+  const url = '/admin/dashboard/history?' + query;
+  const r = await fetch(url);
+  const j = await r.json().catch(()=>({}));
+
+  const gd = j?.global?.days;
+  const gm = j?.global?.months;
+
+  const gdPts = gd?.points || [];
+  const gmPts = gm?.points || [];
+
+  document.getElementById('daysLabel').textContent = gd?.ok ? ('Período: ' + gd.start + ' → ' + gd.end) : ('⚠️ ' + (gd?.error||''));
+  document.getElementById('monthsLabel').textContent = gm?.ok ? ('Período: ' + gm.start + ' → ' + gm.end) : ('⚠️ ' + (gm?.error||''));
+
+  drawLine('chartDays', gdPts, 'day');
+  drawLine('chartMonths', gmPts, 'month');
+  renderMiniTable('daysTable', gdPts, 'day');
+  renderMiniTable('monthsTable', gmPts, 'month');
+
+  const u = j?.user;
+  const ud = u?.days;
+  const um = u?.months;
+  const udPts = ud?.points || [];
+  const umPts = um?.points || [];
+  document.getElementById('userDaysLabel').textContent = ud?.ok ? ('Período: ' + ud.start + ' → ' + ud.end) : '—';
+  document.getElementById('userMonthsLabel').textContent = um?.ok ? ('Período: ' + um.start + ' → ' + um.end) : '—';
+
+  drawLine('chartUserDays', udPts, 'day');
+  drawLine('chartUserMonths', umPts, 'month');
+  renderMiniTable('userDaysTable', udPts, 'day');
+  renderMiniTable('userMonthsTable', umPts, 'month');
+}
+
+
+async function load(){ const waId = (document.getElementById('waId').value || '').trim();
   const url = waId ? '/admin/dashboard/data?waId=' + encodeURIComponent(waId) : '/admin/dashboard/data';
   const r = await fetch(url);
   const j = await r.json();
@@ -290,6 +508,7 @@ async function load(){
       </div>\`;
     document.getElementById('userBox').innerHTML = box;
   }
+  await loadHistory();
 }
 
 load();
