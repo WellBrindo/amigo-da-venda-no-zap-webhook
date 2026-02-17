@@ -20,7 +20,7 @@ import {
 } from "../services/window24h.js";
 
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
-import { listPlans, upsertPlan, setPlanActive } from "../services/plans.js";
+import { listPlans, upsertPlan, setPlanActive, getPlansHealth, listSystemAlerts, getSystemAlertsCount } from "../services/plans.js";
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -80,6 +80,8 @@ export function adminRouter() {
         <h3>Atalhos técnicos</h3>
         <a href="/health">✅ Health</a><br/>
         <a href="/health-redis">🧠 Health Redis</a><br/>
+        <a href="/admin/health-plans">🧾 Health Planos</a><br/>
+        <a href="/admin/alerts-ui">🚨 Alertas do Sistema <span id="alertsCount"></span></a><br/>
       </div>
     </div>
 
@@ -112,6 +114,17 @@ async function go(path){
   const j = await r.json().catch(()=>({}));
   document.getElementById('out').textContent = JSON.stringify(j, null, 2);
 }
+
+(async function loadAlertsCount(){
+  try{
+    const r = await fetch('/admin/alerts-count');
+    const j = await r.json().catch(()=>({}));
+    const n = Number(j.count||0);
+    if(n>0){
+      document.getElementById('alertsCount').textContent = ' ('+n+')';
+    }
+  }catch(e){}
+})();
 </script>
 </body>
 </html>`;
@@ -355,6 +368,88 @@ async function load(){
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
+  });
+
+  // ----------------------------
+  // ✅ Health + Alertas (telemetria)
+  // ----------------------------
+
+  router.get("/health-plans", async (req, res) => {
+    try {
+      const health = await getPlansHealth();
+      return res.json({ ok: true, health });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get("/alerts-count", async (req, res) => {
+    try {
+      const count = await getSystemAlertsCount();
+      return res.json({ ok: true, count });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get("/alerts", async (req, res) => {
+    try {
+      const limit = Number(req.query?.limit || 50);
+      const items = await listSystemAlerts({ limit });
+      return res.json({ ok: true, returned: items.length, items });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get("/alerts-ui", async (req, res) => {
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Alertas</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; cursor:pointer; background:white; }
+    pre { background:#f6f6f6; padding: 12px; border-radius: 12px; overflow:auto; }
+    .muted { color:#666; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+    input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; width: 120px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>🚨 Alertas do Sistema</h2>
+    <p><a href="/admin">⬅ Voltar</a></p>
+    <div class="row">
+      <div class="muted">Mostra os últimos alertas persistidos em Redis (TTL ~ 7 dias).</div>
+    </div>
+
+    <div class="row" style="margin-top:12px;">
+      <input id="limit" value="50" />
+      <button onclick="load()">Carregar</button>
+      <button onclick="location.reload()">Atualizar</button>
+    </div>
+
+    <pre id="out"></pre>
+  </div>
+
+<script>
+async function load(){
+  const limit = Number(document.getElementById('limit').value || 50);
+  const r = await fetch('/admin/alerts?limit=' + encodeURIComponent(limit));
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+}
+load();
+</script>
+</body>
+</html>`;
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
   });
 
   return router;
