@@ -1,5 +1,6 @@
 // src/services/redis.js
 // Upstash Redis REST helpers (Node.js ESM)
+// ✅ V16.0.10 — Fix: SET with empty string using POST body (avoids ERR wrong number of arguments)
 
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -10,17 +11,25 @@ function assertRedisEnv() {
   }
 }
 
-async function upstash(path) {
+/**
+ * Upstash REST rule:
+ * - Command args are separated by "/"
+ * - In POST requests, request body is appended as the LAST parameter of the command.
+ *   e.g. POST /SET/foo  (body: "bar") => SET foo bar
+ */
+async function upstash(path, bodyValue) {
   assertRedisEnv();
 
   const url = `${UPSTASH_REDIS_REST_URL}${path}`;
 
+  const hasBody = bodyValue !== undefined;
   const res = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
       "Content-Type": "application/json",
     },
+    body: hasBody ? JSON.stringify(bodyValue) : undefined,
   });
 
   const data = await res.json().catch(() => ({}));
@@ -49,10 +58,18 @@ export async function redisGet(key) {
   return upstash(`/GET/${encodeURIComponent(key)}`);
 }
 
+/**
+ * ✅ IMPORTANT:
+ * - If value is "", using /SET/key/<value> would miss the last segment and fail.
+ * - So we always send value in POST body: POST /SET/<key> with bodyValue appended.
+ */
 export async function redisSet(key, value) {
-  return upstash(
-    `/SET/${encodeURIComponent(key)}/${encodeURIComponent(String(value))}`
-  );
+  if (value === undefined) {
+    throw new Error("redisSet: value is required (can be empty string, but not undefined)");
+  }
+  const k = encodeURIComponent(key);
+  // value can be "", must be preserved
+  return upstash(`/SET/${k}`, String(value));
 }
 
 export async function redisDel(key) {
@@ -67,7 +84,7 @@ export async function redisIncrBy(key, delta = 1) {
   );
 }
 
-// 🔹 NOVO — detectar tipo da chave
+// 🔹 detectar tipo da chave
 export async function redisType(key) {
   return upstash(`/TYPE/${encodeURIComponent(key)}`);
 }
