@@ -1,5 +1,5 @@
 // src/services/metrics.js
-// ✅ V16.4.8 — Métricas de uso (descrições) global e por usuário
+// ✅ V16.4.10 — Métricas de uso (descrições) global e por usuário
 // Objetivo:
 // - Contadores baratos e estáveis (INCRBY) para:
 //   - Global por dia e por mês
@@ -131,3 +131,232 @@ export async function getUserDescriptionMetrics(waId, date = new Date()) {
     monthCount: Number(m || 0),
   };
 }
+
+// -----------------------------
+// 📈 Histórico (global e por usuário)
+// -----------------------------
+
+function isValidYmd(s) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+}
+function isValidYm(s) {
+  return /^\d{4}-\d{2}$/.test(String(s || ""));
+}
+
+function toDateFromYmd(ymd) {
+  // Interpreta como data local do servidor (estável).
+  const [y, m, d] = String(ymd).split("-").map((x) => Number(x));
+  return new Date(y, (m || 1) - 1, d || 1);
+}
+
+function fmtYmd(dt) {
+  const y = dt.getFullYear();
+  const m = pad2(dt.getMonth() + 1);
+  const d = pad2(dt.getDate());
+  return `${y}-${m}-${d}`;
+}
+
+function fmtYm(dt) {
+  const y = dt.getFullYear();
+  const m = pad2(dt.getMonth() + 1);
+  return `${y}-${m}`;
+}
+
+function addDays(dt, n) {
+  const x = new Date(dt.getTime());
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+function addMonths(dt, n) {
+  const x = new Date(dt.getTime());
+  x.setMonth(x.getMonth() + n);
+  return x;
+}
+
+function clampInt(v, min, max, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+/**
+ * Retorna série diária global dos últimos N dias (inclui hoje).
+ * Ex.: N=30 => 30 pontos.
+ */
+export async function getGlobalLastNDays(n = 30, endDate = new Date()) {
+  const days = clampInt(n, 1, 365, 30);
+  const end = new Date(endDate.getTime());
+  const start = addDays(end, -(days - 1));
+
+  const keys = [];
+  const labels = [];
+  for (let i = 0; i < days; i++) {
+    const d = fmtYmd(addDays(start, i));
+    labels.push(d);
+    keys.push(kGlobalDay(d));
+  }
+
+  const values = [];
+  for (const k of keys) {
+    const v = await redisGet(k);
+    values.push(Number(v || 0));
+  }
+
+  return { ok: true, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ day: l, count: values[i] })) };
+}
+
+/**
+ * Retorna série mensal global dos últimos N meses (inclui mês atual).
+ * Ex.: N=12 => 12 pontos.
+ */
+export async function getGlobalLastNMonths(n = 12, endDate = new Date()) {
+  const months = clampInt(n, 1, 36, 12);
+  const end = new Date(endDate.getTime());
+  // começar no primeiro dia do mês para consistência
+  end.setDate(1);
+  const start = addMonths(end, -(months - 1));
+
+  const labels = [];
+  const keys = [];
+  for (let i = 0; i < months; i++) {
+    const m = fmtYm(addMonths(start, i));
+    labels.push(m);
+    keys.push(kGlobalMonth(m));
+  }
+
+  const values = [];
+  for (const k of keys) {
+    const v = await redisGet(k);
+    values.push(Number(v || 0));
+  }
+
+  return { ok: true, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ month: l, count: values[i] })) };
+}
+
+/**
+ * Série diária GLOBAL por intervalo personalizado (inclusive).
+ * start/end no formato YYYY-MM-DD.
+ * Limites: máx 366 dias para proteger produção.
+ */
+export async function getGlobalDaysRange({ start, end } = {}) {
+  const s = safeStr(start);
+  const e = safeStr(end);
+  if (!isValidYmd(s) || !isValidYmd(e)) return { ok: false, error: "start/end must be YYYY-MM-DD" };
+
+  const ds = toDateFromYmd(s);
+  const de = toDateFromYmd(e);
+  if (de < ds) return { ok: false, error: "end must be >= start" };
+
+  const diffDays = Math.floor((de.getTime() - ds.getTime()) / (24 * 60 * 60 * 1000)) + 1;
+  const days = clampInt(diffDays, 1, 366, 30);
+
+  const labels = [];
+  const keys = [];
+  for (let i = 0; i < days; i++) {
+    const d = fmtYmd(addDays(ds, i));
+    labels.push(d);
+    keys.push(kGlobalDay(d));
+  }
+
+  const values = [];
+  for (const k of keys) {
+    const v = await redisGet(k);
+    values.push(Number(v || 0));
+  }
+
+  return { ok: true, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ day: l, count: values[i] })) };
+}
+
+/**
+ * Série diária por usuário (últimos N dias).
+ */
+export async function getUserLastNDays(waId, n = 30, endDate = new Date()) {
+  const id = safeStr(waId);
+  if (!id) return { ok: false, error: "waId required" };
+
+  const days = clampInt(n, 1, 365, 30);
+  const end = new Date(endDate.getTime());
+  const start = addDays(end, -(days - 1));
+
+  const labels = [];
+  const keys = [];
+  for (let i = 0; i < days; i++) {
+    const d = fmtYmd(addDays(start, i));
+    labels.push(d);
+    keys.push(kUserDay(id, d));
+  }
+
+  const values = [];
+  for (const k of keys) {
+    const v = await redisGet(k);
+    values.push(Number(v || 0));
+  }
+
+  return { ok: true, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ day: l, count: values[i] })) };
+}
+
+/**
+ * Série mensal por usuário (últimos N meses).
+ */
+export async function getUserLastNMonths(waId, n = 12, endDate = new Date()) {
+  const id = safeStr(waId);
+  if (!id) return { ok: false, error: "waId required" };
+
+  const months = clampInt(n, 1, 36, 12);
+  const end = new Date(endDate.getTime());
+  end.setDate(1);
+  const start = addMonths(end, -(months - 1));
+
+  const labels = [];
+  const keys = [];
+  for (let i = 0; i < months; i++) {
+    const m = fmtYm(addMonths(start, i));
+    labels.push(m);
+    keys.push(kUserMonth(id, m));
+  }
+
+  const values = [];
+  for (const k of keys) {
+    const v = await redisGet(k);
+    values.push(Number(v || 0));
+  }
+
+  return { ok: true, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ month: l, count: values[i] })) };
+}
+
+/**
+ * Série diária por usuário por intervalo personalizado (inclusive).
+ */
+export async function getUserDaysRange({ waId, start, end } = {}) {
+  const id = safeStr(waId);
+  if (!id) return { ok: false, error: "waId required" };
+
+  const s = safeStr(start);
+  const e = safeStr(end);
+  if (!isValidYmd(s) || !isValidYmd(e)) return { ok: false, error: "start/end must be YYYY-MM-DD" };
+
+  const ds = toDateFromYmd(s);
+  const de = toDateFromYmd(e);
+  if (de < ds) return { ok: false, error: "end must be >= start" };
+
+  const diffDays = Math.floor((de.getTime() - ds.getTime()) / (24 * 60 * 60 * 1000)) + 1;
+  const days = clampInt(diffDays, 1, 366, 30);
+
+  const labels = [];
+  const keys = [];
+  for (let i = 0; i < days; i++) {
+    const d = fmtYmd(addDays(ds, i));
+    labels.push(d);
+    keys.push(kUserDay(id, d));
+  }
+
+  const values = [];
+  for (const k of keys) {
+    const v = await redisGet(k);
+    values.push(Number(v || 0));
+  }
+
+  return { ok: true, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ day: l, count: values[i] })) };
+}
+
