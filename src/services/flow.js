@@ -194,8 +194,6 @@ async function msgTemplateSet(waId, mode){
   if (mode === "FREE") return await getCopyText("FLOW_TEMPLATE_SWITCH_TO_FREE", { waId });
   return await getCopyText("FLOW_TEMPLATE_KEEP_FIXED", { waId });
 }
-  return "Boa! ✅ Vou manter o *template* (ele costuma converter mais).\n\nQuando quiser mudar, digite *LIVRE*.";
-}
 
 // -------------------- Core --------------------
 export async function handleInboundText({ waId, text }) {
