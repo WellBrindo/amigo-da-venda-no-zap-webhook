@@ -18,6 +18,7 @@ import {
   nowMs,
 } from "../services/window24h.js";
 
+import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { listPlans, upsertPlan, setPlanActive } from "../services/plans.js";
 
 function escapeHtml(s) {
@@ -25,12 +26,18 @@ function escapeHtml(s) {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
+    .replaceAll(\"\", "&quot;")
     .replaceAll("'", "&#39;");
 }
 
-function normalizeWaId(v) {
-  return String(v || "").replace(/\D+/g, "");
+function requireWaId(req) {
+  const waId = String(req.query?.waId || "").trim();
+  if (!waId) {
+    const err = new Error("waId required (ex: ?waId=5511...)");
+    err.statusCode = 400;
+    throw err;
+  }
+  return waId;
 }
 
 export function adminRouter() {
@@ -52,7 +59,9 @@ export function adminRouter() {
     code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
     .grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
     @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
-    .pill { border:1px solid #eee; border-radius: 10px; padding: 10px 12px; margin: 6px 0; }
+    input, button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; }
+    button { cursor: pointer; background: white; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
   </style>
 </head>
 <body>
@@ -66,27 +75,46 @@ export function adminRouter() {
         <a href="/admin/plans">💳 Planos</a><br/>
         <a href="/admin/window24h-ui">🕒 Janela 24h</a><br/>
       </div>
-
       <div>
         <h3>Atalhos técnicos</h3>
         <a href="/health">✅ Health</a><br/>
-        <a href="/admin/redis-ping">🧠 Redis Ping</a><br/>
-        <a href="/admin/state-test/get">🧪 State: get</a><br/>
-        <a href="/admin/state-test/reset-trial">♻️ State: reset trial</a><br/>
-        <a href="/admin/state-test/set">⚡ State: set demo ACTIVE</a><br/>
+        <a href="/health-redis">🧠 Health Redis</a><br/>
       </div>
     </div>
 
     <hr/>
-    <div class="pill">
-      <div class="muted"><b>Dica:</b> pra resetar o seu número, use:</div>
-      <div><code>/admin/state-test/reset-trial?waId=5511960765975</code></div>
+    <h3>Estado do usuário (teste)</h3>
+    <div class="row">
+      <input id="waId" placeholder="waId (somente números) ex: 5511..." style="min-width:320px" />
+      <button onclick="go('/admin/state-test/get')">Ver state</button>
+      <button onclick="go('/admin/state-test/reset-trial')">Reset TRIAL</button>
+      <button onclick="go('/admin/window24h/touch')">Touch 24h</button>
+      <button onclick="go('/admin/send-test')">Enviar 'oi'</button>
     </div>
+    <p class="muted">Dica: cole seu número sem + e sem espaços (ex.: 5511960765975).</p>
 
+    <pre id="out" style="background:#f6f6f6;padding:12px;border-radius:12px;overflow:auto;"></pre>
+
+    <hr/>
     <p class="muted">Observação: o Admin usa Basic Auth (senha = ADMIN_SECRET).</p>
   </div>
+
+<script>
+function getWaId(){
+  return (document.getElementById('waId').value || '').trim();
+}
+async function go(path){
+  const waId = getWaId();
+  if(!waId){ alert('Informe o waId'); return; }
+  const url = path + '?waId=' + encodeURIComponent(waId);
+  const r = await fetch(url);
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+}
+</script>
 </body>
 </html>`;
+
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
@@ -97,21 +125,25 @@ export function adminRouter() {
 
     const rows = plans
       .map((p) => {
-        const price = (Number(p.priceCents || 0) / 100).toFixed(2);
+        const code = escapeHtml(p.code);
+        const label = escapeHtml(p.label);
+        const price = escapeHtml(String(p.priceCents / 100).replace(".", ","));
+        const quota = escapeHtml(String(p.quota));
+        const active = p.active ? "✅" : "❌";
         return `<tr>
-  <td><code>${escapeHtml(p.code)}</code></td>
-  <td>${escapeHtml(p.name)}</td>
-  <td>R$ ${escapeHtml(price)}</td>
-  <td>${escapeHtml(String(p.monthlyQuota ?? ""))}</td>
-  <td>${p.active ? "✅" : "❌"}</td>
-  <td>
-    <button onclick="togglePlan('${escapeHtml(p.code)}', ${p.active ? "false" : "true"})">
-      ${p.active ? "Desativar" : "Ativar"}
-    </button>
-  </td>
-</tr>`;
+          <td><code>${code}</code></td>
+          <td>${label}</td>
+          <td>R$ ${price}</td>
+          <td>${quota}</td>
+          <td>${active}</td>
+          <td>
+            <button onclick="toggle('${code}', ${p.active ? "false" : "true"})">
+              ${p.active ? "Desativar" : "Ativar"}
+            </button>
+          </td>
+        </tr>`;
       })
-      .join("\n");
+      .join("");
 
     const html = `<!doctype html>
 <html>
@@ -123,13 +155,11 @@ export function adminRouter() {
     body { font-family: Arial, sans-serif; padding: 24px; }
     .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
     table { width:100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #eee; padding: 10px; text-align:left; }
-    input, select, button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; }
-    button { cursor:pointer; background:white; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; }
+    th, td { padding: 10px; border-bottom: 1px solid #eee; text-align:left; }
+    code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
+    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
     .muted { color:#666; }
-    .ok { background:#e9ffe9; padding:10px; border-radius:10px; border:1px solid #bfe8bf; }
-    .err { background:#ffe9e9; padding:10px; border-radius:10px; border:1px solid #e8bfbf; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; }
   </style>
 </head>
 <body>
@@ -137,82 +167,45 @@ export function adminRouter() {
     <h2>💳 Planos</h2>
     <p><a href="/admin">⬅ Voltar</a></p>
 
-    <h3>Criar/Editar</h3>
     <div class="row">
-      <input id="code" placeholder="code (ex: DE_VEZ_EM_QUANDO)" style="min-width:260px"/>
-      <input id="name" placeholder="nome (ex: De Vez em Quando)" style="min-width:260px"/>
-      <input id="price" placeholder="preço (ex: 24.90)" style="width:160px"/>
-      <input id="quota" placeholder="quota/mês (ex: 20)" style="width:160px"/>
-      <select id="active">
-        <option value="true">ativo</option>
-        <option value="false">inativo</option>
-      </select>
-      <input id="description" placeholder="descrição (opcional)" style="min-width:260px"/>
-      <button onclick="save()">Salvar</button>
+      <input id="code" placeholder="code (ex: DE_VEZ_EM_QUANDO)" style="min-width:280px" />
+      <input id="label" placeholder="label (ex: De Vez em Quando)" style="min-width:280px" />
+      <input id="priceCents" placeholder="priceCents (ex: 2490)" />
+      <input id="quota" placeholder="quota (ex: 20)" />
+      <button onclick="create()">Criar/Atualizar</button>
     </div>
+    <p class="muted">Dica: priceCents em centavos (R$ 24,90 = 2490).</p>
 
-    <div id="msg" class="muted" style="margin:10px 0;"></div>
-
-    <h3>Lista</h3>
+    <hr/>
     <table>
       <thead>
         <tr>
-          <th>Code</th><th>Nome</th><th>Preço</th><th>Quota</th><th>Ativo</th><th>Ação</th>
+          <th>Code</th><th>Label</th><th>Preço</th><th>Cota</th><th>Ativo</th><th>Ação</th>
         </tr>
       </thead>
-      <tbody>
-        ${rows || "<tr><td colspan='6' class='muted'>Nenhum plano</td></tr>"}
-      </tbody>
+      <tbody>${rows}</tbody>
     </table>
+    <pre id="msg" style="background:#f6f6f6;padding:12px;border-radius:12px;overflow:auto;"></pre>
   </div>
 
 <script>
-async function save(){
-  const code = document.getElementById("code").value.trim();
-  const name = document.getElementById("name").value.trim();
-  const price = document.getElementById("price").value.trim();
-  const quota = document.getElementById("quota").value.trim();
-  const active = document.getElementById("active").value === "true";
-  const description = document.getElementById("description").value.trim();
-
-  const priceCents = Math.round(Number(price) * 100);
-  const payload = { code, name, priceCents, monthlyQuota: Number(quota), active, description };
-
-  const msgEl = document.getElementById("msg");
-  msgEl.innerHTML = "<span class='muted'>Salvando...</span>";
-
-  const r = await fetch("/admin/plans", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  const j = await r.json();
-  if (!j.ok) {
-    msgEl.innerHTML = "<div class='err'>"+(j.error || "Erro")+"</div>";
-    return;
-  }
-  msgEl.innerHTML = "<div class='ok'>✅ Salvo: "+j.plan.code+"</div>";
-  setTimeout(() => location.reload(), 300);
+async function create(){
+  const body = {
+    code: (document.getElementById('code').value||'').trim(),
+    label: (document.getElementById('label').value||'').trim(),
+    priceCents: Number(document.getElementById('priceCents').value||0),
+    quota: Number(document.getElementById('quota').value||0),
+  };
+  const r = await fetch('/admin/plans', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
+  if(j.ok) setTimeout(()=>location.reload(), 300);
 }
-
-async function togglePlan(code, active){
-  const msgEl = document.getElementById("msg");
-  msgEl.innerHTML = "<span class='muted'>Atualizando...</span>";
-
-  const r = await fetch("/admin/plans/"+encodeURIComponent(code)+"/active", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ active }),
-  });
-
-  const j = await r.json();
-  if (!j.ok) {
-    msgEl.innerHTML = "<div class='err'>"+(j.error || "Erro")+"</div>";
-    return;
-  }
-  msgEl.innerHTML = "<div class='ok'>✅ Atualizado: "+j.plan.code+"</div>";
-  setTimeout(() => location.reload(), 300);
+async function toggle(code, active){
+  const r = await fetch('/admin/plans/'+encodeURIComponent(code)+'/active', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({active}) });
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
+  if(j.ok) setTimeout(()=>location.reload(), 300);
 }
 </script>
 </body>
@@ -250,7 +243,7 @@ async function togglePlan(code, active){
     }
   });
 
-  // -------------------- 24h WINDOW UI (simple) --------------------
+  // -------------------- 24h WINDOW UI --------------------
   router.get("/window24h-ui", async (req, res) => {
     const count = await countWindow24hActive();
     const html = `<!doctype html>
@@ -287,49 +280,70 @@ async function load(){
 </script>
 </body>
 </html>`;
+
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
 
-  // -------------------- Technical endpoints: state-test --------------------
-  router.get("/state-test/set", async (req, res) => {
-    const waId = normalizeWaId(req.query.waId || "5511960765975");
-    await setUserStatus(waId, "ACTIVE");
-    await setUserPlan(waId, "DE_VEZ_EM_QUANDO");
-    await setUserQuotaUsed(waId, 1);
-    await setUserTrialUsed(waId, 0);
-    const user = await getUserSnapshot(waId);
-    return res.json({ ok: true, action: "set-demo", waId, user });
-  });
-
+  // -------------------- JSON / actions --------------------
   router.get("/state-test/reset-trial", async (req, res) => {
-    const waId = normalizeWaId(req.query.waId || "5511960765975");
-    await setUserStatus(waId, "TRIAL");
-    await setUserPlan(waId, "");
-    await setUserQuotaUsed(waId, 0);
-    await setUserTrialUsed(waId, 0);
-    await setLastPrompt(waId, "");
-    const user = await getUserSnapshot(waId);
-    return res.json({ ok: true, action: "reset-trial", waId, user });
+    try {
+      const waId = requireWaId(req);
+      await setUserStatus(waId, "TRIAL");
+      await setUserPlan(waId, "");
+      await setUserQuotaUsed(waId, 0);
+      await setUserTrialUsed(waId, 0);
+      await setLastPrompt(waId, "");
+      const user = await getUserSnapshot(waId);
+      return res.json({ ok: true, action: "reset-trial", waId, user });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+    }
   });
 
   router.get("/state-test/get", async (req, res) => {
-    const waId = normalizeWaId(req.query.waId || "5511960765975");
-    const user = await getUserSnapshot(waId);
-    return res.json({ ok: true, waId, user });
-  });
-
-  // -------------------- window24h JSON --------------------
-  router.get("/window24h", async (_req, res) => {
-    const items = await listWindow24hActive();
-    return res.json({ ok: true, count: items.length, items });
+    try {
+      const waId = requireWaId(req);
+      const user = await getUserSnapshot(waId);
+      return res.json({ ok: true, waId, user });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+    }
   });
 
   router.get("/window24h/touch", async (req, res) => {
-    const waId = normalizeWaId(req.query.waId || "5511960765975");
-    await touch24hWindow(waId, nowMs());
-    const ts = await getLastInboundTs(waId);
-    return res.json({ ok: true, waId, touchedAtMs: ts });
+    try {
+      const waId = requireWaId(req);
+      await touch24hWindow(waId, nowMs());
+      const ts = await getLastInboundTs(waId);
+      return res.json({
+        ok: true,
+        action: "touch24hWindow",
+        user: {
+          waId,
+          lastInboundAtMs: ts,
+          windowEndsAtMs: ts ? ts + 24 * 60 * 60 * 1000 : null,
+        },
+      });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get("/window24h", async (req, res) => {
+    const items = await listWindow24hActive({ limit: 500 });
+    return res.json({ ok: true, nowMs: nowMs(), count: items.length, returned: items.length, items });
+  });
+
+  router.get("/send-test", async (req, res) => {
+    try {
+      const waId = requireWaId(req);
+      const text = String(req.query.text || "oi");
+      const meta = await sendWhatsAppText({ to: waId, text });
+      return res.json({ ok: true, sentTo: waId, text, meta });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+    }
   });
 
   return router;
