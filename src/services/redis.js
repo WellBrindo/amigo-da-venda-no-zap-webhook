@@ -3,6 +3,9 @@
 // ✅ V16.4.5 — Produção definitiva + Diagnóstico:
 // - redisSet SEMPRE usa body (POST /SET/<key> + body=value)
 // - Em erro, inclui cmdPath e bodyLen na mensagem (sem vazar token/URL base)
+// ✅ V16.4.7 — List/Expire/Set helpers para Broadcast/Campanhas/Alertas:
+// - LPUSH/LRANGE/LTRIM/LLEN/EXPIRE
+// - SREM/SISMEMBER
 
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -42,7 +45,6 @@ async function upstash(path, bodyValue) {
 
     data = await res.json().catch(() => ({}));
   } catch (err) {
-    // erro de rede/timeout
     throw new Error(
       `Upstash: NETWORK_ERROR cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0} msg=${String(
         err?.message || err
@@ -50,17 +52,13 @@ async function upstash(path, bodyValue) {
     );
   }
 
-  // padroniza erro HTTP
   if (!res.ok) {
     const base = data?.error ? `Upstash: ${data.error}` : `Upstash: HTTP ${res.status}`;
     throw new Error(`${base} cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0}`);
   }
 
-  // erro do redis
   if (data?.error) {
-    throw new Error(
-      `Upstash: ${data.error} cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0}`
-    );
+    throw new Error(`Upstash: ${data.error} cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0}`);
   }
 
   return data?.result;
@@ -84,11 +82,10 @@ export async function redisGet(key) {
  */
 export async function redisSet(key, value) {
   if (value === undefined) {
-    // Isso pega bug de chamada sem value (muito comum em reset/admin)
     throw new Error(`redisSet: value is required (got undefined) key=${key}`);
   }
   const k = encodeURIComponent(key);
-  const v = String(value); // pode ser "" e está OK
+  const v = String(value);
   return upstash(`/SET/${k}`, v);
 }
 
@@ -99,13 +96,43 @@ export async function redisDel(key) {
 export async function redisIncrBy(key, delta = 1) {
   const d = Number(delta);
   if (!Number.isFinite(d)) throw new Error("redisIncrBy: delta must be a number");
-  return upstash(
-    `/INCRBY/${encodeURIComponent(key)}/${encodeURIComponent(String(Math.trunc(d)))}`
-  );
+  return upstash(`/INCRBY/${encodeURIComponent(key)}/${encodeURIComponent(String(Math.trunc(d)))}`);
 }
 
 export async function redisType(key) {
   return upstash(`/TYPE/${encodeURIComponent(key)}`);
+}
+
+export async function redisExpire(key, seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) throw new Error("redisExpire: seconds must be > 0");
+  return upstash(`/EXPIRE/${encodeURIComponent(key)}/${encodeURIComponent(String(Math.trunc(s)))}`);
+}
+
+// -----------------
+// Lists
+// -----------------
+
+/**
+ * LPUSH key value
+ * (value vai no body para permitir JSON grande sem quebrar o path)
+ */
+export async function redisLPush(key, value) {
+  const k = encodeURIComponent(key);
+  const v = String(value ?? "");
+  return upstash(`/LPUSH/${k}`, v);
+}
+
+export async function redisLRange(key, start = 0, stop = 49) {
+  return upstash(`/LRANGE/${encodeURIComponent(key)}/${encodeURIComponent(String(start))}/${encodeURIComponent(String(stop))}`);
+}
+
+export async function redisLTrim(key, start = 0, stop = 99) {
+  return upstash(`/LTRIM/${encodeURIComponent(key)}/${encodeURIComponent(String(start))}/${encodeURIComponent(String(stop))}`);
+}
+
+export async function redisLLen(key) {
+  return upstash(`/LLEN/${encodeURIComponent(key)}`);
 }
 
 // -----------------
@@ -122,6 +149,21 @@ export async function redisSAdd(key, ...members) {
   return upstash(`/SADD/${encodeURIComponent(key)}/${encoded}`);
 }
 
+export async function redisSRem(key, ...members) {
+  const list = members.length === 1 && Array.isArray(members[0]) ? members[0] : members;
+
+  const filtered = (list || []).map((m) => String(m)).filter(Boolean);
+  if (filtered.length === 0) return 0;
+
+  const encoded = filtered.map((m) => encodeURIComponent(m)).join("/");
+  return upstash(`/SREM/${encodeURIComponent(key)}/${encoded}`);
+}
+
+export async function redisSIsMember(key, member) {
+  if (!member) return 0;
+  return upstash(`/SISMEMBER/${encodeURIComponent(key)}/${encodeURIComponent(String(member))}`);
+}
+
 export async function redisSCard(key) {
   return upstash(`/SCARD/${encodeURIComponent(key)}`);
 }
@@ -136,64 +178,24 @@ export async function redisSMembers(key) {
 
 export async function redisZAdd(key, score, member) {
   return upstash(
-    `/ZADD/${encodeURIComponent(key)}/${encodeURIComponent(String(score))}/${encodeURIComponent(
-      String(member)
-    )}`
+    `/ZADD/${encodeURIComponent(key)}/${encodeURIComponent(String(score))}/${encodeURIComponent(String(member))}`
   );
 }
 
 export async function redisZScore(key, member) {
-  return upstash(
-    `/ZSCORE/${encodeURIComponent(key)}/${encodeURIComponent(String(member))}`
-  );
+  return upstash(`/ZSCORE/${encodeURIComponent(key)}/${encodeURIComponent(String(member))}`);
 }
 
 export async function redisZCount(key, min, max) {
   return upstash(
-    `/ZCOUNT/${encodeURIComponent(key)}/${encodeURIComponent(String(min))}/${encodeURIComponent(
-      String(max)
-    )}`
+    `/ZCOUNT/${encodeURIComponent(key)}/${encodeURIComponent(String(min))}/${encodeURIComponent(String(max))}`
   );
 }
 
 export async function redisZRangeByScore(key, min, max, limit = 1000) {
   return upstash(
-    `/ZRANGEBYSCORE/${encodeURIComponent(key)}/${encodeURIComponent(
-      String(min)
-    )}/${encodeURIComponent(String(max))}/LIMIT/0/${encodeURIComponent(String(limit))}`
+    `/ZRANGEBYSCORE/${encodeURIComponent(key)}/${encodeURIComponent(String(min))}/${encodeURIComponent(
+      String(max)
+    )}/LIMIT/0/${encodeURIComponent(String(limit))}`
   );
-}
-
-// -----------------
-// Lists + TTL (alerts)
-// -----------------
-
-export async function redisExpire(key, seconds) {
-  const s = Number(seconds);
-  if (!Number.isFinite(s) || s < 0) throw new Error("redisExpire: seconds must be >= 0");
-  return upstash(
-    `/EXPIRE/${encodeURIComponent(key)}/${encodeURIComponent(String(Math.trunc(s)))}`
-  );
-}
-
-export async function redisLPush(key, ...values) {
-  const list = values.length === 1 && Array.isArray(values[0]) ? values[0] : values;
-
-  const filtered = (list || []).map((v) => String(v)).filter((v) => v.length > 0);
-  if (filtered.length === 0) return 0;
-
-  const encoded = filtered.map((v) => encodeURIComponent(v)).join("/");
-  return upstash(`/LPUSH/${encodeURIComponent(key)}/${encoded}`);
-}
-
-export async function redisLRange(key, start = 0, stop = 49) {
-  return upstash(
-    `/LRANGE/${encodeURIComponent(key)}/${encodeURIComponent(
-      String(Math.trunc(start))
-    )}/${encodeURIComponent(String(Math.trunc(stop)))}`
-  );
-}
-
-export async function redisLLen(key) {
-  return upstash(`/LLEN/${encodeURIComponent(key)}`);
 }
