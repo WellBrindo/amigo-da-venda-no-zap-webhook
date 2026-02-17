@@ -43,6 +43,18 @@ import {
 
 import { createCampaignAndDispatch, listCampaigns, getCampaign } from "../services/broadcast.js";
 
+import {
+  listCopyKeys,
+  groupCatalog,
+  getCopyResolved,
+  getCopyRawGlobal,
+  getCopyRawUser,
+  setCopyGlobal,
+  delCopyGlobal,
+  setCopyUser,
+  delCopyUser,
+} from "../services/copy.js";
+
 function escapeHtml(s) {
   return String(s ?? "")
     .replaceAll("&", "&amp;")
@@ -219,6 +231,7 @@ function renderSidebar(activePath){
       <details>
         <summary>⚙️ Sistema <span>▾</span></summary>
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
+        ${item("/admin/copy-ui", "Textos do Bot", "📝")}
         ${item("/asaas/test", "Asaas Test", "🧾")}
       </details>
 
@@ -1195,6 +1208,195 @@ router.get("/", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
+
+  // ===================== Textos do Bot (Copy) =====================
+  // ✅ V16.6.0 — Editor de mensagens (global + por usuário)
+  router.get("/copy-ui", async (req, res) => {
+    const waId = String(req.query?.waId || "").trim();
+    const groups = groupCatalog();
+
+    // Pré-carrega valores (evita várias requisições na UI)
+    const catalogFlat = Object.values(groups).flat();
+    const rows = await Promise.all(
+      catalogFlat.map(async (row) => {
+        const key = row.key;
+        const resolved = await getCopyResolved(key, { waId: waId || null });
+        const rawGlobal = await getCopyRawGlobal(key);
+        const rawUser = waId ? await getCopyRawUser(waId, key) : null;
+
+        const defaultText = (resolved.source === "DEFAULT") ? resolved.text : (await getCopyResolved(key, { waId: null })).text;
+
+        return {
+          category: row.category,
+          key,
+          label: row.label || key,
+          resolvedText: resolved.text,
+          resolvedSource: resolved.source,
+          globalText: rawGlobal !== null && rawGlobal !== undefined && String(rawGlobal) !== "" ? String(rawGlobal) : defaultText,
+          hasGlobalOverride: rawGlobal !== null && rawGlobal !== undefined && String(rawGlobal) !== "",
+          userText: waId ? (rawUser !== null && rawUser !== undefined && String(rawUser) !== "" ? String(rawUser) : "") : "",
+          hasUserOverride: waId ? (rawUser !== null && rawUser !== undefined && String(rawUser) !== "") : false,
+        };
+      })
+    );
+
+    // Monta HTML por categoria
+    const byCat = {};
+    for (const r of rows) {
+      if (!byCat[r.category]) byCat[r.category] = [];
+      byCat[r.category].push(r);
+    }
+
+    const inner = `
+      <div class="row" style="justify-content:space-between; align-items:flex-end;">
+        <div>
+          <h2 style="margin:0 0 6px 0;">📝 Textos do Bot</h2>
+          <div class="muted">Edite mensagens padrão sem mexer no código. Override global e por usuário (opcional).</div>
+        </div>
+
+        <form method="GET" action="/admin/copy-ui" class="row" style="gap:8px; align-items:flex-end; margin:0;">
+          <div>
+            <div class="muted" style="font-size:12px; margin-bottom:6px;">waId (opcional)</div>
+            <input name="waId" value="${escapeHtml(waId)}" placeholder="5511..." style="min-width:220px;" />
+          </div>
+          <button class="primary" type="submit">Carregar</button>
+          <a class="btn" href="/admin/copy-ui">Limpar</a>
+        </form>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="grid" style="grid-template-columns:1fr;">
+        ${Object.entries(byCat).map(([cat, items]) => {
+          return `
+            <div class="card pad">
+              <div class="row" style="justify-content:space-between;">
+                <div>
+                  <h3 style="margin:0 0 4px 0;">${escapeHtml(cat)}</h3>
+                  <div class="muted">Chaves: ${items.length}</div>
+                </div>
+              </div>
+              <div class="hr"></div>
+              ${items.map((it) => {
+                const badge = it.resolvedSource === "USER"
+                  ? "<span class=\"badge\" style=\"background:rgba(16,185,129,.15); color:#065f46; border-color:rgba(16,185,129,.35)\">USER</span>"
+                  : it.resolvedSource === "GLOBAL"
+                    ? "<span class=\"badge\" style=\"background:rgba(37,99,235,.15); color:#1d4ed8; border-color:rgba(37,99,235,.35)\">GLOBAL</span>"
+                    : it.resolvedSource === "DEFAULT"
+                      ? "<span class=\"badge\">DEFAULT</span>"
+                      : "<span class=\"badge\" style=\"background:rgba(239,68,68,.12); color:#991b1b; border-color:rgba(239,68,68,.28)\">MISSING</span>";
+
+                return `
+                  <div style="margin-bottom:18px;">
+                    <div class="row" style="justify-content:space-between; align-items:center;">
+                      <div>
+                        <div style="font-weight:800;">${escapeHtml(it.label)} <span class="muted" style="font-weight:700;">(${escapeHtml(it.key)})</span></div>
+                        <div class="muted" style="margin-top:2px;">Em uso: ${badge}</div>
+                      </div>
+                    </div>
+
+                    <div class="row" style="gap:16px; align-items:flex-start; margin-top:10px;">
+                      <div style="flex:1;">
+                        <div class="muted" style="font-size:12px; margin-bottom:6px;">Global (edite e salve)</div>
+                        <form method="POST" action="/admin/copy/set-global" style="margin:0;">
+                          <input type="hidden" name="key" value="${escapeHtml(it.key)}" />
+                          <textarea name="value" style="min-height:120px;">${escapeHtml(it.globalText)}</textarea>
+                          <div class="row" style="justify-content:space-between; margin-top:8px;">
+                            <div class="muted" style="font-size:12px;">
+                              ${it.hasGlobalOverride ? "Override global ativo." : "Usando default (sem override)."}
+                            </div>
+                            <div class="row" style="gap:8px;">
+                              <button class="primary" type="submit">Salvar Global</button>
+                              <button class="btn" type="submit" formaction="/admin/copy/del-global">Resetar Global</button>
+                            </div>
+                          </div>
+                        </form>
+                      </div>
+
+                      ${waId ? `
+                        <div style="flex:1;">
+                          <div class="muted" style="font-size:12px; margin-bottom:6px;">Usuário (${escapeHtml(waId)})</div>
+                          <form method="POST" action="/admin/copy/set-user" style="margin:0;">
+                            <input type="hidden" name="key" value="${escapeHtml(it.key)}" />
+                            <input type="hidden" name="waId" value="${escapeHtml(waId)}" />
+                            <textarea name="value" style="min-height:120px;" placeholder="(opcional) override só para este usuário…">${escapeHtml(it.userText)}</textarea>
+                            <div class="row" style="justify-content:space-between; margin-top:8px;">
+                              <div class="muted" style="font-size:12px;">
+                                ${it.hasUserOverride ? "Override USER ativo." : "Sem override por usuário."}
+                              </div>
+                              <div class="row" style="gap:8px;">
+                                <button class="primary" type="submit">Salvar Usuário</button>
+                                <button class="btn" type="submit" formaction="/admin/copy/del-user">Resetar Usuário</button>
+                              </div>
+                            </div>
+                          </form>
+                        </div>
+                      ` : ""}
+                    </div>
+
+                    <details style="margin-top:10px;">
+                      <summary class="muted">Ver texto resolvido (o que o usuário recebe)</summary>
+                      <pre style="white-space:pre-wrap; margin-top:10px;">${escapeHtml(it.resolvedText)}</pre>
+                      <div class="muted" style="font-size:12px; margin-top:6px;">
+                        Dica: você pode usar variáveis como {{planName}}, {{planPrice}} em textos dinâmicos.
+                      </div>
+                    </details>
+
+                    <div class="hr"></div>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+
+    const html = layoutBase({ title: "Textos do Bot", activePath: "/admin/copy-ui", content: inner });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.end(html);
+  });
+
+  router.post("/copy/set-global", async (req, res) => {
+    const key = String(req.body?.key || "").trim();
+    const value = String(req.body?.value || "");
+    if (!key) {
+      return res.status(400).json({ ok: false, error: "key required" });
+    }
+    await setCopyGlobal(key, value);
+    res.redirect("/admin/copy-ui");
+  });
+
+  router.post("/copy/del-global", async (req, res) => {
+    const key = String(req.body?.key || "").trim();
+    if (!key) {
+      return res.status(400).json({ ok: false, error: "key required" });
+    }
+    await delCopyGlobal(key);
+    res.redirect("/admin/copy-ui");
+  });
+
+  router.post("/copy/set-user", async (req, res) => {
+    const key = String(req.body?.key || "").trim();
+    const waId = String(req.body?.waId || "").trim();
+    const value = String(req.body?.value || "");
+    if (!key || !waId) {
+      return res.status(400).json({ ok: false, error: "key and waId required" });
+    }
+    await setCopyUser(waId, key, value);
+    res.redirect(`/admin/copy-ui?waId=${encodeURIComponent(waId)}`);
+  });
+
+  router.post("/copy/del-user", async (req, res) => {
+    const key = String(req.body?.key || "").trim();
+    const waId = String(req.body?.waId || "").trim();
+    if (!key || !waId) {
+      return res.status(400).json({ ok: false, error: "key and waId required" });
+    }
+    await delCopyUser(waId, key);
+    res.redirect(`/admin/copy-ui?waId=${encodeURIComponent(waId)}`);
+  });
+
 
 
   // -----------------------------
