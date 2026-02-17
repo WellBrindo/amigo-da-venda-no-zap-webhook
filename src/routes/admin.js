@@ -242,4 +242,95 @@ async function togglePlan(code, active){
 
   router.post("/plans/:code/active", async (req, res) => {
     try {
-      const active = Boolean
+      const active = Boolean(req.body?.active);
+      const plan = await setPlanActive(req.params.code, active);
+      return res.json({ ok: true, plan });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
+  // -------------------- 24h WINDOW UI (simple) --------------------
+  router.get("/window24h-ui", async (req, res) => {
+    const count = await countWindow24hActive();
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Janela 24h</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; cursor:pointer; background:white; }
+    pre { background:#f6f6f6; padding: 12px; border-radius: 12px; overflow:auto; }
+    .muted { color:#666; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>🕒 Janela 24h</h2>
+    <div class="muted">Usuários dentro da janela de 24 horas (útil para evitar custo de mensagem).</div>
+    <p><a href="/admin">⬅ Voltar</a></p>
+    <p><b>Ativos agora:</b> ${escapeHtml(String(count))}</p>
+
+    <button onclick="load()">Carregar lista (JSON)</button>
+    <pre id="out"></pre>
+  </div>
+
+<script>
+async function load(){
+  const r = await fetch("/admin/window24h");
+  const j = await r.json();
+  document.getElementById("out").textContent = JSON.stringify(j, null, 2);
+}
+</script>
+</body>
+</html>`;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  // -------------------- Technical endpoints: state-test --------------------
+  router.get("/state-test/set", async (req, res) => {
+    const waId = normalizeWaId(req.query.waId || "5511960765975");
+    await setUserStatus(waId, "ACTIVE");
+    await setUserPlan(waId, "DE_VEZ_EM_QUANDO");
+    await setUserQuotaUsed(waId, 1);
+    await setUserTrialUsed(waId, 0);
+    const user = await getUserSnapshot(waId);
+    return res.json({ ok: true, action: "set-demo", waId, user });
+  });
+
+  router.get("/state-test/reset-trial", async (req, res) => {
+    const waId = normalizeWaId(req.query.waId || "5511960765975");
+    await setUserStatus(waId, "TRIAL");
+    await setUserPlan(waId, "");
+    await setUserQuotaUsed(waId, 0);
+    await setUserTrialUsed(waId, 0);
+    await setLastPrompt(waId, "");
+    const user = await getUserSnapshot(waId);
+    return res.json({ ok: true, action: "reset-trial", waId, user });
+  });
+
+  router.get("/state-test/get", async (req, res) => {
+    const waId = normalizeWaId(req.query.waId || "5511960765975");
+    const user = await getUserSnapshot(waId);
+    return res.json({ ok: true, waId, user });
+  });
+
+  // -------------------- window24h JSON --------------------
+  router.get("/window24h", async (_req, res) => {
+    const items = await listWindow24hActive();
+    return res.json({ ok: true, count: items.length, items });
+  });
+
+  router.get("/window24h/touch", async (req, res) => {
+    const waId = normalizeWaId(req.query.waId || "5511960765975");
+    await touch24hWindow(waId, nowMs());
+    const ts = await getLastInboundTs(waId);
+    return res.json({ ok: true, waId, touchedAtMs: ts });
+  });
+
+  return router;
+}
