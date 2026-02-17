@@ -1,3 +1,5 @@
+import { getCopyText } from "../copy.js";
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
@@ -23,27 +25,9 @@ export async function generateAdText({
   const clean = String(userText || "").trim();
   if (!clean) throw new Error("Missing userText");
 
-  const systemFixed = [
-    "Você é um redator publicitário especialista em anúncios curtos para WhatsApp.",
-    "Crie um anúncio pronto para copiar e colar.",
-    "Use linguagem simples, persuasiva, emocional e direta.",
-    "Formato FIXO obrigatório:",
-    "1) Linha de título com emoji + texto em negrito (use *negrito* do WhatsApp)",
-    "2) 2 a 3 linhas de benefício",
-    "3) 3 bullets com emoji",
-    "4) Bloco final com preço (se houver), local e horário como 'Sob consulta' se não informado",
-    "5) CTA curto no final",
-    "Não invente informações específicas. Se faltar informação, use 'Sob consulta'.",
-  ].join("\n");
+    const systemFixed = await getCopyText("OPENAI_SYSTEM_FIXED");
 
-  const systemFree = [
-    "Você é um redator publicitário especialista em anúncios curtos para WhatsApp.",
-    "Crie um anúncio pronto para copiar e colar.",
-    "Use linguagem simples, persuasiva, emocional e direta.",
-    "Formato LIVRE: você pode escolher a melhor estrutura para conversão.",
-    "Ainda assim: não invente informações específicas. Se faltar informação, use 'Sob consulta'.",
-    "Evite textos longos; seja objetivo.",
-  ].join("\n");
+  const systemFree = await getCopyText("OPENAI_SYSTEM_FREE");
 
   const system = mode === "FREE" ? systemFree : systemFixed;
 
