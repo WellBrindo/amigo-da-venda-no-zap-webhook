@@ -1,87 +1,130 @@
-import { setUserStatus, setUserPlan, ensureUserExists } from "../state.js";
+// src/services/asaas/webhook.js
+
+import {
+  ensureUserExists,
+  setUserStatus,
+  getUserPlan,
+  resetUserQuotaUsed,
+  resetUserTrialUsed,
+} from "../state.js";
 
 /**
- * Regras (MVP SaaS):
- * - PAYMENT_RECEIVED / PAYMENT_CONFIRMED => ACTIVE
- * - PAYMENT_OVERDUE => PAYMENT_PENDING (ou BLOCKED depois, se você quiser grace period)
- * - PAYMENT_DELETED => BLOCKED
- * - SUBSCRIPTION_INACTIVATED / SUBSCRIPTION_DELETED => BLOCKED
- *
- * Identificação do usuário:
- * - Vamos depender de "externalReference" == waId (ex: 5511....)
- *   (No passo seguinte, quando criarmos cobranças/assinaturas, vamos gravar o waId lá.)
+ * Webhook handler do Asaas
+ * Regras:
+ * - externalReference = waId
+ * - Não logar CPF/CNPJ
+ * - Não bloquear usuário por inconsistência de plano
  */
-function pickWaIdFromEvent(payload) {
-  // Asaas geralmente envia: { event: "PAYMENT_RECEIVED", payment: {...} }
-  // ou: { event: "SUBSCRIPTION_INACTIVATED", subscription: {...} }
-  const payment = payload?.payment;
-  const subscription = payload?.subscription;
 
-  const ref =
-    (payment && (payment.externalReference || payment.external_reference)) ||
-    (subscription && (subscription.externalReference || subscription.external_reference)) ||
-    payload?.externalReference ||
-    payload?.external_reference ||
-    "";
+export async function handleAsaasWebhook(body) {
+  try {
+    const event = body?.event;
+    const payment = body?.payment;
+    const subscription = body?.subscription;
 
-  const waId = String(ref || "").trim();
-  return waId;
-}
+    const waId =
+      payment?.externalReference ||
+      subscription?.externalReference ||
+      null;
 
-function pickPlanCodeFromEvent(payload) {
-  // Para já “amarrar” o plano escolhido:
-  // no próximo passo vamos gravar o planCode em descrição/metadata; por enquanto tenta achar algo:
-  const payment = payload?.payment;
-  const desc = String(payment?.description || "");
-  // Se você quiser, depois colocamos um formato padrão: "PLANO:DE_VEZ_EM_QUANDO"
-  const m = desc.match(/PLANO:([A-Z0-9_]+)/i);
-  return m ? String(m[1] || "").toUpperCase() : "";
-}
+    if (!waId) {
+      console.log("[ASAAS_WEBHOOK] Evento sem externalReference ignorado.");
+      return { ok: false, reason: "no_external_reference" };
+    }
 
-export async function handleAsaasWebhookEvent(payload) {
-  const event = String(payload?.event || "").trim();
-  if (!event) return { ignored: true, reason: "missing_event" };
+    await ensureUserExists(waId);
 
-  const waId = pickWaIdFromEvent(payload);
-  if (!waId) {
-    // Sem externalReference não dá para mapear usuário ainda
-    return { ignored: true, reason: "missing_externalReference" };
+    // ==============================
+    // PAGAMENTO CONFIRMADO
+    // ==============================
+    if (
+      event === "PAYMENT_RECEIVED" ||
+      event === "PAYMENT_CONFIRMED"
+    ) {
+      const plan = await getUserPlan(waId);
+
+      if (!plan) {
+        console.log(
+          "[ASAAS_WEBHOOK_WARNING] Payment confirmed but plan missing",
+          {
+            waId,
+            event,
+          }
+        );
+      }
+
+      // Resetar contadores SEMPRE
+      await resetUserQuotaUsed(waId);
+      await resetUserTrialUsed(waId);
+
+      await setUserStatus(waId, "ACTIVE");
+
+      console.log("[ASAAS_WEBHOOK] Usuário ativado:", {
+        waId,
+        event,
+        plan: plan || "NONE",
+      });
+
+      return { ok: true, statusSetTo: "ACTIVE" };
+    }
+
+    // ==============================
+    // PAGAMENTO VENCIDO
+    // ==============================
+    if (event === "PAYMENT_OVERDUE") {
+      await setUserStatus(waId, "PAYMENT_PENDING");
+
+      console.log("[ASAAS_WEBHOOK] Pagamento vencido:", {
+        waId,
+        event,
+      });
+
+      return { ok: true, statusSetTo: "PAYMENT_PENDING" };
+    }
+
+    // ==============================
+    // PAGAMENTO DELETADO
+    // ==============================
+    if (event === "PAYMENT_DELETED") {
+      await setUserStatus(waId, "BLOCKED");
+
+      console.log("[ASAAS_WEBHOOK] Pagamento deletado:", {
+        waId,
+        event,
+      });
+
+      return { ok: true, statusSetTo: "BLOCKED" };
+    }
+
+    // ==============================
+    // ASSINATURA CANCELADA / INATIVA
+    // ==============================
+    if (
+      event === "SUBSCRIPTION_DELETED" ||
+      event === "SUBSCRIPTION_EXPIRED" ||
+      event === "SUBSCRIPTION_INACTIVATED"
+    ) {
+      await setUserStatus(waId, "BLOCKED");
+
+      console.log("[ASAAS_WEBHOOK] Assinatura inativada:", {
+        waId,
+        event,
+      });
+
+      return { ok: true, statusSetTo: "BLOCKED" };
+    }
+
+    // ==============================
+    // EVENTOS IGNORADOS
+    // ==============================
+    console.log("[ASAAS_WEBHOOK] Evento ignorado:", {
+      waId,
+      event,
+    });
+
+    return { ok: true, ignored: true };
+  } catch (err) {
+    console.error("[ASAAS_WEBHOOK_ERROR]", err);
+    return { ok: false, error: err.message };
   }
-
-  await ensureUserExists(waId);
-
-  // Opcional: tenta capturar plano do evento (vamos melhorar no passo seguinte)
-  const planCode = pickPlanCodeFromEvent(payload);
-  if (planCode) {
-    await setUserPlan(waId, planCode);
-  }
-
-  // Mapear eventos
-  if (event === "PAYMENT_RECEIVED" || event === "PAYMENT_CONFIRMED") {
-    await setUserStatus(waId, "ACTIVE");
-    return { waId, event, statusSetTo: "ACTIVE" };
-  }
-
-  if (event === "PAYMENT_OVERDUE") {
-    // MVP: mantém como pendente (você pode decidir bloquear depois de X dias)
-    await setUserStatus(waId, "PAYMENT_PENDING");
-    return { waId, event, statusSetTo: "PAYMENT_PENDING" };
-  }
-
-  if (event === "PAYMENT_DELETED") {
-    await setUserStatus(waId, "BLOCKED");
-    return { waId, event, statusSetTo: "BLOCKED" };
-  }
-
-  if (event === "SUBSCRIPTION_INACTIVATED" || event === "SUBSCRIPTION_DELETED") {
-    await setUserStatus(waId, "BLOCKED");
-    return { waId, event, statusSetTo: "BLOCKED" };
-  }
-
-  if (event === "SUBSCRIPTION_CREATED" || event === "SUBSCRIPTION_UPDATED") {
-    // Não muda status por si só; status muda por pagamento.
-    return { waId, event, noted: true };
-  }
-
-  return { waId, event, ignored: true, reason: "unhandled_event" };
 }
