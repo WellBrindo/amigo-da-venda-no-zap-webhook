@@ -162,7 +162,14 @@ function layoutBase({ title, activePath = "/admin", content = "", headExtra = ""
     th, td{ padding: 10px 8px; border-bottom: 1px solid var(--border); text-align:left; }
     code{ background:#f3f4f6; padding: 2px 6px; border-radius: 8px; }
     .pill{ display:inline-flex; gap:8px; align-items:center; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; background:#fff; }
-    .hr{ height:1px; background: var(--border); margin:14px 0; }
+    
+    .badge{ display:inline-flex; align-items:center; justify-content:center; padding: 2px 8px; border-radius:999px; border:1px solid var(--border); background:#fff; font-size:12px; font-weight:800; letter-spacing:.3px; }
+    .badge.ok{ background:rgba(16,185,129,.12); color:#065f46; border-color:rgba(16,185,129,.28); }
+    .badge.info{ background:rgba(37,99,235,.12); color:#1d4ed8; border-color:rgba(37,99,235,.28); }
+    .badge.warn{ background:rgba(245,158,11,.14); color:#92400e; border-color:rgba(245,158,11,.28); }
+    .badge.danger{ background:rgba(239,68,68,.12); color:#991b1b; border-color:rgba(239,68,68,.28); }
+    .badge.soft{ font-weight:700; letter-spacing:0; }
+.hr{ height:1px; background: var(--border); margin:14px 0; }
   </style>
   ${headExtra || ""}
 </head>
@@ -1248,13 +1255,13 @@ router.get("/", async (req, res) => {
     }
 
     const inner = `
-      <div class="row" style="justify-content:space-between; align-items:flex-end;">
-        <div>
+      <div class="row" style="justify-content:space-between; align-items:flex-end; gap:16px;">
+        <div style="min-width:320px;">
           <h2 style="margin:0 0 6px 0;">📝 Textos do Bot</h2>
           <div class="muted">Edite mensagens padrão sem mexer no código. Override global e por usuário (opcional).</div>
         </div>
 
-        <form method="GET" action="/admin/copy-ui" class="row" style="gap:8px; align-items:flex-end; margin:0;">
+        <form method="GET" action="/admin/copy-ui" class="row" style="gap:8px; align-items:flex-end; margin:0; flex-wrap:wrap; justify-content:flex-end;">
           <div>
             <div class="muted" style="font-size:12px; margin-bottom:6px;">waId (opcional)</div>
             <input name="waId" value="${escapeHtml(waId)}" placeholder="5511..." style="min-width:220px;" />
@@ -1266,10 +1273,32 @@ router.get("/", async (req, res) => {
 
       <div class="hr"></div>
 
+      <div class="row" style="gap:10px; align-items:flex-end; flex-wrap:wrap;">
+        <div style="flex:1; min-width:260px;">
+          <div class="muted" style="font-size:12px; margin-bottom:6px;">Buscar (key ou título)</div>
+          <input id="copySearch" placeholder="Ex.: FLOW_ASK_NAME, OpenAI, pagamento..." style="width:100%;" />
+        </div>
+
+        <div style="min-width:220px;">
+          <div class="muted" style="font-size:12px; margin-bottom:6px;">Categoria</div>
+          <select id="copyCategory" style="width:100%;">
+            <option value="">Todas</option>
+            ${Object.keys(byCat).map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("")}
+          </select>
+        </div>
+
+        <div class="pill" style="margin-left:auto;">
+          <span class="muted">Visíveis:</span>
+          <strong id="copyVisibleCount">0</strong>
+        </div>
+      </div>
+
+      <div class="hr"></div>
+
       <div class="grid" style="grid-template-columns:1fr;">
         ${Object.entries(byCat).map(([cat, items]) => {
           return `
-            <div class="card pad">
+            <div class="card pad copy-cat" data-copy-category="${escapeHtml(cat)}">
               <div class="row" style="justify-content:space-between;">
                 <div>
                   <h3 style="margin:0 0 4px 0;">${escapeHtml(cat)}</h3>
@@ -1287,7 +1316,7 @@ router.get("/", async (req, res) => {
                       : "<span class=\"badge\" style=\"background:rgba(239,68,68,.12); color:#991b1b; border-color:rgba(239,68,68,.28)\">MISSING</span>";
 
                 return `
-                  <div style="margin-bottom:18px;">
+                  <div class="copy-item" data-copy-category="${escapeHtml(it.category)}" data-copy-key="${escapeHtml(it.key)}" data-copy-label="${escapeHtml(it.label)}" data-copy-source="${escapeHtml(it.resolvedSource)}" style="margin-bottom:18px;">
                     <div class="row" style="justify-content:space-between; align-items:center;">
                       <div>
                         <div style="font-weight:800;">${escapeHtml(it.label)} <span class="muted" style="font-weight:700;">(${escapeHtml(it.key)})</span></div>
@@ -1350,6 +1379,60 @@ router.get("/", async (req, res) => {
           `;
         }).join("")}
       </div>
+
+
+      <script>
+        (function(){
+          const searchEl = document.getElementById('copySearch');
+          const catEl = document.getElementById('copyCategory');
+          const countEl = document.getElementById('copyVisibleCount');
+
+          function norm(v){ return String(v || '').toLowerCase().trim(); }
+
+          function apply(){
+            const q = norm(searchEl ? searchEl.value : '');
+            const cat = String(catEl ? catEl.value : '').trim();
+
+            let visible = 0;
+
+            const catCards = Array.from(document.querySelectorAll('.copy-cat'));
+            for (const card of catCards){
+              const cardCat = card.getAttribute('data-copy-category') || '';
+              const showCat = !cat || cardCat === cat;
+
+              let anyItemVisible = false;
+              const items = Array.from(card.querySelectorAll('.copy-item'));
+              for (const it of items){
+                const k = norm(it.getAttribute('data-copy-key'));
+                const l = norm(it.getAttribute('data-copy-label'));
+                const matchQ = !q || k.includes(q) || l.includes(q);
+
+                const show = showCat && matchQ;
+                it.style.display = show ? '' : 'none';
+                if (show){ anyItemVisible = true; visible++; }
+              }
+
+              card.style.display = (showCat && anyItemVisible) ? '' : 'none';
+            }
+
+            if (countEl) countEl.textContent = String(visible);
+          }
+
+          if (searchEl) searchEl.addEventListener('input', apply);
+          if (catEl) catEl.addEventListener('change', apply);
+
+          // tecla "/" foca busca
+          document.addEventListener('keydown', (e) => {
+            if (e.key === '/' && searchEl && document.activeElement !== searchEl) {
+              e.preventDefault();
+              searchEl.focus();
+            }
+          });
+
+          apply();
+        })();
+      </script>
+
     `;
 
     const html = layoutBase({ title: "Textos do Bot", activePath: "/admin/copy-ui", content: inner });
