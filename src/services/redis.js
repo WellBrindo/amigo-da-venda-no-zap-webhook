@@ -1,3 +1,4 @@
+// src/services/redis.js
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
@@ -61,11 +62,9 @@ export async function redisDel(key) {
 // Sets
 // -----------------
 
-export async function redisSAdd(key, ...members) {
-  const encoded = members
-    .map((m) => encodeURIComponent(String(m)))
-    .join("/");
-
+export async function redisSAdd(key, members) {
+  const list = Array.isArray(members) ? members : [members];
+  const encoded = list.map((m) => encodeURIComponent(String(m))).join("/");
   return upstash(`/SADD/${encodeURIComponent(key)}/${encoded}`);
 }
 
@@ -91,9 +90,7 @@ export async function redisZAdd(key, score, member) {
 
 export async function redisZScore(key, member) {
   return upstash(
-    `/ZSCORE/${encodeURIComponent(key)}/${encodeURIComponent(
-      String(member)
-    )}`
+    `/ZSCORE/${encodeURIComponent(key)}/${encodeURIComponent(String(member))}`
   );
 }
 
