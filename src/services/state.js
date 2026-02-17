@@ -1,5 +1,14 @@
 // src/services/state.js
-import { redisGet, redisSet, redisIncrBy, redisDel, redisSAdd, redisSMembers } from "./redis.js";
+// ✅ V16.4.1 — Migração segura do users:index (WRONGTYPE) em produção
+import {
+  redisGet,
+  redisSet,
+  redisIncrBy,
+  redisDel,
+  redisSAdd,
+  redisSMembers,
+  redisType,
+} from "./redis.js";
 
 /**
  * ✅ Estado do usuário (Redis)
@@ -68,9 +77,47 @@ function maskDocFromParts(docType, docLast4) {
 }
 
 // ✅ AGORA É EXPORTADA (para window24h.js importar corretamente)
+// ✅ V16.4.1: migração segura do índice users:index quando legado estiver como STRING (ou outro tipo)
 export async function indexUser(waId) {
   const id = safeStr(waId);
   if (!id) return false;
+
+  // Detecta tipo do índice antes de usar SADD (evita WRONGTYPE)
+  let t = "";
+  try {
+    t = safeStr(await redisType(USERS_INDEX_KEY)).toLowerCase();
+  } catch (err) {
+    // Se TYPE falhar por qualquer razão, não arriscar deletar nada.
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        tag: "users_index_type_check_failed",
+        key: USERS_INDEX_KEY,
+        waId: id,
+        error: safeStr(err?.message || err),
+      })
+    );
+    // Ainda tenta adicionar (pode falhar se for wrongtype, mas ao menos logamos o motivo)
+    await redisSAdd(USERS_INDEX_KEY, id);
+    return true;
+  }
+
+  // Upstash TYPE costuma retornar: "none" quando não existe
+  if (t && t !== "set" && t !== "none") {
+    // Migração segura: apagar APENAS o índice (nunca user:*)
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        tag: "users_index_migration",
+        action: "del_and_recreate_as_set",
+        key: USERS_INDEX_KEY,
+        previousType: t,
+        waId: id,
+      })
+    );
+    await redisDel(USERS_INDEX_KEY);
+  }
+
   await redisSAdd(USERS_INDEX_KEY, id);
   return true;
 }
@@ -270,7 +317,11 @@ export async function setUserDocMasked(waId, docType, docLast4) {
 
 export async function clearUserDoc(waId) {
   await indexUser(waId);
-  await Promise.all([redisDel(keyDocType(waId)), redisDel(keyDocLast4(waId)), redisDel(keyDocLegacy(waId))]);
+  await Promise.all([
+    redisDel(keyDocType(waId)),
+    redisDel(keyDocLast4(waId)),
+    redisDel(keyDocLegacy(waId)),
+  ]);
   return true;
 }
 
