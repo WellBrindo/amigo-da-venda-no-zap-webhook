@@ -1,11 +1,10 @@
 // src/server.js
 import express from "express";
-import crypto from "crypto";
 
 import { asaasRouter } from "./routes/asaas.js";
 
 const APP_NAME = "amigo-das-vendas";
-const APP_VERSION = "16.0.3-modular-onboarding-doc-asaas";
+const APP_VERSION = "16.0.4-modular-waitname-plans-auto";
 
 const app = express();
 app.set("trust proxy", true);
@@ -22,10 +21,9 @@ const UPSTASH_REDIS_REST_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim()
 const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 
 const ASAAS_API_KEY = (process.env.ASAAS_API_KEY || "").trim();
-const ASAAS_ENV = (process.env.ASAAS_ENV || "production").trim(); // production | sandbox
+const ASAAS_ENV = (process.env.ASAAS_ENV || "production").trim();
 
 // ===================== Plans (inicial) =====================
-// Por enquanto fixo aqui (16.3). Depois a gente leva para Admin "Planos".
 const PLANS = {
   DE_VEZ_EM_QUANDO: { label: "De Vez em Quando", price: 24.9, quota: 20 },
   SEMPRE_POR_PERTO: { label: "Sempre por Perto", price: 34.9, quota: 60 },
@@ -48,7 +46,7 @@ function basicAuth(req, res, next) {
   } catch {
     return res.status(401).send("Invalid auth");
   }
-  const [user, pass] = decoded.split(":");
+  const [_user, pass] = decoded.split(":");
   if (!pass || pass !== ADMIN_SECRET) return res.status(403).send("Forbidden");
   next();
 }
@@ -85,7 +83,6 @@ function isValidCPF(raw) {
 
   const dv1 = calcDV(cpf.slice(0, 9), 10);
   const dv2 = calcDV(cpf.slice(0, 9) + String(dv1), 11);
-
   return cpf === cpf.slice(0, 9) + String(dv1) + String(dv2);
 }
 
@@ -106,7 +103,6 @@ function isValidCNPJ(raw) {
 
   const dv1 = calcDV(cnpj.slice(0, 12), w1);
   const dv2 = calcDV(cnpj.slice(0, 12) + String(dv1), w2);
-
   return cnpj === cnpj.slice(0, 12) + String(dv1) + String(dv2);
 }
 
@@ -144,11 +140,7 @@ async function redisGet(key) {
   return upstash(`/get/${encodeURIComponent(key)}`);
 }
 async function redisSet(key, value) {
-  // SET key value
   return upstash(`/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}`);
-}
-async function redisDel(key) {
-  return upstash(`/del/${encodeURIComponent(key)}`);
 }
 async function redisPing() {
   return upstash(`/ping`);
@@ -162,7 +154,6 @@ async function sendWhatsAppText(to, text) {
   if (!PHONE_NUMBER_ID) throw new Error("PHONE_NUMBER_ID missing");
 
   const url = `https://graph.facebook.com/v24.0/${PHONE_NUMBER_ID}/messages`;
-
   const payload = {
     messaging_product: "whatsapp",
     to: waId,
@@ -192,7 +183,7 @@ function userKey(waId) {
   return `user:${waId}`;
 }
 function usersIndexKey() {
-  return `users:index`; // JSON array simples (por enquanto)
+  return `users:index`;
 }
 
 async function loadUser(waId) {
@@ -209,7 +200,6 @@ async function saveUser(user) {
   user.updatedAtMs = nowMs();
   await redisSet(userKey(user.waId), JSON.stringify(user));
 
-  // index simples (sem ZSET) para 16.3 (barato e suficiente p/ ~1k users)
   const idxRaw = (await redisGet(usersIndexKey())) || "[]";
   let idx = [];
   try {
@@ -228,7 +218,7 @@ async function ensureUser(waId) {
   if (!u) {
     u = {
       waId,
-      status: "TRIAL", // TRIAL | WAIT_PLAN | WAIT_PAYMENT_METHOD | WAIT_DOC | PAYMENT_PENDING | ACTIVE
+      status: "WAIT_NAME", // ✅ novo estado explícito
       plan: "",
       trialUsed: 0,
       quotaUsed: 0,
@@ -240,154 +230,34 @@ async function ensureUser(waId) {
       lastInboundAtMs: 0,
       windowEndsAtMs: 0,
       asaasCustomerId: "",
-      asaasRef: "", // subscriptionId or paymentId
+      asaasRef: "",
     };
     await saveUser(u);
   }
+
+  // Se já existia mas não tem nome, força o estado WAIT_NAME
+  if (!u.fullName && u.status !== "WAIT_NAME") {
+    u.status = "WAIT_NAME";
+    await saveUser(u);
+  }
+
   return u;
 }
 
-function getUserWindowEndsAtMs(u) {
-  const last = Number(u.lastInboundAtMs || 0);
-  if (!last) return 0;
-  return last + 24 * 60 * 60 * 1000;
-}
-
-// ===================== Asaas helpers =====================
-function asaasBaseUrl() {
-  // Se você usa sandbox, ajuste aqui conforme sua conta
-  // Em geral Asaas usa o mesmo host, mudando chave / ambiente. Mantemos padrão.
-  return "https://api.asaas.com/v3";
-}
-
-async function asaasFetch(path, { method = "GET", body = null } = {}) {
-  if (!ASAAS_API_KEY) throw new Error("ASAAS_API_KEY missing");
-  const url = `${asaasBaseUrl()}${path}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-      access_token: ASAAS_API_KEY,
-    },
-    body: body ? JSON.stringify(body) : null,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = data?.errors?.[0]?.description || data?.message || `Asaas HTTP ${res.status}`;
-    throw new Error(msg);
-  }
-  return data;
-}
-
-async function asaasFindOrCreateCustomer(user) {
-  // Se já tiver customerId, reaproveita
-  if (user.asaasCustomerId) return user.asaasCustomerId;
-
-  // Criar customer com nome e CPF/CNPJ
-  const name = user.fullName?.trim() || "Cliente Amigo das Vendas";
-  const cpfCnpj = user.doc;
-
-  const customer = await asaasFetch("/customers", {
-    method: "POST",
-    body: {
-      name,
-      cpfCnpj,
-      // Você pode colocar email/phone depois quando tiver
-    },
-  });
-
-  user.asaasCustomerId = customer.id || "";
-  await saveUser(user);
-  return user.asaasCustomerId;
-}
-
-function formatDateYYYYMMDD(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-async function asaasCreateCardSubscription(user, planKey) {
-  const plan = PLANS[planKey];
-  if (!plan) throw new Error("Plano inválido");
-
-  const customerId = await asaasFindOrCreateCustomer(user);
-
-  // assinatura (cartão) — sem capturar cartão no WhatsApp:
-  // a prática aqui é gerar "checkout" / invoiceUrl do Asaas (depende do plano/conta).
-  // Vamos usar pagamentos recorrentes via subscription e devolver um link quando disponível.
-  // Caso a sua conta não devolva invoiceUrl, a gente ajusta para Checkout.
-  const nextDueDate = formatDateYYYYMMDD(new Date(Date.now() + 1 * 24 * 60 * 60 * 1000)); // amanhã
-
-  const sub = await asaasFetch("/subscriptions", {
-    method: "POST",
-    body: {
-      customer: customerId,
-      billingType: "CREDIT_CARD",
-      cycle: "MONTHLY",
-      value: plan.price,
-      nextDueDate,
-      description: `Amigo das Vendas - ${plan.label}`,
-    },
-  });
-
-  // Alguns cenários retornam links no próprio objeto; se não vier, a gente envia só confirmação.
-  const subId = sub.id || "";
-  user.status = "PAYMENT_PENDING";
-  user.plan = planKey;
-  user.payMethod = "CARD";
-  user.asaasRef = subId;
-  await saveUser(user);
-
-  const link =
-    sub?.invoiceUrl ||
-    sub?.bankSlipUrl ||
-    sub?.paymentLink ||
-    sub?.checkoutUrl ||
-    "";
-
-  return { subId, link, raw: sub };
-}
-
-async function asaasCreatePixMonthlyPayment(user, planKey) {
-  const plan = PLANS[planKey];
-  if (!plan) throw new Error("Plano inválido");
-
-  const customerId = await asaasFindOrCreateCustomer(user);
-
-  // Cobrança avulsa mensal (PIX): cria 1 payment. A renovação mensal você dispara no vencimento.
-  const dueDate = formatDateYYYYMMDD(new Date(Date.now() + 1 * 24 * 60 * 60 * 1000)); // amanhã
-
-  const p = await asaasFetch("/payments", {
-    method: "POST",
-    body: {
-      customer: customerId,
-      billingType: "PIX",
-      value: plan.price,
-      dueDate,
-      description: `Amigo das Vendas - ${plan.label} (mensal PIX)`,
-    },
-  });
-
-  const paymentId = p.id || "";
-  user.status = "PAYMENT_PENDING";
-  user.plan = planKey;
-  user.payMethod = "PIX";
-  user.asaasRef = paymentId;
-  await saveUser(user);
-
-  // PIX costuma vir com invoiceUrl; QR pode exigir uma chamada extra dependendo do Asaas.
-  const link = p?.invoiceUrl || p?.bankSlipUrl || "";
-  return { paymentId, link, raw: p };
-}
-
 // ===================== Copy texts =====================
+function welcomeAskNameText() {
+  return (
+    `Oi! 👋😊\n` +
+    `Eu sou o *Amigo das Vendas* — pode me chamar de *Amigo*.\n\n` +
+    `Você me diz o que você vende ou o serviço que você presta, e eu te devolvo um anúncio prontinho pra você copiar e mandar nos grupos do WhatsApp.\n\n` +
+    `Antes que eu esqueça 😄\n` +
+    `Qual é o seu *NOME COMPLETO*?`
+  );
+}
+
 function plansMenuText() {
   return (
-    `Perfeito! 😄\n\n` +
-    `Escolha um plano:\n\n` +
+    `😄 Perfeito! Agora escolha um plano:\n\n` +
     `1) ${PLANS.DE_VEZ_EM_QUANDO.label} — R$ ${PLANS.DE_VEZ_EM_QUANDO.price.toFixed(2)}\n   • ${PLANS.DE_VEZ_EM_QUANDO.quota} descrições/mês\n\n` +
     `2) ${PLANS.SEMPRE_POR_PERTO.label} — R$ ${PLANS.SEMPRE_POR_PERTO.price.toFixed(2)}\n   • ${PLANS.SEMPRE_POR_PERTO.quota} descrições/mês\n\n` +
     `3) ${PLANS.MELHOR_AMIGO.label} — R$ ${PLANS.MELHOR_AMIGO.price.toFixed(2)}\n   • ${PLANS.MELHOR_AMIGO.quota} descrições/mês\n\n` +
@@ -399,7 +269,7 @@ function payMethodText() {
   return (
     `Show! ✅\n\n` +
     `Agora escolha a forma de pagamento:\n\n` +
-    `1) Cartão (assinatura mensal) 💳  *(recomendado)*\n` +
+    `1) Cartão (assinatura mensal) 💳 *(recomendado)*\n` +
     `2) PIX (cobrança mensal avulsa) 🧾\n\n` +
     `Responda com 1 ou 2.`
   );
@@ -408,7 +278,7 @@ function payMethodText() {
 function askDocText() {
   return (
     `Nossa, quase esqueci 😄\n` +
-    `Pra eu conseguir gerar e registrar o pagamento, preciso do seu CPF ou CNPJ (somente números).\n\n` +
+    `Pra eu conseguir gerar e registrar o pagamento, preciso do seu *CPF ou CNPJ* (somente números).\n\n` +
     `Pode me enviar, por favor?\n` +
     `Fica tranquilo(a): eu uso só pra isso e não exibo em logs.`
   );
@@ -423,16 +293,7 @@ function invalidDocText() {
   );
 }
 
-function welcomeAskNameText() {
-  return (
-    `Oi! 👋😊\n` +
-    `Eu sou o Amigo das Vendas — pode me chamar de Amigo.\n\n` +
-    `Você me diz o que você vende ou o serviço que você presta, e eu te devolvo um anúncio prontinho pra você copiar e mandar nos grupos do WhatsApp.\n\n` +
-    `Antes que eu esqueça 😄 qual é o seu NOME COMPLETO?`
-  );
-}
-
-// ===================== Health =====================
+// ===================== Health/Admin =====================
 app.get("/", (req, res) => res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION }));
 app.get("/health", (req, res) => res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION }));
 
@@ -462,15 +323,8 @@ app.get("/admin", basicAuth, (req, res) => {
           <div class="pill"><a href="/health">✅ Health</a></div>
           <div class="pill"><a href="/admin/redis-ping">🧠 Redis Ping</a></div>
           <div class="pill"><a href="/admin/users">👥 Users (JSON)</a></div>
-          <div class="pill"><a href="/admin/validate-doc?doc=52998224725">🧾 Validate Doc (teste)</a></div>
+          <div class="pill"><a href="/admin/validate-doc?doc=52998224725">🧾 Validate Doc</a></div>
           <div class="pill"><a href="/asaas/test">💳 Asaas Test</a></div>
-        </div>
-        <hr/>
-        <p class="muted">Rotas principais:</p>
-        <div>
-          <div><code>GET /webhook</code> (verificação Meta)</div>
-          <div><code>POST /webhook</code> (eventos WhatsApp)</div>
-          <div><code>POST /asaas/webhook</code> (webhook Asaas)</div>
         </div>
       </div>
     </body>
@@ -515,20 +369,18 @@ app.get("/admin/validate-doc", basicAuth, (req, res) => {
   return res.json({ ok: true, input: String(doc), normalized: v.doc, type: v.type, valid: v.ok });
 });
 
-// ===================== WhatsApp Cloud API webhook =====================
-// Teste A (GET) - verificação do Meta
+// ===================== Meta webhook verify =====================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-
   if (mode === "subscribe" && token && token === VERIFY_TOKEN) {
     return res.status(200).send(String(challenge || ""));
   }
   return res.status(403).send("Forbidden");
 });
 
-// POST - recebimento WhatsApp
+// ===================== Meta webhook receive =====================
 app.post("/webhook", async (req, res) => {
   try {
     // responde rápido
@@ -538,7 +390,6 @@ app.post("/webhook", async (req, res) => {
     const change = entry?.changes?.[0];
     const value = change?.value || {};
     const msg = value?.messages?.[0];
-
     if (!msg) return;
 
     const waId = String(msg.from || "").trim();
@@ -547,65 +398,59 @@ app.post("/webhook", async (req, res) => {
     const text = (msg.type === "text" ? msg.text?.body : "") || "";
     const body = String(text || "").trim();
 
-    // Atualiza janela 24h
     const u = await ensureUser(waId);
     u.lastInboundAtMs = nowMs();
-    u.windowEndsAtMs = getUserWindowEndsAtMs(u);
+    u.windowEndsAtMs = u.lastInboundAtMs + 24 * 60 * 60 * 1000;
     await saveUser(u);
 
-    // ======== Onboarding / Conversa ========
+    // ===================== FLOW =====================
 
-    // 0) se não tem nome, sempre pede (isso vale inclusive se ele mandar "oi")
-    if (!u.fullName) {
-      // Se ele mandou algo que parece nome (mais de 2 palavras), já salva
-      const maybeName = body;
-      const parts = maybeName.split(/\s+/).filter(Boolean);
-      if (parts.length >= 2 && maybeName.length >= 8 && !/^\d+$/.test(maybeName)) {
-        u.fullName = maybeName;
-        await saveUser(u);
-        await sendWhatsAppText(waId, `Perfeito, ${u.fullName.split(" ")[0]}! ✅\n\nAgora me diga o que você vende ou o serviço que presta (pode ser simples, tipo: "vendo bolo R$30").`);
+    // (A) WAIT_NAME: aqui NÃO tem adivinhação, é sempre nome.
+    if (u.status === "WAIT_NAME") {
+      // Se o usuário mandou algo muito curto, pede de novo
+      if (body.length < 6) {
+        await sendWhatsAppText(waId, welcomeAskNameText());
         return;
       }
 
-      await sendWhatsAppText(waId, welcomeAskNameText());
+      u.fullName = body;
+      u.status = "TRIAL"; // vai para trial automaticamente
+      await saveUser(u);
+
+      const firstName = u.fullName.split(/\s+/)[0] || "perfeito";
+      await sendWhatsAppText(
+        waId,
+        `Perfeito, ${firstName}! ✅\n\nAgora me diga *o que você vende* ou *o serviço que você presta* (pode ser simples, tipo: "vendo bolo R$30").`
+      );
       return;
     }
 
-    // 1) Trial: até 5 descrições (aqui ainda não gera com OpenAI; só simula consumo e empurra para planos)
+    // (B) TRIAL
     if (u.status === "TRIAL") {
-      // comandos
-      if (/^planos$/i.test(body)) {
-        u.status = "WAIT_PLAN";
-        await saveUser(u);
-        await sendWhatsAppText(waId, plansMenuText());
-        return;
-      }
-
-      // se já concluiu trial
+      // Se já estourou o trial, manda planos direto (sem pedir "PLANOS")
       if ((u.trialUsed || 0) >= 5) {
         u.status = "WAIT_PLAN";
         await saveUser(u);
         await sendWhatsAppText(
           waId,
-          `😄 Seu trial gratuito foi concluído!\n\nPara continuar, escolha um plano.\n\n💳 Responda com a palavra PLANOS para ver as opções.`
+          `😄 Seu trial gratuito foi concluído!\n\nPara continuar, escolha um plano:\n\n${plansMenuText()}`
         );
         return;
       }
 
-      // qualquer mensagem conta como "1 descrição" no trial (por enquanto)
+      // Consumir 1 uso no trial (qualquer mensagem de descrição)
       u.trialUsed = Number(u.trialUsed || 0) + 1;
       await saveUser(u);
 
+      // Se acabou agora, já manda os planos direto
       if (u.trialUsed >= 5) {
         u.status = "WAIT_PLAN";
         await saveUser(u);
         await sendWhatsAppText(
           waId,
-          `✅ Recebi sua solicitação.\n\n` +
-            `🎁 Trial: ${u.trialUsed}/5\n\n` +
+          `✅ Recebi sua solicitação.\n\n🎁 Trial: ${u.trialUsed}/5\n\n` +
             `😄 Seu trial gratuito foi concluído!\n\n` +
-            `Para continuar, escolha um plano.\n\n` +
-            `💳 Responda com a palavra PLANOS para ver as opções.`
+            `Para continuar, escolha um plano:\n\n${plansMenuText()}`
         );
         return;
       }
@@ -617,7 +462,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // 2) Escolha do plano
+    // (C) WAIT_PLAN
     if (u.status === "WAIT_PLAN") {
       let planKey = "";
       if (body === "1") planKey = "DE_VEZ_EM_QUANDO";
@@ -637,7 +482,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // 3) Forma de pagamento
+    // (D) WAIT_PAYMENT_METHOD
     if (u.status === "WAIT_PAYMENT_METHOD") {
       if (body !== "1" && body !== "2") {
         await sendWhatsAppText(waId, `Só pra eu registrar certinho 😄\n\n${payMethodText()}`);
@@ -651,85 +496,24 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // 4) Documento + validação real DV antes de Asaas
+    // (E) WAIT_DOC (valida DV antes do Asaas)
     if (u.status === "WAIT_DOC") {
       const v = validateDoc(body);
       if (!v.ok) {
         await sendWhatsAppText(waId, invalidDocText());
         return;
       }
-
       u.doc = v.doc;
+      u.status = "PAYMENT_PENDING"; // aqui entraremos no 16.4 com criação Asaas real
       await saveUser(u);
 
-      // cria no Asaas (CARD assinatura | PIX cobrança avulsa mensal)
-      const planKey = u.plan;
-      const plan = PLANS[planKey];
-
-      if (!plan) {
-        u.status = "WAIT_PLAN";
-        await saveUser(u);
-        await sendWhatsAppText(waId, `Deu um pequeno desencontro aqui 😅\n\nVamos escolher o plano novamente.\n\n${plansMenuText()}`);
-        return;
-      }
-
-      await sendWhatsAppText(
-        waId,
-        `Perfeito! ✅\n\n` +
-          `📦 Plano: ${plan.label}\n` +
-          `💳 Pagamento: ${u.payMethod === "CARD" ? "Cartão (assinatura)" : "PIX (mensal)"}\n\n` +
-          `Gerando seu pagamento agora...`
-      );
-
-      if (u.payMethod === "CARD") {
-        const r = await asaasCreateCardSubscription(u, planKey);
-        if (r.link) {
-          await sendWhatsAppText(
-            waId,
-            `Pronto! 💳✅\n\nPara ativar sua assinatura no cartão, finalize por este link:\n${r.link}\n\nAssim que o pagamento confirmar, eu libero seu plano automaticamente.`
-          );
-        } else {
-          await sendWhatsAppText(
-            waId,
-            `Assinatura criada! 💳✅\n\nAssim que o pagamento confirmar, eu libero seu plano automaticamente.\n\n(Se você quiser, eu também posso te mandar o link de checkout assim que estiver disponível na conta Asaas.)`
-          );
-        }
-        return;
-      }
-
-      // PIX
-      const p = await asaasCreatePixMonthlyPayment(u, planKey);
-      if (p.link) {
-        await sendWhatsAppText(
-          waId,
-          `Pronto! 🧾✅\n\nPara pagar por PIX, use este link:\n${p.link}\n\nAssim que confirmar, eu libero seu plano automaticamente.`
-        );
-      } else {
-        await sendWhatsAppText(
-          waId,
-          `Cobrança PIX criada! 🧾✅\n\nAssim que confirmar, eu libero seu plano automaticamente.`
-        );
-      }
-      return;
-    }
-
-    // 5) Payment pending
-    if (u.status === "PAYMENT_PENDING") {
-      await sendWhatsAppText(
-        waId,
-        `✅ Eu vi sua mensagem!\n\nNo momento seu pagamento ainda está pendente.\n` +
-          `Assim que o Asaas confirmar, eu libero o plano automaticamente.`
-      );
-      return;
-    }
-
-    // 6) Active
-    if (u.status === "ACTIVE") {
       const plan = PLANS[u.plan] || null;
       await sendWhatsAppText(
         waId,
-        `✅ Recebi!\n\n📦 Plano: ${plan ? plan.label : u.plan}\n` +
-          `Em breve vamos ligar o gerador completo (OpenAI) no modular e entregar o anúncio prontinho.`
+        `✅ Documento confirmado (${v.type}).\n\n` +
+          `📦 Plano: ${plan ? plan.label : u.plan}\n` +
+          `💳 Pagamento: ${u.payMethod === "CARD" ? "Cartão (assinatura)" : "PIX (mensal)"}\n\n` +
+          `Perfeito! No próximo passo (16.4) vamos criar automaticamente a cobrança/assinatura no Asaas aqui mesmo.`
       );
       return;
     }
@@ -742,12 +526,10 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ===================== ASAAS webhook =====================
+// ===================== ASAAS routes (já existe no seu projeto) =====================
 app.use("/asaas", asaasRouter());
-
-// Teste simples interno (não é webhook)
 app.get("/asaas/test", basicAuth, (req, res) => {
-  return res.json({ ok: true, asaasWebhookRoute: "/asaas/webhook", env: ASAAS_ENV });
+  return res.json({ ok: true, asaasWebhookRoute: "/asaas/webhook", env: ASAAS_ENV, hasApiKey: !!ASAAS_API_KEY });
 });
 
 // ===================== Start =====================
