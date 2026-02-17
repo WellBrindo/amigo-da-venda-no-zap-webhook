@@ -1,6 +1,6 @@
 // src/services/redis.js
 // Upstash Redis REST helpers (Node.js ESM)
-// ✅ V16.0.10 — Fix: SET with empty string using POST body (avoids ERR wrong number of arguments)
+// ✅ V16.0.11 — Fix definitivo: SET usa body RAW (não JSON.stringify)
 
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -13,9 +13,9 @@ function assertRedisEnv() {
 
 /**
  * Upstash REST rule:
- * - Command args are separated by "/"
- * - In POST requests, request body is appended as the LAST parameter of the command.
- *   e.g. POST /SET/foo  (body: "bar") => SET foo bar
+ * POST /SET/key  + body = value
+ * Body é anexado como último argumento do comando.
+ * NÃO precisa ser JSON.
  */
 async function upstash(path, bodyValue) {
   assertRedisEnv();
@@ -23,13 +23,14 @@ async function upstash(path, bodyValue) {
   const url = `${UPSTASH_REDIS_REST_URL}${path}`;
 
   const hasBody = bodyValue !== undefined;
+
   const res = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
-      "Content-Type": "application/json",
+      "Content-Type": "text/plain",
     },
-    body: hasBody ? JSON.stringify(bodyValue) : undefined,
+    body: hasBody ? String(bodyValue) : undefined,
   });
 
   const data = await res.json().catch(() => ({}));
@@ -58,17 +59,11 @@ export async function redisGet(key) {
   return upstash(`/GET/${encodeURIComponent(key)}`);
 }
 
-/**
- * ✅ IMPORTANT:
- * - If value is "", using /SET/key/<value> would miss the last segment and fail.
- * - So we always send value in POST body: POST /SET/<key> with bodyValue appended.
- */
 export async function redisSet(key, value) {
   if (value === undefined) {
-    throw new Error("redisSet: value is required (can be empty string, but not undefined)");
+    throw new Error("redisSet: value is required");
   }
   const k = encodeURIComponent(key);
-  // value can be "", must be preserved
   return upstash(`/SET/${k}`, String(value));
 }
 
@@ -84,7 +79,6 @@ export async function redisIncrBy(key, delta = 1) {
   );
 }
 
-// 🔹 detectar tipo da chave
 export async function redisType(key) {
   return upstash(`/TYPE/${encodeURIComponent(key)}`);
 }
