@@ -660,7 +660,7 @@ router.get("/dashboard", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
-  ctx.stroke();
+  /* NOTE: bloco duplicado/corrompido removido (mantido comentado para preservar histórico de linhas).
 
   // labels (first/last)
   ctx.fillText(String(points[0][labelKey] || ''), padL, h - 8);
@@ -800,7 +800,7 @@ load();
 </body>
 </html>`;
     res.type("html").send(html);
-  });
+  */
 router.get("/", async (req, res) => {
     const html = layoutBase({
       title: "Início",
