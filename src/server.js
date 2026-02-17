@@ -14,7 +14,7 @@ import { touch24hWindow } from "./services/window24h.js";
 import { sendWhatsAppText } from "./services/meta/whatsapp.js";
 
 const APP_NAME = "amigo-das-vendas";
-const APP_VERSION = "16.0.3-modular-onboarding-sendtext-fix";
+const APP_VERSION = "16.0.4-modular-onboarding-doc-validate";
 
 const app = express();
 app.set("trust proxy", true);
@@ -82,12 +82,72 @@ async function sendText(to, text) {
   if (!waId) throw new Error("sendText: missing waId");
   if (!msg) throw new Error("sendText: missing text");
 
-  // Se a função foi declarada com 1 parâmetro, assumimos assinatura objeto.
-  // Caso contrário, assumimos (to, text).
   if (typeof sendWhatsAppText === "function" && sendWhatsAppText.length <= 1) {
     return await sendWhatsAppText({ to: waId, text: msg });
   }
   return await sendWhatsAppText(waId, msg);
+}
+
+// ===== CPF/CNPJ validation (DV) =====
+function onlyDigits(s) {
+  return String(s || "").replace(/\D+/g, "");
+}
+function allSameDigits(s) {
+  return /^(\d)\1+$/.test(s);
+}
+
+function isValidCPF(cpfRaw) {
+  const cpf = onlyDigits(cpfRaw);
+  if (cpf.length !== 11) return false;
+  if (allSameDigits(cpf)) return false;
+
+  const calcDV = (base, factorStart) => {
+    let sum = 0;
+    for (let i = 0; i < base.length; i++) {
+      sum += Number(base[i]) * (factorStart - i);
+    }
+    const r = sum % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+
+  const base9 = cpf.slice(0, 9);
+  const dv1 = calcDV(base9, 10);
+  const base10 = base9 + String(dv1);
+  const dv2 = calcDV(base10, 11);
+
+  return cpf === base9 + String(dv1) + String(dv2);
+}
+
+function isValidCNPJ(cnpjRaw) {
+  const cnpj = onlyDigits(cnpjRaw);
+  if (cnpj.length !== 14) return false;
+  if (allSameDigits(cnpj)) return false;
+
+  const calcDV = (base, weights) => {
+    let sum = 0;
+    for (let i = 0; i < weights.length; i++) {
+      sum += Number(base[i]) * weights[i];
+    }
+    const r = sum % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+
+  const w1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  const w2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+
+  const base12 = cnpj.slice(0, 12);
+  const dv1 = calcDV(base12, w1);
+  const base13 = base12 + String(dv1);
+  const dv2 = calcDV(base13, w2);
+
+  return cnpj === base12 + String(dv1) + String(dv2);
+}
+
+function validateCpfCnpj(docRaw) {
+  const d = onlyDigits(docRaw);
+  if (d.length === 11) return { ok: isValidCPF(d), type: "CPF", digits: d };
+  if (d.length === 14) return { ok: isValidCNPJ(d), type: "CNPJ", digits: d };
+  return { ok: false, type: "UNKNOWN", digits: d };
 }
 
 function welcomeAskNameMessage() {
@@ -114,6 +174,13 @@ app.get("/", (req, res) => {
 
 app.get("/health", (req, res) => {
   return res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION });
+});
+
+// ✅ Endpoint de teste de CPF/CNPJ (admin)
+app.get("/admin/validate-doc", basicAuth, async (req, res) => {
+  const doc = String(req.query.doc || "");
+  const r = validateCpfCnpj(doc);
+  return res.json(r);
 });
 
 // ===== Meta verify =====
@@ -146,7 +213,7 @@ app.post("/webhook", async (req, res) => {
       // garante estado base do usuário
       await ensureUserExists(waId);
 
-      // ===== PASSO 16.2: onboarding nome completo =====
+      // ===== onboarding nome completo =====
       const fullName = await getUserFullName(waId);
 
       if (!fullName) {
