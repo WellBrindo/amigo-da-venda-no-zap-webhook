@@ -3,7 +3,7 @@ import express from "express";
 import { asaasRouter } from "./routes/asaas.js";
 
 const APP_NAME = "amigo-das-vendas";
-const APP_VERSION = "16.0.5-modular-fix-waitname-loop";
+const APP_VERSION = "16.0.6-modular-fix-name-persistence";
 
 const app = express();
 app.set("trust proxy", true);
@@ -63,6 +63,10 @@ function nowMs() {
   return Date.now();
 }
 
+function normalizeSpaces(s) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+
 function normalizeDoc(doc) {
   return String(doc || "").replace(/\D/g, "");
 }
@@ -112,56 +116,20 @@ function validateDoc(raw) {
   return { ok: false, type: "UNKNOWN", doc };
 }
 
-// ===================== Name validation (anti-loop) =====================
-function normalizeSpaces(s) {
-  return String(s || "").replace(/\s+/g, " ").trim();
-}
-
+// ===================== Name validation (anti-descrition-as-name) =====================
 function looksLikeRealFullName(text) {
   const t = normalizeSpaces(text);
   if (t.length < 8) return false;
-
-  // precisa de pelo menos 2 palavras
   const parts = t.split(" ").filter(Boolean);
   if (parts.length < 2) return false;
-
-  // não pode ter números
   if (/\d/.test(t)) return false;
 
   const lower = t.toLowerCase();
+  const blockedStarts = ["vendo", "faço", "trabalho", "sou", "promoção", "preço", "valor"];
+  if (blockedStarts.some((s) => lower.startsWith(s))) return false;
 
-  // Bloqueia mensagens típicas de descrição de produto/serviço
-  const blockedStarts = [
-    "vendo",
-    "vendo bolo",
-    "vendo doces",
-    "faço",
-    "trabalho",
-    "sou",
-    "promoção",
-    "preço",
-    "valor",
-  ];
-  for (const s of blockedStarts) {
-    if (lower.startsWith(s)) return false;
-  }
-
-  const blockedContains = [
-    "r$",
-    "reais",
-    "entrego",
-    "entrega",
-    "mooca",
-    "whatsapp",
-    "grupo",
-    "por ",
-    "apenas",
-    "cupom",
-    "frete",
-  ];
-  for (const c of blockedContains) {
-    if (lower.includes(c)) return false;
-  }
+  const blockedContains = ["r$", "reais", "entrego", "entrega", "por ", "apenas", "cupom", "frete"];
+  if (blockedContains.some((c) => lower.includes(c))) return false;
 
   return true;
 }
@@ -235,6 +203,9 @@ async function sendWhatsAppText(to, text) {
 function userKey(waId) {
   return `user:${waId}`;
 }
+function userNameKey(waId) {
+  return `user_name:${waId}`; // ✅ chave separada só para o nome
+}
 function usersIndexKey() {
   return `users:index`;
 }
@@ -251,8 +222,16 @@ async function loadUser(waId) {
 
 async function saveUser(user) {
   user.updatedAtMs = nowMs();
+
+  // salva JSON principal
   await redisSet(userKey(user.waId), JSON.stringify(user));
 
+  // ✅ salva nome em key separado (robusto)
+  if (user.fullName) {
+    await redisSet(userNameKey(user.waId), String(user.fullName));
+  }
+
+  // index simples
   const idxRaw = (await redisGet(usersIndexKey())) || "[]";
   let idx = [];
   try {
@@ -268,6 +247,7 @@ async function saveUser(user) {
 
 async function ensureUser(waId) {
   let u = await loadUser(waId);
+
   if (!u) {
     u = {
       waId,
@@ -288,16 +268,26 @@ async function ensureUser(waId) {
     await saveUser(u);
   }
 
-  // ✅ Auto-correção: se já tem nome, nunca pode ficar em WAIT_NAME
-  if (u.fullName && u.status === "WAIT_NAME") {
-    u.status = "TRIAL";
-    await saveUser(u);
+  // ✅ Se JSON veio sem nome, tenta recuperar do key separado
+  if (!u.fullName) {
+    const name = await redisGet(userNameKey(waId));
+    if (name) {
+      u.fullName = String(name);
+      if (u.status === "WAIT_NAME") u.status = "TRIAL";
+      await saveUser(u);
+    }
   }
 
-  // Se não tem nome, força WAIT_NAME
-  if (!u.fullName && u.status !== "WAIT_NAME") {
+  // Se ainda sem nome, força WAIT_NAME
+  if (!u.fullName) {
     u.status = "WAIT_NAME";
     await saveUser(u);
+  } else {
+    // se tem nome, nunca pode ficar WAIT_NAME
+    if (u.status === "WAIT_NAME") {
+      u.status = "TRIAL";
+      await saveUser(u);
+    }
   }
 
   return u;
@@ -353,7 +343,7 @@ function invalidDocText() {
   );
 }
 
-// ===================== Health/Admin =====================
+// ===================== Routes =====================
 app.get("/", (req, res) => res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION }));
 app.get("/health", (req, res) => res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION }));
 
@@ -372,15 +362,17 @@ app.get("/admin", basicAuth, (req, res) => {
         .muted { color: #666; }
         .row { display:flex; gap: 14px; flex-wrap: wrap; }
         .pill { border:1px solid #eee; border-radius: 10px; padding: 10px 12px; }
+        code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
       </style>
     </head>
     <body>
       <div class="card">
         <h2>Admin</h2>
-        <p class="muted">Version: ${escapeHtml(APP_VERSION)}</p>
+        <p class="muted">Version: <code>${escapeHtml(APP_VERSION)}</code></p>
         <div class="row">
           <div class="pill"><a href="/health">✅ Health</a></div>
           <div class="pill"><a href="/admin/redis-ping">🧠 Redis Ping</a></div>
+          <div class="pill"><a href="/admin/debug-user?waId=5511960765975">🧪 Debug User</a></div>
         </div>
       </div>
     </body>
@@ -399,7 +391,33 @@ app.get("/admin/redis-ping", basicAuth, async (req, res) => {
   }
 });
 
-// ===================== Meta webhook verify =====================
+// ✅ Debug sem expor CPF/doc
+app.get("/admin/debug-user", basicAuth, async (req, res) => {
+  try {
+    const waId = String(req.query.waId || "").trim();
+    if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+
+    const u = await loadUser(waId);
+    const nameKey = await redisGet(userNameKey(waId));
+
+    return res.json({
+      ok: true,
+      waId,
+      userExists: !!u,
+      status: u?.status || "",
+      plan: u?.plan || "",
+      trialUsed: u?.trialUsed || 0,
+      fullNameInJson: u?.fullName ? true : false,
+      fullNameValue: u?.fullName ? u.fullName : "",
+      fullNameKeyExists: !!nameKey,
+      fullNameKeyValue: nameKey ? String(nameKey) : "",
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ===================== Meta verify =====================
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -410,7 +428,7 @@ app.get("/webhook", (req, res) => {
   return res.status(403).send("Forbidden");
 });
 
-// ===================== Meta webhook receive =====================
+// ===================== Meta receive =====================
 app.post("/webhook", async (req, res) => {
   try {
     res.json({ ok: true });
@@ -434,7 +452,6 @@ app.post("/webhook", async (req, res) => {
 
     // ===== WAIT_NAME =====
     if (u.status === "WAIT_NAME") {
-      // só aceita nome se parecer NOME REAL
       if (!looksLikeRealFullName(body)) {
         await sendWhatsAppText(waId, welcomeAskNameText());
         return;
