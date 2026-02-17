@@ -1,4 +1,6 @@
 // src/services/redis.js
+// Upstash Redis REST helpers (Node.js ESM)
+
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
@@ -8,7 +10,7 @@ function assertRedisEnv() {
   }
 }
 
-async function upstash(path, bodyObj) {
+async function upstash(path) {
   assertRedisEnv();
 
   const url = `${UPSTASH_REDIS_REST_URL}${path}`;
@@ -19,7 +21,6 @@ async function upstash(path, bodyObj) {
       Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: bodyObj ? JSON.stringify(bodyObj) : undefined,
   });
 
   const data = await res.json().catch(() => ({}));
@@ -66,19 +67,23 @@ export async function redisIncrBy(key, delta = 1) {
   );
 }
 
+// 🔹 NOVO — detectar tipo da chave
+export async function redisType(key) {
+  return upstash(`/TYPE/${encodeURIComponent(key)}`);
+}
+
 // -----------------
 // Sets
 // -----------------
 
 export async function redisSAdd(key, ...members) {
-  const list = members
-    .flat()
-    .map((m) => String(m))
-    .filter((m) => m.trim().length > 0);
+  const list =
+    members.length === 1 && Array.isArray(members[0]) ? members[0] : members;
 
-  if (list.length === 0) return 0;
+  const filtered = (list || []).map((m) => String(m)).filter(Boolean);
+  if (filtered.length === 0) return 0;
 
-  const encoded = list.map((m) => encodeURIComponent(m)).join("/");
+  const encoded = filtered.map((m) => encodeURIComponent(m)).join("/");
   return upstash(`/SADD/${encodeURIComponent(key)}/${encoded}`);
 }
 
