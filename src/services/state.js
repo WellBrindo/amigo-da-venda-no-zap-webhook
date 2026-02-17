@@ -67,7 +67,8 @@ function maskDocFromParts(docType, docLast4) {
   return { docType: t, docLast4: l4 };
 }
 
-async function indexUser(waId) {
+// ✅ AGORA É EXPORTADA (para window24h.js importar corretamente)
+export async function indexUser(waId) {
   const id = safeStr(waId);
   if (!id) return false;
   await redisSAdd(USERS_INDEX_KEY, id);
@@ -159,7 +160,6 @@ export async function resetUserQuotaUsed(waId) {
   await redisSet(keyQuotaUsed(waId), "0");
   return 0;
 }
-
 
 export async function setUserQuotaUsed(waId, value) {
   await indexUser(waId);
