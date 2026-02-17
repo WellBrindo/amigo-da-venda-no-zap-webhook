@@ -9,7 +9,7 @@ import {
   getUserSnapshot,
   listUsers,
   clearLastPrompt, // ✅ V16.4.6: limpar via DEL (não SET "")
-  setLastPrompt,  // ✅ TESTE CONTROLADO: forçar setLastPrompt("")
+  setLastPrompt, // ✅ TESTE CONTROLADO: forçar setLastPrompt("")
 } from "../services/state.js";
 
 import {
@@ -20,18 +20,19 @@ import {
   nowMs,
 } from "../services/window24h.js";
 
+import { getGlobalDescriptionMetrics, getUserDescriptionMetrics } from "../services/metrics.js";
+
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
-import { listPlans, upsertPlan, setPlanActive } from "../services/plans.js";
-
-import { redisLRange } from "../services/redis.js";
-
-import { pushSystemAlert, listSystemAlerts, getSystemAlertsCount } from "../services/alerts.js";
 import {
-  createCampaignAndDispatch,
-  getCampaign,
-  listCampaigns,
-  reprocessCampaignForActiveWindow,
-} from "../services/broadcast.js";
+  listPlans,
+  upsertPlan,
+  setPlanActive,
+  getPlansHealth,
+  listSystemAlerts,
+  getSystemAlertsCount,
+} from "../services/plans.js";
+
+import { createCampaignAndDispatch, listCampaigns, getCampaign } from "../services/broadcast.js";
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -54,6 +55,250 @@ function requireWaId(req) {
 
 export function adminRouter() {
   const router = Router();
+
+  // ===================== Dashboard (Métricas consolidadas) =====================
+  // ✅ V16.4.9 — Dashboard consolidado (global + por usuário)
+  function toInt(v, def = 0) {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.trunc(n) : def;
+  }
+
+  async function mapLimit(items, limit, fn) {
+    const arr = Array.isArray(items) ? items : [];
+    const lim = Math.max(1, toInt(limit, 10));
+    const out = new Array(arr.length);
+    let i = 0;
+
+    async function worker() {
+      while (i < arr.length) {
+        const idx = i++;
+        try {
+          out[idx] = await fn(arr[idx], idx);
+        } catch (e) {
+          out[idx] = { __error: true, message: String(e?.message || e) };
+        }
+      }
+    }
+
+    const workers = [];
+    for (let w = 0; w < Math.min(lim, arr.length); w++) workers.push(worker());
+    await Promise.all(workers);
+    return out;
+  }
+
+  router.get("/dashboard/data", async (req, res) => {
+    const waId = String(req.query?.waId || "").trim();
+
+    const global = await getGlobalDescriptionMetrics();
+    const window24hCount = await countWindow24hActive();
+
+    let users = [];
+    let usersError = "";
+    try {
+      users = await listUsers();
+    } catch (e) {
+      usersError = String(e?.message || e);
+      users = [];
+    }
+
+    const totalUsers = users.length;
+
+    // Status breakdown (best-effort)
+    const statuses = {
+      TRIAL: 0,
+      ACTIVE: 0,
+      WAIT_PLAN: 0,
+      PAYMENT_PENDING: 0,
+      BLOCKED: 0,
+      UNKNOWN: 0,
+    };
+
+    // Plano breakdown (best-effort)
+    const plans = {}; // { CODE: count }
+
+    const snapshots = await mapLimit(users, 25, async (id) => {
+      const snap = await getUserSnapshot(id);
+      return snap || {};
+    });
+
+    for (const s of snapshots) {
+      const st = String(s?.status || "").toUpperCase() || "UNKNOWN";
+      if (statuses[st] === undefined) statuses.UNKNOWN++;
+      else statuses[st]++;
+
+      const p = String(s?.plan || "").toUpperCase().trim();
+      if (p) plans[p] = (plans[p] || 0) + 1;
+    }
+
+    // User section (optional)
+    let user = null;
+    if (waId) {
+      const snap = await getUserSnapshot(waId);
+      const metrics = await getUserDescriptionMetrics(waId);
+      user = { snapshot: snap || {}, metrics };
+    }
+
+    res.json({
+      ok: true,
+      ts: Date.now(),
+      global,
+      window24hCount,
+      users: {
+        total: totalUsers,
+        statuses,
+        plans,
+        error: usersError || undefined,
+      },
+      user,
+    });
+  });
+
+  router.get("/dashboard", async (req, res) => {
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .card { max-width: 1100px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    .muted { color: #666; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+    input, button { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #ddd; }
+    button { cursor: pointer; background: white; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(3, 1fr); }
+    @media (max-width: 950px) { .grid { grid-template-columns: 1fr; } }
+    .kpi { border: 1px solid #eee; border-radius: 12px; padding: 12px; }
+    .kpi h3 { margin: 0 0 6px 0; font-size: 14px; color:#555; font-weight: 600; }
+    .kpi .v { font-size: 28px; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border-bottom: 1px solid #eee; padding: 8px 6px; text-align: left; }
+    code { background:#f6f6f6; padding:2px 6px; border-radius: 6px; }
+    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
+    .pill { display:inline-block; padding: 4px 10px; border: 1px solid #eee; border-radius: 999px; margin: 4px 6px 0 0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>📊 Dashboard</h2>
+    <p><a href="/admin">⬅ Voltar</a></p>
+
+    <div class="row" style="margin: 10px 0 14px 0;">
+      <input id="waId" placeholder="waId (opcional) para métricas individuais" style="min-width: 360px;" />
+      <button onclick="load()">Atualizar</button>
+    </div>
+
+    <div class="grid">
+      <div class="kpi">
+        <h3>Descrições hoje (global)</h3>
+        <div class="v" id="kpiDay">—</div>
+        <div class="muted" id="kpiDayLabel"></div>
+      </div>
+      <div class="kpi">
+        <h3>Descrições no mês (global)</h3>
+        <div class="v" id="kpiMonth">—</div>
+        <div class="muted" id="kpiMonthLabel"></div>
+      </div>
+      <div class="kpi">
+        <h3>Usuários na janela 24h</h3>
+        <div class="v" id="kpi24h">—</div>
+        <div class="muted">últimas 24 horas (inbound)</div>
+      </div>
+    </div>
+
+    <h3 style="margin-top:18px;">Usuários</h3>
+    <p class="muted">Totais e distribuição por status / plano (best-effort).</p>
+
+    <div class="row">
+      <div class="pill">Total: <b id="uTotal">—</b></div>
+      <div class="pill">TRIAL: <b id="uTrial">—</b></div>
+      <div class="pill">ACTIVE: <b id="uActive">—</b></div>
+      <div class="pill">WAIT_PLAN: <b id="uWait">—</b></div>
+      <div class="pill">PAYMENT_PENDING: <b id="uPayPend">—</b></div>
+      <div class="pill">BLOCKED: <b id="uBlocked">—</b></div>
+      <div class="pill">UNKNOWN: <b id="uUnknown">—</b></div>
+    </div>
+
+    <div id="usersError" class="muted" style="margin-top:8px;"></div>
+
+    <h3 style="margin-top:18px;">Planos (contagem)</h3>
+    <div id="plans"></div>
+
+    <h3 style="margin-top:18px;">Métricas por usuário (opcional)</h3>
+    <div id="userBox" class="muted">Informe um waId acima para ver métricas individuais.</div>
+
+    <hr style="margin-top:18px;"/>
+    <details>
+      <summary class="muted">Ver JSON bruto</summary>
+      <pre id="raw"></pre>
+    </details>
+  </div>
+
+<script>
+function esc(s){
+  return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'","&#39;");
+}
+
+async function load(){
+  const waId = (document.getElementById('waId').value || '').trim();
+  const url = waId ? '/admin/dashboard/data?waId=' + encodeURIComponent(waId) : '/admin/dashboard/data';
+  const r = await fetch(url);
+  const j = await r.json();
+  document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+
+  const g = j.global || {};
+  document.getElementById('kpiDay').textContent = g.dayCount ?? '0';
+  document.getElementById('kpiDayLabel').textContent = g.day ? ('Dia: ' + g.day) : '';
+  document.getElementById('kpiMonth').textContent = g.monthCount ?? '0';
+  document.getElementById('kpiMonthLabel').textContent = g.month ? ('Mês: ' + g.month) : '';
+  document.getElementById('kpi24h').textContent = j.window24hCount ?? '0';
+
+  const u = (j.users || {});
+  document.getElementById('uTotal').textContent = u.total ?? '0';
+  const st = u.statuses || {};
+  document.getElementById('uTrial').textContent = st.TRIAL ?? '0';
+  document.getElementById('uActive').textContent = st.ACTIVE ?? '0';
+  document.getElementById('uWait').textContent = st.WAIT_PLAN ?? '0';
+  document.getElementById('uPayPend').textContent = st.PAYMENT_PENDING ?? '0';
+  document.getElementById('uBlocked').textContent = st.BLOCKED ?? '0';
+  document.getElementById('uUnknown').textContent = st.UNKNOWN ?? '0';
+
+  const err = u.error ? ('⚠️ users:index: ' + u.error) : '';
+  document.getElementById('usersError').textContent = err;
+
+  const plans = u.plans || {};
+  const planHtml = Object.keys(plans).sort().map(k => '<span class="pill"><code>'+esc(k)+'</code>: <b>'+plans[k]+'</b></span>').join(' ');
+  document.getElementById('plans').innerHTML = planHtml || '<span class="muted">Sem dados.</span>';
+
+  const user = j.user;
+  if (!user) {
+    document.getElementById('userBox').innerHTML = '<span class="muted">Informe um waId acima para ver métricas individuais.</span>';
+  } else {
+    const sm = user.snapshot || {};
+    const um = user.metrics || {};
+    const box = \`
+      <div class="kpi" style="margin-top:10px;">
+        <h3>Usuário <code>\${esc(sm.waId || waId)}</code></h3>
+        <div class="muted">status: <b>\${esc(sm.status || '—')}</b> · plano: <b>\${esc(sm.plan || '—')}</b></div>
+        <div style="margin-top:10px;" class="row">
+          <div class="pill">Descrições hoje: <b>\${um.dayCount ?? 0}</b></div>
+          <div class="pill">Descrições mês: <b>\${um.monthCount ?? 0}</b></div>
+          <div class="pill">quotaUsed: <b>\${esc(sm.quotaUsed ?? '—')}</b></div>
+          <div class="pill">trialUsed: <b>\${esc(sm.trialUsed ?? '—')}</b></div>
+        </div>
+      </div>\`;
+    document.getElementById('userBox').innerHTML = box;
+  }
+}
+
+load();
+</script>
+</body>
+</html>`;
+    res.type("html").send(html);
+  });
+
 
   router.get("/", async (req, res) => {
     const html = `<!doctype html>
@@ -84,10 +329,11 @@ export function adminRouter() {
     <div class="grid">
       <div>
         <h3>Produto</h3>
+        <a href="/admin/dashboard">📊 Dashboard</a><br/>
         <a href="/admin/plans">💳 Planos</a><br/>
-        <a href="/admin/window24h-ui">🕒 Janela 24h</a><br/>
         <a href="/admin/broadcast-ui">📣 Broadcast</a><br/>
         <a href="/admin/campaigns-ui">📦 Campanhas</a><br/>
+        <a href="/admin/window24h-ui">🕒 Janela 24h</a><br/>
       </div>
       <div>
         <h3>Atalhos técnicos</h3>
@@ -146,6 +392,9 @@ async function go(path){
     return res.status(200).send(html);
   });
 
+  // -----------------------------
+  // Planos
+  // -----------------------------
   router.get("/plans", async (req, res) => {
     const plans = await listPlans({ includeInactive: true });
 
@@ -221,22 +470,21 @@ async function create(){
   const body = {
     code: (document.getElementById('code').value||'').trim(),
     name: (document.getElementById('name').value||'').trim(),
-    priceCents: Number((document.getElementById('priceCents').value||'').trim()),
-    monthlyQuota: Number((document.getElementById('monthlyQuota').value||'').trim()),
+    priceCents: Number(document.getElementById('priceCents').value||0),
+    monthlyQuota: Number(document.getElementById('monthlyQuota').value||0),
     description: (document.getElementById('description').value||'').trim(),
-    active: true
+    active: true,
   };
   const r = await fetch('/admin/plans', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   const j = await r.json().catch(()=>({}));
-  document.getElementById('msg').textContent = JSON.stringify(j,null,2);
-  if(j.ok) location.reload();
+  document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
+  if(j.ok) setTimeout(()=>location.reload(), 300);
 }
-
 async function toggle(code, active){
-  const r = await fetch('/admin/plans/toggle?code=' + encodeURIComponent(code) + '&active=' + encodeURIComponent(active));
+  const r = await fetch('/admin/plans/'+encodeURIComponent(code)+'/active', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({active}) });
   const j = await r.json().catch(()=>({}));
-  document.getElementById('msg').textContent = JSON.stringify(j,null,2);
-  if(j.ok) location.reload();
+  document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
+  if(j.ok) setTimeout(()=>location.reload(), 300);
 }
 </script>
 </body>
@@ -248,25 +496,90 @@ async function toggle(code, active){
 
   router.post("/plans", async (req, res) => {
     try {
-      const plan = await upsertPlan(req.body);
+      const plan = await upsertPlan(req.body || {});
       return res.json({ ok: true, plan });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
     }
   });
 
-  router.get("/plans/toggle", async (req, res) => {
+  router.post("/plans/:code/active", async (req, res) => {
     try {
-      const code = String(req.query?.code || "").trim();
-      const active = String(req.query?.active || "false").trim() === "true";
-      const plan = await setPlanActive(code, active);
+      const active = Boolean(req.body?.active);
+      const plan = await setPlanActive(req.params.code, active);
       return res.json({ ok: true, plan });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
     }
   });
 
+  // -----------------------------
+  // ✅ Health Planos
+  // -----------------------------
+  router.get("/health-plans", async (req, res) => {
+    const h = await getPlansHealth({ includeInactive: true });
+    return res.json({ ok: true, health: h });
+  });
+
+  // -----------------------------
+  // ✅ Alertas do Sistema (UI + APIs)
+  // -----------------------------
+  router.get("/alerts-count", async (req, res) => {
+    const count = await getSystemAlertsCount();
+    return res.json({ ok: true, count });
+  });
+
+  router.get("/alerts", async (req, res) => {
+    const limit = Number(req.query?.limit || 50);
+    const items = await listSystemAlerts(limit);
+    return res.json({ ok: true, count: items.length, items });
+  });
+
+  router.get("/alerts-ui", async (req, res) => {
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Alertas</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
+    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>🚨 Alertas do Sistema</h2>
+    <p><a href="/admin">⬅ Voltar</a></p>
+    <div class="row">
+      <input id="limit" placeholder="limit (ex: 50)" value="50" />
+      <button onclick="load()">Carregar</button>
+    </div>
+    <pre id="out"></pre>
+  </div>
+<script>
+async function load(){
+  const limit = (document.getElementById('limit').value||'50').trim();
+  const r = await fetch('/admin/alerts?limit='+encodeURIComponent(limit));
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+}
+load();
+</script>
+</body>
+</html>`;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  // -----------------------------
+  // Janela 24h (UI já existente)
+  // -----------------------------
   router.get("/window24h-ui", async (req, res) => {
+    const count = await countWindow24hActive();
     const html = `<!doctype html>
 <html>
 <head>
@@ -276,33 +589,26 @@ async function toggle(code, active){
   <style>
     body { font-family: Arial, sans-serif; padding: 24px; }
     .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
     .muted { color:#666; }
     pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+    button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
   </style>
 </head>
 <body>
   <div class="card">
     <h2>🕒 Janela 24h</h2>
+    <div class="muted">Usuários dentro da janela de 24 horas.</div>
     <p><a href="/admin">⬅ Voltar</a></p>
-
-    <div class="row">
-      <button onclick="load()">Atualizar</button>
-      <span class="muted">Total ativos na janela: <b id="count">...</b></span>
-    </div>
-
-    <pre id="out" class="muted">Clique em "Atualizar".</pre>
+    <p><b>Ativos agora:</b> ${escapeHtml(String(count))}</p>
+    <button onclick="load()">Carregar lista (JSON)</button>
+    <pre id="out"></pre>
   </div>
-
 <script>
 async function load(){
-  const r1 = await fetch('/admin/window24h');
-  const j1 = await r1.json().catch(()=>({}));
-  document.getElementById('count').textContent = (j1.count ?? 0);
-  document.getElementById('out').textContent = JSON.stringify(j1, null, 2);
+  const r = await fetch("/admin/window24h");
+  const j = await r.json();
+  document.getElementById("out").textContent = JSON.stringify(j, null, 2);
 }
-load();
 </script>
 </body>
 </html>`;
@@ -311,10 +617,165 @@ load();
     return res.status(200).send(html);
   });
 
-  // ----------------------------
-  // ✅ State test endpoints
-  // ----------------------------
+  // -----------------------------
+  // ✅ Broadcast UI
+  // -----------------------------
+  router.get("/broadcast-ui", async (req, res) => {
+    const plans = await listPlans({ includeInactive: false });
 
+    const options =
+      `<option value="">(Todos os planos)</option>` +
+      plans
+        .map((p) => `<option value="${escapeHtml(p.code)}">${escapeHtml(p.name)} (${escapeHtml(p.code)})</option>`)
+        .join("");
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Broadcast</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    input, textarea, select, button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; }
+    textarea { width: 100%; min-height: 140px; }
+    button { cursor:pointer; background:white; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
+    .muted { color:#666; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>📣 Broadcast</h2>
+    <p><a href="/admin">⬅ Voltar</a> | <a href="/admin/campaigns-ui">📦 Ver campanhas</a></p>
+
+    <div class="row">
+      <label>Plano alvo:</label>
+      <select id="plan">${options}</select>
+      <span class="muted">Envio imediato só para quem está na janela 24h. Fora da janela fica pendente e envia automaticamente quando entrar.</span>
+    </div>
+
+    <p>
+      <input id="subject" placeholder="Assunto (interno)" style="width:100%" />
+    </p>
+    <p>
+      <textarea id="text" placeholder="Texto do broadcast (WhatsApp)"></textarea>
+    </p>
+
+    <div class="row">
+      <button onclick="send()">Enviar campanha</button>
+    </div>
+
+    <pre id="out"></pre>
+  </div>
+
+<script>
+async function send(){
+  const plan = (document.getElementById('plan').value||'').trim();
+  const subject = (document.getElementById('subject').value||'').trim();
+  const text = (document.getElementById('text').value||'').trim();
+
+  const body = { subject, text };
+  if(plan) body.planTargets = [plan];
+
+  const r = await fetch('/admin/campaigns', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+}
+</script>
+</body>
+</html>`;
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  // -----------------------------
+  // ✅ Campanhas (UI + APIs)
+  // -----------------------------
+  router.get("/campaigns-ui", async (req, res) => {
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Campanhas</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
+    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>📦 Campanhas</h2>
+    <p><a href="/admin">⬅ Voltar</a> | <a href="/admin/broadcast-ui">📣 Nova campanha</a></p>
+
+    <div class="row">
+      <input id="limit" placeholder="limit (ex: 30)" value="30" />
+      <button onclick="load()">Carregar</button>
+    </div>
+
+    <pre id="out"></pre>
+  </div>
+
+<script>
+async function load(){
+  const limit = (document.getElementById('limit').value||'30').trim();
+  const r = await fetch('/admin/campaigns?limit='+encodeURIComponent(limit));
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+}
+load();
+</script>
+</body>
+</html>`;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  router.get("/campaigns", async (req, res) => {
+    const limit = Number(req.query?.limit || 30);
+    const data = await listCampaigns(limit);
+    return res.json(data);
+  });
+
+  router.get("/campaigns/:id", async (req, res) => {
+    const id = String(req.params.id || "").trim();
+    const data = await getCampaign(id);
+    return res.json(data);
+  });
+
+  router.post("/campaigns", async (req, res) => {
+    try {
+      const subject = String(req.body?.subject || "").trim();
+      const text = String(req.body?.text || "").trim();
+      const planTargets = req.body?.planTargets || null;
+
+      const r = await createCampaignAndDispatch({
+        subject,
+        text,
+        planTargets,
+        mode: "TEXT",
+      });
+
+      return res.json(r);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
+  // -----------------------------
+  // Testes / State (mantidos)
+  // -----------------------------
   router.get("/state-test/reset-trial", async (req, res) => {
     try {
       const waId = requireWaId(req);
@@ -322,6 +783,10 @@ load();
       await setUserPlan(waId, "");
       await setUserQuotaUsed(waId, 0);
       await setUserTrialUsed(waId, 0);
+
+      // ✅ V16.4.6: Upstash REST não aceita SET com valor vazio de forma confiável
+      await clearLastPrompt(waId);
+
       const user = await getUserSnapshot(waId);
       return res.json({ ok: true, action: "reset-trial", waId, user });
     } catch (err) {
@@ -329,26 +794,10 @@ load();
     }
   });
 
-  router.get("/state-test/clear-lastprompt", async (req, res) => {
-    try {
-      const waId = requireWaId(req);
-      await clearLastPrompt(waId);
-      const user = await getUserSnapshot(waId);
-      return res.json({ ok: true, action: "clear-lastprompt", waId, user });
-    } catch (err) {
-      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
-    }
-  });
-
-  // ✅ TESTE CONTROLADO (produção): força setLastPrompt("")
-  // Objetivo: provar que o hardening no state.js está funcionando (vazio => DEL)
   router.get("/state-test/set-lastprompt-empty", async (req, res) => {
     try {
       const waId = requireWaId(req);
-
-      // 🔴 proposital: chamar setLastPrompt com string vazia
       await setLastPrompt(waId, "");
-
       const user = await getUserSnapshot(waId);
       return res.json({ ok: true, action: "set-lastprompt-empty", waId, user });
     } catch (err) {
@@ -399,449 +848,6 @@ load();
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
-  });
-
-  // ----------------------------
-  // ✅ Broadcast Inteligente (Campanhas)
-  // - POST /admin/campaigns  => cria + dispatch (janela 24h)
-  // - GET  /admin/campaigns  => lista
-  // - GET  /admin/campaigns/:id => detalhes
-  // - UI: /admin/broadcast-ui e /admin/campaigns-ui
-  // ----------------------------
-
-  router.get("/campaigns", async (req, res) => {
-    try {
-      const limit = Number(req.query?.limit || 50);
-      const data = await listCampaigns(limit);
-
-      const campaigns = Array.isArray(data?.campaigns) ? data.campaigns : [];
-      const items = campaigns.map((c) => {
-        const meta = c?.meta || {};
-        const stats = c?.stats || {};
-        return {
-          id: String(c?.id || ""),
-          createdAt: meta.createdAt || null,
-          subject: meta.subject || "",
-          text: meta.text || "",
-          planCodes: Array.isArray(meta.planTargets) ? meta.planTargets : [],
-          counts: {
-            sentCount: Number(stats.sent || 0),
-            pendingCount: Number(stats.pending || 0),
-            errorCount: Number(stats.errors || 0),
-          },
-        };
-      });
-
-      return res.json({ ok: true, returned: items.length, items });
-    } catch (err) {
-      await pushSystemAlert("CAMPAIGNS_LIST_FAILED", { error: String(err?.message || err) });
-      return res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.get("/campaigns/:id", async (req, res) => {
-    try {
-      const id = String(req.params?.id || "").trim();
-      if (!id) return res.status(400).json({ ok: false, error: "id required" });
-
-      const data = await getCampaign(id);
-      const campaign = data?.campaign;
-      if (!campaign) return res.status(404).json({ ok: false, error: "campaign not found" });
-
-      // Errors (últimos 50)
-      const errorsRaw = await redisLRange(`campaign:${id}:errors`, 0, 49).catch(() => []);
-      const errors = (Array.isArray(errorsRaw) ? errorsRaw : []).map((s) => {
-        try {
-          return JSON.parse(String(s));
-        } catch {
-          return { ts: new Date().toISOString(), raw: String(s) };
-        }
-      });
-
-      const meta = campaign?.meta || {};
-      const stats = campaign?.stats || {};
-
-      const item = {
-        id: String(campaign?.id || id),
-        createdAt: meta.createdAt || null,
-        subject: meta.subject || "",
-        text: meta.text || "",
-        planCodes: Array.isArray(meta.planTargets) ? meta.planTargets : [],
-        counts: {
-          sentCount: Number(stats.sent || 0),
-          pendingCount: Number(stats.pending || 0),
-          errorCount: Number(stats.errors || 0),
-        },
-        errors,
-      };
-
-      return res.json({ ok: true, item });
-    } catch (err) {
-      await pushSystemAlert("CAMPAIGN_GET_FAILED", { error: String(err?.message || err) });
-      return res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.post("/campaigns", async (req, res) => {
-    try {
-      const subject = String(req.body?.subject || "").trim();
-      const text = String(req.body?.text || "").trim();
-      const messageType = String(req.body?.messageType || "TEXT").trim().toUpperCase();
-
-      // planCodes pode vir como array ou string CSV
-      let planCodes = req.body?.planCodes ?? [];
-      if (typeof planCodes === "string") {
-        planCodes = planCodes
-          .split(",")
-          .map((s) => String(s).trim())
-          .filter(Boolean);
-      }
-      if (!Array.isArray(planCodes)) planCodes = [];
-
-      if (!subject && !text) {
-        return res.status(400).json({ ok: false, error: "subject or text is required" });
-      }
-
-      // Compat com o modelo novo (broadcast.js)
-      const data = await createCampaignAndDispatch({
-        subject,
-        text,
-        planTargets: planCodes,
-        mode: messageType === "TEMPLATE" ? "TEMPLATE" : "TEXT",
-      });
-
-      // Mantém formato esperado pela UI atual
-      const c = data?.campaign || {};
-      const meta = c?.meta || {};
-      const stats = c?.stats || {};
-      const result = {
-        id: String(c?.id || ""),
-        createdAt: meta.createdAt || null,
-        subject: meta.subject || "",
-        text: meta.text || "",
-        planCodes: Array.isArray(meta.planTargets) ? meta.planTargets : [],
-        counts: {
-          sentCount: Number(stats.sent || 0),
-          pendingCount: Number(stats.pending || 0),
-          errorCount: Number(stats.errors || 0),
-        },
-      };
-
-      return res.json({ ok: true, result });
-    } catch (err) {
-      await pushSystemAlert("CAMPAIGN_CREATE_FAILED", { error: String(err?.message || err) });
-      return res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  // ✅ Reprocessar pendências de uma campanha APENAS para usuários que já estão na janela 24h agora
-  // POST /admin/campaigns/:id/reprocess?limit=5000
-  router.post("/campaigns/:id/reprocess", async (req, res) => {
-    try {
-      const id = String(req.params?.id || "").trim();
-      if (!id) return res.status(400).json({ ok: false, error: "id required" });
-
-      const limit = Number(req.query?.limit || 5000);
-      const result = await reprocessCampaignForActiveWindow(id, { limit });
-
-      return res.json({ ok: true, result });
-    } catch (err) {
-      await pushSystemAlert("CAMPAIGN_REPROCESS_FAILED", { error: String(err?.message || err) });
-      return res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-      return res.json({ ok: true, result });
-    } catch (err) {
-      await pushSystemAlert("CAMPAIGN_CREATE_FAILED", { error: String(err?.message || err) });
-      return res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.get("/broadcast-ui", async (req, res) => {
-    const plans = await listPlans({ includeInactive: true });
-    const planOptions = (plans || [])
-      .filter((p) => p && p.code)
-      .map((p) => {
-        const code = escapeHtml(p.code);
-        const name = escapeHtml(p.name || p.code);
-        return `<label style="display:inline-flex; gap:6px; align-items:center; margin: 6px 10px 6px 0;">
-          <input type="checkbox" name="plan" value="${code}" /> <span>${name} (<code>${code}</code>)</span>
-        </label>`;
-      })
-      .join("");
-
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Broadcast</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    input, textarea, button { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #ddd; }
-    textarea { width: 100%; min-height: 160px; }
-    button { cursor: pointer; background: white; }
-    .muted { color: #666; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    code { background:#f6f6f6; padding:2px 6px; border-radius: 6px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>📣 Broadcast (Campanha)</h2>
-    <p><a href="/admin">⬅ Voltar</a> · <a href="/admin/campaigns-ui">📦 Ver campanhas</a></p>
-
-    <p class="muted">
-      Regras: envia <b>agora</b> somente para quem está na janela 24h; quem estiver fora fica <b>pendente</b> e será enviado automaticamente quando entrar na janela (quando mandar inbound).
-    </p>
-
-    <div class="row">
-      <input id="subject" placeholder="Assunto (opcional)" style="min-width:420px" />
-      <select id="messageType">
-        <option value="TEXT">Texto (agora)</option>
-        <option value="TEMPLATE">Template (futuro)</option>
-      </select>
-      <button onclick="send()">Criar e enviar</button>
-    </div>
-
-    <div style="margin-top: 12px;">
-      <textarea id="text" placeholder="Texto da campanha (ex.: manutenção, aviso, promoção...)"></textarea>
-    </div>
-
-    <h3 style="margin-top:16px;">Filtro por plano</h3>
-    <p class="muted">Se não marcar nenhum, envia para <b>todos</b>.</p>
-    <div>${planOptions || "<span class='muted'>Nenhum plano encontrado.</span>"}</div>
-
-    <pre id="out"></pre>
-  </div>
-
-<script>
-function selectedPlans(){
-  return Array.from(document.querySelectorAll('input[name="plan"]:checked')).map(x => x.value);
-}
-async function send(){
-  const subject = (document.getElementById('subject').value||'').trim();
-  const text = (document.getElementById('text').value||'').trim();
-  const messageType = (document.getElementById('messageType').value||'TEXT').trim();
-  const planCodes = selectedPlans();
-
-  const r = await fetch('/admin/campaigns', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ subject, text, messageType, planCodes })
-  });
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-}
-</script>
-</body>
-</html>`;
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
-  });
-
-  router.get("/campaigns-ui", async (req, res) => {
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Campanhas</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    table { width:100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { padding: 10px; border-bottom: 1px solid #eee; text-align:left; vertical-align: top; }
-    .muted { color:#666; }
-    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
-    code { background:#f6f6f6; padding:2px 6px; border-radius: 6px; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>📦 Campanhas</h2>
-    <p><a href="/admin">⬅ Voltar</a> · <a href="/admin/broadcast-ui">📣 Nova campanha</a></p>
-
-    <div class="row">
-      <input id="limit" value="50" />
-      <button onclick="load()">Atualizar</button>
-    </div>
-
-    <div class="row" style="margin-top:10px;">
-      <input id="cpId" placeholder="campaignId (ex: cp_...)" style="min-width:320px;" />
-      <input id="reLimit" placeholder="limit janela (ex: 5000)" value="5000" style="width:180px;" />
-      <button onclick="reprocess()">Reprocessar (janela 24h)</button>
-      <span class="muted">Reenvia somente pendências para usuários que já estão na janela 24h agora.</span>
-    </div>
-
-    <div id="tableWrap"></div>
-    <h3>Detalhes</h3>
-    <pre id="details" class="muted">Clique em "Ver" em alguma campanha.</pre>
-  </div>
-
-<script>
-function esc(s){ return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
-
-async function load(){
-  const limit = Number(document.getElementById('limit').value||50);
-  const r = await fetch('/admin/campaigns?limit=' + encodeURIComponent(limit));
-  const j = await r.json().catch(()=>({}));
-  const items = (j.items||[]);
-
-  let rows = '';
-  for(const it of items){
-    const id = esc(it.id);
-    const createdAt = esc(it.createdAt||'');
-    const subject = esc(it.subject||'');
-    const plans = Array.isArray(it.planCodes) && it.planCodes.length ? it.planCodes.join(', ') : 'TODOS';
-    const sent = it.counts?.sentCount ?? 0;
-    const pending = it.counts?.pendingCount ?? 0;
-    const errors = it.counts?.errorCount ?? 0;
-
-    rows += '<tr>'
-      + '<td><code>' + id + '</code><br/><span class="muted">' + createdAt + '</span></td>'
-      + '<td>' + subject + '<br/><span class="muted">Planos: ' + esc(plans) + '</span></td>'
-      + '<td>Enviados: <b>' + sent + '</b><br/>Pendentes: <b>' + pending + '</b><br/>Erros: <b>' + errors + '</b></td>'
-      + '<td><button onclick="view(\\'' + id + '\\')">Ver</button></td>'
-      + '</tr>';
-  }
-
-  document.getElementById('tableWrap').innerHTML =
-    '<table><thead><tr><th>ID</th><th>Conteúdo</th><th>Contagem</th><th>Ação</th></tr></thead><tbody>'
-    + (rows || '<tr><td colspan="4" class="muted">Nenhuma campanha encontrada.</td></tr>')
-    + '</tbody></table>';
-}
-
-async function reprocess(){
-  const id = (document.getElementById('cpId').value||'').trim();
-  const lim = (document.getElementById('reLimit').value||'5000').trim();
-  if(!id){ alert('Informe o campaignId'); return; }
-  const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/reprocess?limit=' + encodeURIComponent(lim), { method:'POST' });
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('details').textContent = JSON.stringify(j, null, 2);
-}
-
-async function view(id){
-  const r = await fetch('/admin/campaigns/' + encodeURIComponent(id));
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('details').textContent = JSON.stringify(j, null, 2);
-}
-
-load();
-</script>
-</body>
-</html>`;
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
-  });
-
-  // ----------------------------
-  // ✅ Health + Alertas (telemetria)
-  // ----------------------------
-
-  router.get("/health-plans", async (req, res) => {
-    try {
-      const plansAll = await listPlans({ includeInactive: true });
-      const activePlans = (plansAll || []).filter((p) => Boolean(p?.active));
-
-      const health = {
-        ok: activePlans.length > 0,
-        countAll: (plansAll || []).length,
-        countActive: activePlans.length,
-        reason:
-          (plansAll || []).length === 0
-            ? "NO_PLANS"
-            : activePlans.length === 0
-              ? "ALL_INACTIVE"
-              : null,
-      };
-
-      if (!health.ok) {
-        await pushSystemAlert("PLANS_EMPTY_OR_ERROR", {
-          reason: health.reason,
-          countAll: health.countAll,
-          countActive: health.countActive,
-        });
-      }
-
-      return res.json({ ok: true, health });
-    } catch (err) {
-      await pushSystemAlert("PLANS_HEALTH_CHECK_FAILED", { error: String(err?.message || err) });
-      return res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.get("/alerts-count", async (req, res) => {
-    try {
-      const count = await getSystemAlertsCount();
-      return res.json({ ok: true, count });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.get("/alerts", async (req, res) => {
-    try {
-      const limit = Number(req.query?.limit || 50);
-      const items = await listSystemAlerts(limit);
-      return res.json({ ok: true, returned: items.length, items });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  router.get("/alerts-ui", async (req, res) => {
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Alertas</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; cursor:pointer; background:white; }
-    pre { background:#f6f6f6; padding: 12px; border-radius: 12px; overflow:auto; }
-    .muted { color:#666; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-    input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; width: 120px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>🚨 Alertas do Sistema</h2>
-    <p><a href="/admin">⬅ Voltar</a></p>
-    <div class="row">
-      <div class="muted">Mostra os últimos alertas persistidos em Redis (TTL ~ 7 dias).</div>
-    </div>
-    <div class="row" style="margin-top: 10px;">
-      <input id="limit" value="50" />
-      <button onclick="load()">Atualizar</button>
-    </div>
-    <pre id="out" class="muted">Clique em "Atualizar".</pre>
-  </div>
-
-<script>
-async function load(){
-  const limit = Number(document.getElementById('limit').value || 50);
-  const r = await fetch('/admin/alerts?limit=' + encodeURIComponent(limit));
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-}
-load();
-</script>
-</body>
-</html>`;
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
   });
 
   return router;
