@@ -33,8 +33,7 @@ async function upstash(path, bodyValue) {
     method: "POST",
     headers: {
       Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
-      // Mantemos JSON por compatibilidade geral, mas o body pode ser string.
-      // Upstash não exige JSON; ele apenas lê o body como último argumento.
+      // Quando manda body, manda como texto puro (o Upstash usa como argumento final)
       "Content-Type": hasBody ? "text/plain" : "application/json",
     },
     body: hasBody ? String(bodyValue) : undefined,
