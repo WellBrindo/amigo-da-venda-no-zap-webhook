@@ -101,6 +101,16 @@ export function adminRouter() {
     const global = await getGlobalDescriptionMetrics();
     const window24hCount = await countWindow24hActive();
 
+    // ✅ V16.5.0 — Catálogo de planos do sistema (para exibir nomes/valores no dashboard)
+    let systemPlans = [];
+    let systemPlansError = "";
+    try {
+      systemPlans = await listPlans();
+    } catch (e) {
+      systemPlansError = String(e?.message || e);
+      systemPlans = [];
+    }
+
     let users = [];
     let usersError = "";
     try {
@@ -152,6 +162,8 @@ export function adminRouter() {
       ts: Date.now(),
       global,
       window24hCount,
+      systemPlans,
+      systemPlansError: systemPlansError || undefined,
       users: {
         total: totalUsers,
         statuses,
@@ -486,7 +498,24 @@ async function load(){ const waId = (document.getElementById('waId').value || ''
   document.getElementById('usersError').textContent = err;
 
   const plans = u.plans || {};
-  const planHtml = Object.keys(plans).sort().map(k => '<span class="pill"><code>'+esc(k)+'</code>: <b>'+plans[k]+'</b></span>').join(' ');
+  const sysPlans = Array.isArray(j.systemPlans) ? j.systemPlans : [];
+  const byCode = {};
+  for (const p of sysPlans) {
+    const code = String(p?.code || '').toUpperCase().trim();
+    if (code) byCode[code] = p;
+  }
+
+  function fmtBRL(cents){
+    const v = (Number(cents)||0)/100;
+    try { return v.toLocaleString('pt-BR', {style:'currency', currency:'BRL'}); } catch { return 'R$ ' + v.toFixed(2); }
+  }
+
+  const planHtml = Object.keys(plans).sort().map(k => {
+    const meta = byCode[String(k||'').toUpperCase().trim()];
+    const label = meta ? (esc(meta.name || '') + ' · ' + fmtBRL(meta.priceCents) + ' · ' + esc(meta.description || (meta.monthlyQuota ? (meta.monthlyQuota + ' descrições/mês') : ''))) : '';
+    const extra = label ? ('<div class="muted" style="font-size:12px;margin-top:2px;">' + label + '</div>') : '';
+    return '<span class="pill"><code>'+esc(k)+'</code>: <b>'+plans[k]+'</b>' + extra + '</span>';
+  }).join(' ');
   document.getElementById('plans').innerHTML = planHtml || '<span class="muted">Sem dados.</span>';
 
   const user = j.user;
@@ -498,7 +527,16 @@ async function load(){ const waId = (document.getElementById('waId').value || ''
     const box = \`
       <div class="kpi" style="margin-top:10px;">
         <h3>Usuário <code>\${esc(sm.waId || waId)}</code></h3>
-        <div class="muted">status: <b>\${esc(sm.status || '—')}</b> · plano: <b>\${esc(sm.plan || '—')}</b></div>
+        <div class="muted">status: <b>\${esc(sm.status || '—')}</b> · plano atual: <b>\${esc(sm.plan || '—')}</b></div>
+        \${(() => {
+          const sysPlans = Array.isArray(j.systemPlans) ? j.systemPlans : [];
+          const code = String(sm.plan || '').toUpperCase().trim();
+          const meta = sysPlans.find(p => String(p?.code || '').toUpperCase().trim() === code);
+          if (!meta) return '';
+          const price = (() => { const v=(Number(meta.priceCents)||0)/100; try { return v.toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); } catch { return 'R$ '+v.toFixed(2);} })();
+          const desc = meta.description || (meta.monthlyQuota ? (meta.monthlyQuota + ' descrições/mês') : '');
+          return '<div class="muted" style="margin-top:6px;">Plano: <b>' + esc(meta.name || meta.code || '') + '</b> · ' + esc(price) + (desc ? (' · ' + esc(desc)) : '') + '</div>';
+        })()}
         <div style="margin-top:10px;" class="row">
           <div class="pill">Descrições hoje: <b>\${um.dayCount ?? 0}</b></div>
           <div class="pill">Descrições mês: <b>\${um.monthCount ?? 0}</b></div>
