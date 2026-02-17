@@ -10,13 +10,10 @@ import {
 
 /**
  * Webhook handler do Asaas
- * Regras:
- * - externalReference = waId
- * - Não logar CPF/CNPJ
- * - Não bloquear usuário por inconsistência de plano
+ * externalReference = waId
  */
 
-export async function handleAsaasWebhook(body) {
+export async function handleAsaasWebhookEvent(body) {
   try {
     const event = body?.event;
     const payment = body?.payment;
@@ -46,17 +43,12 @@ export async function handleAsaasWebhook(body) {
       if (!plan) {
         console.log(
           "[ASAAS_WEBHOOK_WARNING] Payment confirmed but plan missing",
-          {
-            waId,
-            event,
-          }
+          { waId, event }
         );
       }
 
-      // Resetar contadores SEMPRE
       await resetUserQuotaUsed(waId);
       await resetUserTrialUsed(waId);
-
       await setUserStatus(waId, "ACTIVE");
 
       console.log("[ASAAS_WEBHOOK] Usuário ativado:", {
@@ -114,9 +106,6 @@ export async function handleAsaasWebhook(body) {
       return { ok: true, statusSetTo: "BLOCKED" };
     }
 
-    // ==============================
-    // EVENTOS IGNORADOS
-    // ==============================
     console.log("[ASAAS_WEBHOOK] Evento ignorado:", {
       waId,
       event,
