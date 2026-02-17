@@ -1,7 +1,8 @@
+// src/services/plans.js
 import { redisGet, redisSet, redisSAdd, redisSMembers, redisDel } from "./redis.js";
 
 const PLANS_SET_KEY = "plans:all";
-const PLAN_KEY_PREFIX = "plan:";
+const PLAN_KEY_PREFIX = "plan_def:"; // evita conflito com plan:{waId} do state
 
 // Default plans (seed only if no plans exist yet)
 const DEFAULT_PLANS = [
@@ -51,9 +52,12 @@ export function formatBRLFromCents(cents) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
+function planKey(code) {
+  return PLAN_KEY_PREFIX + normalizeCode(code);
+}
+
 export async function getPlan(code) {
-  const c = normalizeCode(code);
-  const raw = await redisGet(PLAN_KEY_PREFIX + c);
+  const raw = await redisGet(planKey(code));
   if (!raw) return null;
   try {
     return JSON.parse(raw);
@@ -78,7 +82,7 @@ export async function upsertPlan(input) {
 
   const plan = { code, name, priceCents, monthlyQuota, active, description };
 
-  await redisSet(PLAN_KEY_PREFIX + code, JSON.stringify(plan), null);
+  await redisSet(planKey(code), JSON.stringify(plan));
   await redisSAdd(PLANS_SET_KEY, code);
   return plan;
 }
@@ -87,13 +91,12 @@ export async function setPlanActive(code, active) {
   const plan = await getPlan(code);
   if (!plan) throw new Error("Plan not found");
   plan.active = Boolean(active);
-  await redisSet(PLAN_KEY_PREFIX + plan.code, JSON.stringify(plan), null);
+  await redisSet(planKey(plan.code), JSON.stringify(plan));
   return plan;
 }
 
 export async function deletePlan(code) {
-  const c = normalizeCode(code);
-  await redisDel(PLAN_KEY_PREFIX + c);
+  await redisDel(planKey(code));
   return { ok: true };
 }
 
@@ -119,4 +122,56 @@ export async function listPlans({ includeInactive = true } = {}) {
 
   plans.sort((a, b) => String(a.code).localeCompare(String(b.code)));
   return plans;
+}
+
+// Ajuda para o fluxo: retorna os 3 planos ativos na ordem do menu (1/2/3)
+export async function getMenuPlans() {
+  const plans = await listPlans({ includeInactive: false });
+  // garante a ordem padrão do produto
+  const order = ["DE_VEZ_EM_QUANDO", "SEMPRE_POR_PERTO", "MELHOR_AMIGO"];
+  const map = new Map(plans.map((p) => [p.code, p]));
+  return order.map((c) => map.get(c)).filter(Boolean);
+}
+
+export async function getPlanByChoice(choice) {
+  const c = String(choice || "").trim();
+  const menu = await getMenuPlans();
+  if (c === "1") return menu[0] || null;
+  if (c === "2") return menu[1] || null;
+  if (c === "3") return menu[2] || null;
+  // também aceita o código por texto
+  const upper = c.toUpperCase();
+  return menu.find((p) => p.code === upper) || null;
+}
+
+export async function renderPlansMenu() {
+  const menu = await getMenuPlans();
+  // fallback (se não tiver seed por algum motivo)
+  if (menu.length === 0) {
+    return (
+      `😄 Seu trial gratuito foi concluído!\n\n` +
+      `Para continuar, escolha um plano:\n\n` +
+      `1) De Vez em Quando — R$ 24.90\n   • 20 descrições/mês\n\n` +
+      `2) Sempre por Perto — R$ 34.90\n   • 60 descrições/mês\n\n` +
+      `3) Melhor Amigo — R$ 49.90\n   • 200 descrições/mês\n\n` +
+      `Responda com 1, 2 ou 3.`
+    );
+  }
+
+  const lines = [];
+  lines.push(`😄 Seu trial gratuito foi concluído!`);
+  lines.push(``);
+  lines.push(`Para continuar, escolha um plano:`);
+  lines.push(``);
+
+  menu.forEach((p, idx) => {
+    const n = idx + 1;
+    const price = formatBRLFromCents(p.priceCents).replace("R$", "R$ ").replace(".", ",");
+    lines.push(`${n}) ${p.name} — ${price}`);
+    lines.push(`   • ${p.description || `${p.monthlyQuota} descrições/mês`}`);
+    lines.push(``);
+  });
+
+  lines.push(`Responda com 1, 2 ou 3.`);
+  return lines.join("\n");
 }
