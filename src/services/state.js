@@ -1,8 +1,9 @@
 // src/services/state.js
-// ✅ V16.4.2 — Correções de Produção (sem remover funções):
+// ✅ V16.4.3 — Correções de Produção (sem remover funções):
 // - Mantém migração segura do users:index (WRONGTYPE)
-// - Elimina redisSet(key, "") (evita Upstash: ERR wrong number of arguments for 'set')
+// - Elimina redisSet(key, "") (evita Upstash: ERR wrong number of arguments for 'set' command)
 // - Normaliza valores sujos do tipo "\"\"" (plan/paymentMethod) na leitura e escrita
+// - ✅ Hardening: setLastPrompt() nunca faz SET com valor vazio (vazio => DEL)
 
 import {
   redisGet,
@@ -287,6 +288,14 @@ export async function getLastPrompt(waId) {
 export async function setLastPrompt(waId, prompt) {
   await indexUser(waId);
   const p = safeStr(prompt);
+
+  // ✅ V16.4.3: Nunca SET vazio (Upstash REST pode interpretar como SET sem value)
+  // Vazio => remove a chave
+  if (!p) {
+    await redisDel(keyLastPrompt(waId));
+    return "";
+  }
+
   await redisSet(keyLastPrompt(waId), p);
   return p;
 }
