@@ -4,13 +4,12 @@ import { Router } from "express";
 import { touch24hWindow } from "../services/window24h.js";
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { handleInboundText } from "../services/flow.js";
+import { processPendingForWaId } from "../services/broadcast.js";
 
 export function webhookRouter() {
   const router = Router();
 
   // ✅ Verificação do Webhook (Meta)
-  // Meta chama:
-  // GET /webhook?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
   router.get("/", (req, res) => {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -65,6 +64,14 @@ export function webhookRouter() {
             // 4) responde se necessário
             if (r?.shouldReply && r?.replyText) {
               await sendWhatsAppText({ to: String(waId), text: String(r.replyText) });
+            }
+
+            // 5) ✅ Auto-send: se esse usuário tinha campanhas pendentes, envia agora (janela 24h garantida)
+            // Observação: fazemos após responder o fluxo para não “atropelar” a conversa.
+            try {
+              await processPendingForWaId(String(waId));
+            } catch (err) {
+              console.warn("processPendingForWaId failed:", err?.message || err);
             }
           }
         }
