@@ -136,7 +136,9 @@ async function msgAskProduct(waId){
 async function msgTrialOverAndPlans(waId) {
   // renderPlansMenu já vem com o cabeçalho do trial concluído
   const prefix = await getCopyText("FLOW_TRIAL_PREFIX", { waId });
-  return prefix + "\n\n" + (await renderPlansMenu());
+  return prefix + "
+
+" + (await renderPlansMenu());
 }
 
 async function msgPlansOnly(waId) {
@@ -380,7 +382,9 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     const used = await getUserQuotaUsed(id);
     if (used >= Number(plan.monthlyQuota || 0)) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply((await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id })) + "\n\n" + (await msgPlansOnly(id)));
+      return reply((await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id })) + "
+
+" + (await msgPlansOnly(id)));
     }
   }
 
