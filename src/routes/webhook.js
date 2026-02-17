@@ -1,4 +1,6 @@
+// src/routes/webhook.js
 import { Router } from "express";
+
 import { touch24hWindow } from "../services/window24h.js";
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { handleInboundText } from "../services/flow.js";
@@ -7,6 +9,8 @@ export function webhookRouter() {
   const router = Router();
 
   // ✅ Verificação do Webhook (Meta)
+  // Meta chama:
+  // GET /webhook?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
   router.get("/", (req, res) => {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
@@ -15,7 +19,8 @@ export function webhookRouter() {
     const VERIFY_TOKEN =
       process.env.WEBHOOK_VERIFY_TOKEN ||
       process.env.VERIFY_TOKEN ||
-      process.env.VERIFYTOKEN;
+      process.env.VERIFYTOKEN ||
+      "";
 
     if (mode === "subscribe" && token && VERIFY_TOKEN && token === VERIFY_TOKEN) {
       return res.status(200).send(String(challenge));
@@ -41,11 +46,7 @@ export function webhookRouter() {
           const messages = Array.isArray(value.messages) ? value.messages : [];
 
           for (const msg of messages) {
-            const waId =
-              msg?.from ||
-              value?.contacts?.[0]?.wa_id ||
-              "";
-
+            const waId = msg?.from || value?.contacts?.[0]?.wa_id || "";
             if (!waId) continue;
 
             // 1) marca janela 24h
@@ -56,15 +57,14 @@ export function webhookRouter() {
             if (msg?.type === "text") {
               inboundText = String(msg?.text?.body || "").trim();
             }
-
             if (!inboundText) continue;
 
             // 3) roteia para o motor de fluxo
-            const r = await handleInboundText({ waId, text: inboundText });
+            const r = await handleInboundText({ waId: String(waId), text: inboundText });
 
             // 4) responde se necessário
             if (r?.shouldReply && r?.replyText) {
-              await sendWhatsAppText({ to: waId, text: r.replyText });
+              await sendWhatsAppText({ to: String(waId), text: String(r.replyText) });
             }
           }
         }
