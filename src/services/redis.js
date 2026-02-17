@@ -1,8 +1,8 @@
 // src/services/redis.js
 // Upstash Redis REST helpers (Node.js ESM)
-// ✅ V16.4.4 — Produção definitiva:
-// - redisSet suporta value="" sem quebrar (evita ERR wrong number of arguments for 'set')
-// - Mantém compatibilidade com chamadas atuais (path-based) quando value não é vazio
+// ✅ V16.4.5 — Produção definitiva + Diagnóstico:
+// - redisSet SEMPRE usa body (POST /SET/<key> + body=value)
+// - Em erro, inclui cmdPath e bodyLen na mensagem (sem vazar token/URL base)
 
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -15,39 +15,54 @@ function assertRedisEnv() {
 
 /**
  * Upstash REST:
- * - Args são segmentos do path
- * - Body do POST é anexado como último argumento do comando (quando enviado)
- *
- * Ex:
- * POST /SET/foo/bar           -> SET foo bar
- * POST /SET/foo  (body:"")    -> SET foo ""
+ * - Args no path
+ * - Body do POST é anexado como último argumento quando presente
  */
 async function upstash(path, bodyValue) {
   assertRedisEnv();
 
   const url = `${UPSTASH_REDIS_REST_URL}${path}`;
-
   const hasBody = bodyValue !== undefined;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
-      // Quando manda body, manda como texto puro (o Upstash usa como argumento final)
-      "Content-Type": hasBody ? "text/plain" : "application/json",
-    },
-    body: hasBody ? String(bodyValue) : undefined,
-  });
+  // body SEMPRE em texto puro quando enviado.
+  const bodyText = hasBody ? String(bodyValue) : undefined;
 
-  const data = await res.json().catch(() => ({}));
+  let res;
+  let data = {};
 
-  if (!res.ok) {
-    const msg = data?.error ? `Upstash: ${data.error}` : `HTTP ${res.status}`;
-    throw new Error(msg);
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+        "Content-Type": hasBody ? "text/plain" : "application/json",
+      },
+      body: bodyText,
+    });
+
+    data = await res.json().catch(() => ({}));
+  } catch (err) {
+    // erro de rede/timeout
+    throw new Error(
+      `Upstash: NETWORK_ERROR cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0} msg=${String(
+        err?.message || err
+      )}`
+    );
   }
 
+  // padroniza erro HTTP
+  if (!res.ok) {
+    const base = data?.error ? `Upstash: ${data.error}` : `Upstash: HTTP ${res.status}`;
+    throw new Error(
+      `${base} cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0}`
+    );
+  }
+
+  // erro do redis
   if (data?.error) {
-    throw new Error(`Upstash: ${data.error}`);
+    throw new Error(
+      `Upstash: ${data.error} cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0}`
+    );
   }
 
   return data?.result;
@@ -66,25 +81,17 @@ export async function redisGet(key) {
 }
 
 /**
- * ✅ Produção definitiva:
- * - value === "" => envia no body (POST /SET/<key> com body vazio)
- * - value !== "" => usa path (POST /SET/<key>/<value>)
+ * ✅ V16.4.5: redisSet SEMPRE usa body, evitando qualquer problema com path/value.
+ * POST /SET/<key> (body="<value>") => SET key value
  */
 export async function redisSet(key, value) {
-  const k = encodeURIComponent(key);
-
   if (value === undefined) {
-    throw new Error("redisSet: value is required (can be empty string, but not undefined)");
+    // Isso pega bug de chamada sem value (muito comum em reset/admin)
+    throw new Error(`redisSet: value is required (got undefined) key=${key}`);
   }
-
-  const v = String(value);
-
-  // value vazio: não pode virar segmento vazio no path
-  if (v.length === 0) {
-    return upstash(`/SET/${k}`, "");
-  }
-
-  return upstash(`/SET/${k}/${encodeURIComponent(v)}`);
+  const k = encodeURIComponent(key);
+  const v = String(value); // pode ser "" e está OK
+  return upstash(`/SET/${k}`, v);
 }
 
 export async function redisDel(key) {
@@ -99,7 +106,6 @@ export async function redisIncrBy(key, delta = 1) {
   );
 }
 
-// 🔹 detectar tipo da chave
 export async function redisType(key) {
   return upstash(`/TYPE/${encodeURIComponent(key)}`);
 }
