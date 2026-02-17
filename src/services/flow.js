@@ -1,174 +1,447 @@
 // src/services/flow.js
+/**
+ * Motor principal de conversa (WhatsApp).
+ *
+ * Objetivo deste passo (16.4):
+ * ✅ Trial e Active gerando anúncio via OpenAI
+ * ✅ Template FIXED x FREE com preferência persistida (TEMPLATE/LIVRE)
+ * ✅ Fim do trial -> mostra planos direto (1/2/3)
+ * ✅ Após plano -> escolhe forma de pagamento (Cartão / PIX)
+ * ✅ Antes de Asaas -> pede CPF/CNPJ e valida DV
+ * ✅ Integração Asaas:
+ *    - Cartão: link recorrente (paymentLinks / chargeType RECURRENT)
+ *    - PIX: cobrança mensal avulsa (payments / billingType PIX)
+ *
+ * Regras:
+ * - Nunca logar CPF/CNPJ.
+ * - Sem gambiarras: fluxo por status + funções pequenas e claras.
+ */
+
+import { generateAdText } from "./openai/generate.js";
+
 import {
   ensureUserExists,
   getUserStatus,
   setUserStatus,
-  getUserTrialUsed,
-  incUserTrialUsed,
-  setLastPrompt,
-  getUserPlan,
-  setUserPlan,
+  getUserFullName,
+  setUserFullName,
   getTemplateMode,
   setTemplateMode,
+  getUserTrialUsed,
+  incUserTrialUsed,
+  getUserPlan,
+  setUserPlan,
+  getUserQuotaUsed,
+  incUserQuotaUsed,
+  setLastPrompt,
+  getPaymentMethod,
+  setPaymentMethod,
+  setUserDocMasked,
+  getAsaasCustomerId,
+  setAsaasCustomerId,
 } from "./state.js";
 
-import { generateAdText } from "./openai/generate.js";
-import { getPlanByChoice, renderPlansMenu } from "./plans.js";
+import { getMenuPlans, getPlanByChoice, renderPlansMenu } from "./Plans.js";
+import { validateDoc } from "./brDoc.js";
 
+import {
+  findCustomerByExternalReference,
+  createCustomer,
+  createPixPayment,
+  createRecurringCardPaymentLink,
+} from "./asaas/client.js";
+
+// -------------------- Config --------------------
 const TRIAL_LIMIT = 5;
 
-// filtro simples para evitar custo com “oi”, “teste”, etc.
-function isTooShortForGeneration(text) {
-  const t = String(text || "").trim();
-  if (t.length < 8) return true;
-  const upper = t.toUpperCase();
-  if (upper === "OI" || upper === "OLÁ" || upper === "OLA" || upper === "TESTE") return true;
-  return false;
+// -------------------- Statuses (FSM) --------------------
+const ST = Object.freeze({
+  TRIAL: "TRIAL",
+  ACTIVE: "ACTIVE",
+  PAYMENT_PENDING: "PAYMENT_PENDING",
+  BLOCKED: "BLOCKED",
+
+  WAIT_NAME: "WAIT_NAME",
+  WAIT_PRODUCT: "WAIT_PRODUCT",
+
+  WAIT_PLAN: "WAIT_PLAN",
+  WAIT_PAYMENT_METHOD: "WAIT_PAYMENT_METHOD",
+  WAIT_DOC: "WAIT_DOC",
+});
+
+// -------------------- Helpers --------------------
+function cleanText(t) {
+  return String(t ?? "").trim();
 }
 
-function msgPaymentPending() {
-  return `⏳ Seu pagamento ainda está pendente.\n\nAssim que compensar, eu libero automaticamente.`;
+function upper(t) {
+  return cleanText(t).toUpperCase();
 }
 
-function msgBlocked() {
-  return `🚫 Seu acesso está bloqueado no momento.\nSe achar que foi um engano, fale com o suporte.`;
+function isGreeting(t) {
+  const s = upper(t);
+  return ["OI", "OLA", "OLÁ", "BOM DIA", "BOA TARDE", "BOA NOITE", "INICIO", "INÍCIO", "START"].includes(s);
 }
 
-function msgAskTemplateChoice(currentMode) {
-  const modeTxt = currentMode === "FREE" ? "LIVRE" : "FIXO";
+function normalizeChoice(t) {
+  const s = upper(t);
+  if (s === "1" || s.startsWith("1 ")) return "1";
+  if (s === "2" || s.startsWith("2 ")) return "2";
+  if (s === "3" || s.startsWith("3 ")) return "3";
+  return "";
+}
+
+function wantsTemplateCommand(t) {
+  const s = upper(t);
+  return s === "TEMPLATE" || s === "FIXO" || s === "FIXED";
+}
+
+function wantsFreeCommand(t) {
+  const s = upper(t);
+  return s === "LIVRE" || s === "FREE";
+}
+
+function todayISO() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function moneyBRFromCents(cents) {
+  const v = (Number(cents) || 0) / 100;
+  return v.toFixed(2);
+}
+
+function reply(text) {
+  return { shouldReply: true, replyText: String(text || "") };
+}
+
+function noReply() {
+  return { shouldReply: false, replyText: "" };
+}
+
+// -------------------- Copy / Mensagens --------------------
+function msgAskName() {
+  return "Oi! 👋😊\n\nEu sou o *Amigo das Vendas*.\n\nAntes de tudo, me diga seu *nome completo*, por favor 🙂";
+}
+
+function msgAskProduct() {
+  return "Perfeito! ✅\n\nAgora me diga: *o que você vende* ou *qual serviço você presta*?\n\nPode ser simples, tipo:\n“Vendo bolo de chocolate por R$30”";
+}
+
+async function msgTrialOverAndPlans() {
+  // renderPlansMenu já vem com o cabeçalho do trial concluído
+  return "Não entendi 😅\n\n" + (await renderPlansMenu());
+}
+
+async function msgPlansOnly() {
+  // Versão sem o "trial concluído"
+  const menu = await getMenuPlans();
+  if (!menu || menu.length === 0) {
+    return (
+      "Para continuar, escolha um plano:\n\n" +
+      "1) De Vez em Quando — R$ 24.90\n   • 20 descrições/mês\n\n" +
+      "2) Sempre por Perto — R$ 34.90\n   • 60 descrições/mês\n\n" +
+      "3) Melhor Amigo — R$ 49.90\n   • 200 descrições/mês\n\n" +
+      "Responda com *1*, *2* ou *3*."
+    );
+  }
+
+  const lines = [];
+  lines.push("Para continuar, escolha um plano:");
+  lines.push("");
+
+  menu.forEach((p, idx) => {
+    const n = idx + 1;
+    lines.push(`${n}) ${p.name} — R$ ${moneyBRFromCents(p.priceCents)}`);
+    lines.push(`   • ${p.description || `${p.monthlyQuota} descrições/mês`}`);
+    lines.push("");
+  });
+
+  lines.push("Responda com *1*, *2* ou *3*.");
+  return lines.join("\n");
+}
+
+function msgAskPaymentMethod(plan) {
   return (
-    `\n\n—\n` +
-    `📌 *Formatação atual:* ${modeTxt}\n` +
-    `Quer manter assim?\n\n` +
-    `✅ Responda *FIXO* para manter o template\n` +
-    `✨ Responda *LIVRE* para eu formatar do meu jeito\n\n` +
-    `Obs.: na prática, o template fixo costuma converter melhor no WhatsApp por ser mais rápido de ler e ter CTA claro.`
+    `Show! ✅ Plano escolhido: *${plan.name}* (R$ ${moneyBRFromCents(plan.priceCents)} / mês)\n\n` +
+    "Agora escolha a forma de pagamento:\n\n" +
+    "1) *Cartão* (assinatura recorrente)\n" +
+    "2) *PIX* (pagamento manual todo mês)\n\n" +
+    "Responda com *1* ou *2*."
   );
 }
 
+function msgAskDoc() {
+  return (
+    "Nossa, quase esqueci 😄\n" +
+    "Pra eu conseguir gerar e registrar o pagamento, preciso do seu *CPF ou CNPJ* (somente números).\n\n" +
+    "Pode me enviar, por favor?\n" +
+    "Fica tranquilo(a): eu uso só pra isso e *não aparece em mensagens nem em logs*."
+  );
+}
+
+function msgInvalidDoc() {
+  return (
+    "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\n" +
+    "Dá uma olhadinha e me envia de novo, por favor, somente números:\n\n" +
+    "CPF: 11 dígitos\n" +
+    "CNPJ: 14 dígitos"
+  );
+}
+
+function msgAfterAdAskTemplateChoice(currentMode) {
+  const hint =
+    currentMode === "FIXED"
+      ? "(*Hoje você está no TEMPLATE, que costuma converter mais.*)"
+      : "(*Hoje você está no modo LIVRE.*)";
+  return (
+    "\n\n" +
+    "Quer manter o *template*?\n\n" +
+    "1) Sim (manter template)\n" +
+    "2) Quero *formatação livre*\n\n" +
+    `${hint}\n\n` +
+    "Você também pode digitar *TEMPLATE* ou *LIVRE* a qualquer momento."
+  );
+}
+
+function msgTemplateSet(mode) {
+  if (mode === "FREE") {
+    return "Fechado! ✅ A partir de agora vou gerar em *formatação livre*.\n\nQuando quiser voltar, digite *TEMPLATE*.";
+  }
+  return "Boa! ✅ Vou manter o *template* (ele costuma converter mais).\n\nQuando quiser mudar, digite *LIVRE*.";
+}
+
+// -------------------- Core --------------------
 export async function handleInboundText({ waId, text }) {
-  const clean = String(text || "").trim();
-  if (!waId || !clean) return { shouldReply: false, replyText: "" };
+  const id = cleanText(waId);
+  const inbound = cleanText(text);
 
-  await ensureUserExists(waId);
-  await setLastPrompt(waId, clean);
+  if (!id || !inbound) return noReply();
 
-  const upper = clean.toUpperCase();
+  await ensureUserExists(id);
 
-  // comandos de template (sempre disponíveis)
-  if (upper === "FIXO" || upper === "TEMPLATE") {
-    await setTemplateMode(waId, "FIXED");
-    return {
-      shouldReply: true,
-      replyText: `Perfeito ✅ A partir de agora vou manter o *template fixo* nas descrições.`,
-    };
+  // Comandos globais de preferência de template
+  if (wantsTemplateCommand(inbound)) {
+    await setTemplateMode(id, "FIXED");
+    return reply(msgTemplateSet("FIXED"));
   }
-  if (upper === "LIVRE") {
-    await setTemplateMode(waId, "FREE");
-    return {
-      shouldReply: true,
-      replyText: `Fechado ✨ A partir de agora eu vou usar *formatação livre* (mais flexível).`,
-    };
+  if (wantsFreeCommand(inbound)) {
+    await setTemplateMode(id, "FREE");
+    return reply(msgTemplateSet("FREE"));
   }
 
-  const status = await getUserStatus(waId);
+  const status = await getUserStatus(id);
 
-  if (status === "BLOCKED") return { shouldReply: true, replyText: msgBlocked() };
-  if (status === "PAYMENT_PENDING") return { shouldReply: true, replyText: msgPaymentPending() };
+  if (status === ST.BLOCKED) {
+    return reply("Seu acesso está bloqueado no momento. Se isso for um engano, fale com o suporte.");
+  }
 
-  // Se estiver aguardando plano, aceitar 1/2/3 diretamente (sem exigir "PLANOS")
-  if (status === "WAIT_PLAN") {
-    const plan = await getPlanByChoice(clean);
+  // ✅ Se o usuário manda "oi" e ainda não tem nome, inicia onboarding
+  if (isGreeting(inbound)) {
+    const name = await getUserFullName(id);
+    if (!name) {
+      await setUserStatus(id, ST.WAIT_NAME);
+      return reply(msgAskName());
+    }
+  }
+
+  // 1) Onboarding: nome
+  if (status === ST.WAIT_NAME) {
+    const name = inbound;
+    if (name.length < 3) return reply("Me envia seu *nome completo* por favor 🙂");
+    await setUserFullName(id, name);
+    await setUserStatus(id, ST.WAIT_PRODUCT);
+    return reply(msgAskProduct());
+  }
+
+  // 2) Onboarding: produto/serviço
+  if (status === ST.WAIT_PRODUCT) {
+    if (isGreeting(inbound)) return reply(msgAskProduct());
+    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true });
+  }
+
+  // 3) Trial
+  if (status === ST.TRIAL) {
+    if (isGreeting(inbound)) return reply(msgAskProduct());
+    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true });
+  }
+
+  // 4) Escolha de plano
+  if (status === ST.WAIT_PLAN) {
+    const choice = normalizeChoice(inbound);
+    const plan = await getPlanByChoice(choice);
+    if (!plan) return reply(await msgPlansOnly());
+
+    await setUserPlan(id, plan.code);
+    await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
+
+    return reply(msgAskPaymentMethod(plan));
+  }
+
+  // 5) Forma de pagamento
+  if (status === ST.WAIT_PAYMENT_METHOD) {
+    const c = normalizeChoice(inbound);
+    if (c !== "1" && c !== "2") return reply("Me diga *1* (Cartão) ou *2* (PIX), por favor 🙂");
+
+    const pm = c === "1" ? "CARD" : "PIX";
+    await setPaymentMethod(id, pm);
+    await setUserStatus(id, ST.WAIT_DOC);
+
+    return reply(msgAskDoc());
+  }
+
+  // 6) Documento (CPF/CNPJ) + cria cobrança/assinatura
+  if (status === ST.WAIT_DOC) {
+    const v = validateDoc(inbound);
+    if (!v.ok) return reply(msgInvalidDoc());
+
+    // Guarda somente mascarado
+    await setUserDocMasked(id, v.type, v.last4);
+
+    const planCode = await getUserPlan(id);
+    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     if (!plan) {
-      return { shouldReply: true, replyText: await renderPlansMenu() };
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
     }
 
-    // aqui ainda não liga Asaas (próximo passo). Mas já grava a escolha.
-    await setUserPlan(waId, plan.code);
-    await setUserStatus(waId, "PAYMENT_PENDING");
+    const pm = await getPaymentMethod(id);
+    if (!pm) {
+      await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
+      return reply(msgAskPaymentMethod(plan));
+    }
 
-    return {
-      shouldReply: true,
-      replyText:
-        `Perfeito ✅ Você escolheu *${plan.name}*.\n\n` +
-        `🔒 Para liberar, preciso confirmar o pagamento.\n` +
-        `🧾 (Próximo passo: integração Asaas cartão/PIX)\n\n` +
-        `Enquanto isso, seu status ficou como *PAGAMENTO PENDENTE*.`,
-    };
-  }
+    // customer
+    const customerId = await ensureAsaasCustomer({ waId: id, fullName: await getUserFullName(id), cpfCnpj: v.digits });
 
-  // se for curto demais, evita custo OpenAI
-  if (isTooShortForGeneration(clean)) {
-    return {
-      shouldReply: true,
-      replyText:
-        `Me manda uma descrição um pouquinho mais completa 🙂\n` +
-        `Ex.: “vendo bolo de chocolate por R$30, entrego no bairro X”.`,
-    };
-  }
+    // PIX mensal avulso
+    if (pm === "PIX") {
+      const pay = await createPixPayment({
+        customerId,
+        value: (Number(plan.priceCents) || 0) / 100,
+        description: `Amigo das Vendas - Plano ${plan.code} (PIX mensal)`,
+        externalReference: id,
+        dueDate: todayISO(),
+      });
 
-  // modo atual de template
-  const mode = await getTemplateMode(waId);
+      await setUserStatus(id, ST.PAYMENT_PENDING);
 
-  // ACTIVE: gera com OpenAI e pergunta preferência
-  if (status === "ACTIVE") {
-    const planCode = await getUserPlan(waId);
+      const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
+      const line1 = "✅ Pronto! Gerei sua cobrança via *PIX*.\n\n";
+      const line2 = url ? `Pague por aqui: ${url}\n\n` : "Pague pelo link dentro do Asaas.\n\n";
+      const line3 = "Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀";
+      return reply(line1 + line2 + line3);
+    }
 
-    const { text: adText } = await generateAdText({
-      userText: clean,
-      mode,
-      maxOutputTokens: 650,
+    // Cartão recorrente: Payment Link
+    const link = await createRecurringCardPaymentLink({
+      name: `Assinatura ${plan.name}`,
+      description: `Amigo das Vendas - Plano ${plan.code} (Cartão recorrente)`,
+      value: (Number(plan.priceCents) || 0) / 100,
+      externalReference: id,
+      subscriptionCycle: "MONTHLY",
     });
 
-    return {
-      shouldReply: true,
-      replyText: `${adText}${msgAskTemplateChoice(mode)}\n\n📦 Plano: *${planCode || "ATIVO"}*`,
-    };
+    await setUserStatus(id, ST.PAYMENT_PENDING);
+
+    const url = link?.url || link?.paymentLink || link?.link || "";
+    const line1 = "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).\n\n";
+    const line2 = url ? `Finalize por aqui: ${url}\n\n` : "Finalize pelo link no Asaas.\n\n";
+    const line3 = "Assim que confirmar, seu plano ativa automaticamente. 🚀";
+    return reply(line1 + line2 + line3);
   }
 
-  // TRIAL
-  if (status === "TRIAL" || status === "OTHER") {
-    const usedBefore = await getUserTrialUsed(waId);
-
-    if (usedBefore >= TRIAL_LIMIT) {
-      await setUserStatus(waId, "WAIT_PLAN");
-      return { shouldReply: true, replyText: await renderPlansMenu() };
-    }
-
-    const usedNow = await incUserTrialUsed(waId, 1);
-
-    if (usedNow > TRIAL_LIMIT) {
-      await setUserStatus(waId, "WAIT_PLAN");
-      return { shouldReply: true, replyText: await renderPlansMenu() };
-    }
-
-    const { text: adText } = await generateAdText({
-      userText: clean,
-      mode,
-      maxOutputTokens: 650,
-    });
-
-    const header = `🎁 *Trial (grátis)*: ${usedNow}/${TRIAL_LIMIT}`;
-
-    if (usedNow === TRIAL_LIMIT) {
-      // terminou o trial agora: já mostra o menu (conforme requisito)
-      await setUserStatus(waId, "WAIT_PLAN");
-      return {
-        shouldReply: true,
-        replyText:
-          `${adText}\n\n${header}` +
-          `\n\n⚠️ Você acabou de usar a última descrição grátis.\n\n` +
-          (await renderPlansMenu()) +
-          msgAskTemplateChoice(mode),
-      };
-    }
-
-    return {
-      shouldReply: true,
-      replyText: `${adText}\n\n${header}${msgAskTemplateChoice(mode)}`,
-    };
+  // 7) Pagamento pendente
+  if (status === ST.PAYMENT_PENDING) {
+    const planCode = await getUserPlan(id);
+    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
+    const planTxt = plan ? `Plano: *${plan.name}*.` : "";
+    return reply(`Seu pagamento ainda está *pendente* no Asaas. ${planTxt}\n\nAssim que confirmar, eu libero automaticamente. 🚀`);
   }
 
-  // fallback
-  return { shouldReply: true, replyText: "✅ Recebi sua mensagem." };
+  // 8) ACTIVE
+  if (status === ST.ACTIVE) {
+    if (isGreeting(inbound)) return reply(msgAskProduct());
+    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false });
+  }
+
+  // fallback seguro
+  return reply("Não entendi 😅\n\nMe diga o que você vende ou qual serviço você presta, e eu monto o anúncio.");
+}
+
+// -------------------- Generate Ad --------------------
+async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
+  const id = waId;
+  const userText = inboundText;
+
+  // TRIAL: checa limite
+  if (isTrial) {
+    const used = await getUserTrialUsed(id);
+    if (used >= TRIAL_LIMIT) {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgTrialOverAndPlans());
+    }
+  } else {
+    // ACTIVE: checa quota do plano
+    const planCode = await getUserPlan(id);
+    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
+    if (!plan) {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
+    }
+
+    const used = await getUserQuotaUsed(id);
+    if (used >= Number(plan.monthlyQuota || 0)) {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply("Você atingiu seu limite mensal 😅\n\n" + (await msgPlansOnly()));
+    }
+  }
+
+  const mode = await getTemplateMode(id);
+
+  // OpenAI
+  let ad = "";
+  try {
+    const r = await generateAdText({ userText, mode });
+    ad = r.text;
+  } catch {
+    return reply("Tive um probleminha técnico para gerar sua descrição agora 😕\n\nPode tentar novamente em alguns instantes?");
+  }
+
+  // salva prompt
+  await setLastPrompt(id, userText);
+
+  // conta uso
+  if (isTrial) await incUserTrialUsed(id, 1);
+  else await incUserQuotaUsed(id, 1);
+
+  return reply(ad + msgAfterAdAskTemplateChoice(mode));
+}
+
+// -------------------- Asaas helpers --------------------
+async function ensureAsaasCustomer({ waId, fullName, cpfCnpj }) {
+  // 1) se já tem customerId, usa
+  const existing = await getAsaasCustomerId(waId);
+  if (existing) return existing;
+
+  // 2) tenta achar por externalReference
+  const found = await findCustomerByExternalReference(waId).catch(() => null);
+  if (found?.id) {
+    await setAsaasCustomerId(waId, found.id);
+    return found.id;
+  }
+
+  // 3) cria
+  const customer = await createCustomer({
+    name: fullName || waId,
+    cpfCnpj, // ⚠️ não logar
+    externalReference: waId,
+  });
+
+  if (!customer?.id) throw new Error("Asaas: customer not created");
+  await setAsaasCustomerId(waId, customer.id);
+  return customer.id;
 }
