@@ -7,7 +7,7 @@ import {
   setUserQuotaUsed,
   setUserTrialUsed,
   getUserSnapshot,
-  setLastPrompt,
+  clearLastPrompt, // ✅ V16.4.6: limpar via DEL (não SET "")
 } from "../services/state.js";
 
 import {
@@ -283,7 +283,11 @@ async function load(){
       await setUserPlan(waId, "");
       await setUserQuotaUsed(waId, 0);
       await setUserTrialUsed(waId, 0);
-      await setLastPrompt(waId, "");
+
+      // ✅ V16.4.6: Upstash REST não aceita SET com valor vazio de forma confiável
+      // Para limpar, usamos DEL via clearLastPrompt()
+      await clearLastPrompt(waId);
+
       const user = await getUserSnapshot(waId);
       return res.json({ ok: true, action: "reset-trial", waId, user });
     } catch (err) {
