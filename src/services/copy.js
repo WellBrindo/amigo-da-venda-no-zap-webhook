@@ -64,6 +64,28 @@ export const DEFAULT_COPY = Object.freeze({
   FLOW_INVALID_DOC:
     "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\nDá uma olhadinha e me envia de novo, por favor, somente números:\n\nCPF: 11 dígitos\n\nCNPJ: 14 dígitos",
 
+  // FLOW — Validações pontuais
+  FLOW_NAME_TOO_SHORT: "Me envia seu *nome completo* por favor 🙂",
+  FLOW_INVALID_PAYMENT_METHOD: "Me diga *1* (Cartão) ou *2* (PIX), por favor 🙂",
+
+  // FLOW — Pagamento (mensagens unificadas)
+  // Vars:
+  // - methodTitle: ex "Gerei sua cobrança via *PIX*." / "Agora é só concluir no *Cartão* (assinatura)."
+  // - linkLine: ex "Pague por aqui: <url>\n\n" / "Finalize pelo link no Asaas.\n\n"
+  FLOW_PAYMENT_SUCCESS:
+    "✅ Pronto! {{methodTitle}}\n\n{{linkLine}}Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀",
+
+  // Vars: planTxt (opcional)
+  FLOW_PAYMENT_PENDING:
+    "Seu pagamento ainda está *pendente* no Asaas. {{planTxt}}\n\nAssim que confirmar, eu libero automaticamente. 🚀",
+
+  FLOW_QUOTA_REACHED_PREFIX: "Você atingiu seu limite mensal 😅",
+
+  FLOW_FALLBACK_UNKNOWN: "Não entendi 😅\n\nMe diga o que você vende ou qual serviço você presta, e eu monto o anúncio.",
+
+  FLOW_OPENAI_ERROR:
+    "Tive um probleminha técnico para gerar sua descrição agora 😕\n\nPode tentar novamente em alguns instantes?",
+
 
   FLOW_BLOCKED:
     "Seu acesso está bloqueado no momento. Se isso for um engano, fale com o suporte.",
@@ -121,6 +143,15 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_ASK_PAYMENT_METHOD", label: "Escolher forma de pagamento" },
   { category: "Flow", key: "FLOW_ASK_DOC", label: "Pedir CPF/CNPJ" },
   { category: "Flow", key: "FLOW_INVALID_DOC", label: "CPF/CNPJ inválido" },
+
+  { category: "Flow", key: "FLOW_NAME_TOO_SHORT", label: "Nome curto / inválido" },
+  { category: "Flow", key: "FLOW_INVALID_PAYMENT_METHOD", label: "Pagamento: opção inválida" },
+  { category: "Flow", key: "FLOW_PAYMENT_SUCCESS", label: "Pagamento: sucesso (PIX/Cartão)" },
+  { category: "Flow", key: "FLOW_PAYMENT_PENDING", label: "Pagamento: pendente" },
+  { category: "Flow", key: "FLOW_QUOTA_REACHED_PREFIX", label: "Limite mensal atingido (prefixo)" },
+  { category: "Flow", key: "FLOW_FALLBACK_UNKNOWN", label: "Fallback final (não entendi)" },
+  { category: "Flow", key: "FLOW_OPENAI_ERROR", label: "Erro técnico OpenAI" },
+
 
   { category: "Flow", key: "FLOW_BLOCKED", label: "Acesso bloqueado" },
   { category: "Flow", key: "FLOW_AFTER_AD_TEMPLATE_CHOICE", label: "Perguntar template após anúncio" },
