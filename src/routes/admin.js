@@ -23,8 +23,15 @@ import {
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { listPlans, upsertPlan, setPlanActive } from "../services/plans.js";
 
+import { redisLRange } from "../services/redis.js";
+
 import { pushSystemAlert, listSystemAlerts, getSystemAlertsCount } from "../services/alerts.js";
-import { createAndDispatchCampaign, listCampaigns, getCampaignDetails } from "../services/campaigns.js";
+import {
+  createCampaignAndDispatch,
+  getCampaign,
+  listCampaigns,
+  reprocessCampaignForActiveWindow,
+} from "../services/broadcast.js";
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -405,7 +412,26 @@ load();
   router.get("/campaigns", async (req, res) => {
     try {
       const limit = Number(req.query?.limit || 50);
-      const items = await listCampaigns({ limit });
+      const data = await listCampaigns(limit);
+
+      const campaigns = Array.isArray(data?.campaigns) ? data.campaigns : [];
+      const items = campaigns.map((c) => {
+        const meta = c?.meta || {};
+        const stats = c?.stats || {};
+        return {
+          id: String(c?.id || ""),
+          createdAt: meta.createdAt || null,
+          subject: meta.subject || "",
+          text: meta.text || "",
+          planCodes: Array.isArray(meta.planTargets) ? meta.planTargets : [],
+          counts: {
+            sentCount: Number(stats.sent || 0),
+            pendingCount: Number(stats.pending || 0),
+            errorCount: Number(stats.errors || 0),
+          },
+        };
+      });
+
       return res.json({ ok: true, returned: items.length, items });
     } catch (err) {
       await pushSystemAlert("CAMPAIGNS_LIST_FAILED", { error: String(err?.message || err) });
@@ -418,8 +444,36 @@ load();
       const id = String(req.params?.id || "").trim();
       if (!id) return res.status(400).json({ ok: false, error: "id required" });
 
-      const item = await getCampaignDetails(id);
-      if (!item) return res.status(404).json({ ok: false, error: "campaign not found" });
+      const data = await getCampaign(id);
+      const campaign = data?.campaign;
+      if (!campaign) return res.status(404).json({ ok: false, error: "campaign not found" });
+
+      // Errors (últimos 50)
+      const errorsRaw = await redisLRange(`campaign:${id}:errors`, 0, 49).catch(() => []);
+      const errors = (Array.isArray(errorsRaw) ? errorsRaw : []).map((s) => {
+        try {
+          return JSON.parse(String(s));
+        } catch {
+          return { ts: new Date().toISOString(), raw: String(s) };
+        }
+      });
+
+      const meta = campaign?.meta || {};
+      const stats = campaign?.stats || {};
+
+      const item = {
+        id: String(campaign?.id || id),
+        createdAt: meta.createdAt || null,
+        subject: meta.subject || "",
+        text: meta.text || "",
+        planCodes: Array.isArray(meta.planTargets) ? meta.planTargets : [],
+        counts: {
+          sentCount: Number(stats.sent || 0),
+          pendingCount: Number(stats.pending || 0),
+          errorCount: Number(stats.errors || 0),
+        },
+        errors,
+      };
 
       return res.json({ ok: true, item });
     } catch (err) {
@@ -448,13 +502,54 @@ load();
         return res.status(400).json({ ok: false, error: "subject or text is required" });
       }
 
-      const result = await createAndDispatchCampaign({
+      // Compat com o modelo novo (broadcast.js)
+      const data = await createCampaignAndDispatch({
         subject,
         text,
-        planCodes,
-        messageType: messageType === "TEMPLATE" ? "TEMPLATE" : "TEXT",
-        template: req.body?.template ?? null,
+        planTargets: planCodes,
+        mode: messageType === "TEMPLATE" ? "TEMPLATE" : "TEXT",
       });
+
+      // Mantém formato esperado pela UI atual
+      const c = data?.campaign || {};
+      const meta = c?.meta || {};
+      const stats = c?.stats || {};
+      const result = {
+        id: String(c?.id || ""),
+        createdAt: meta.createdAt || null,
+        subject: meta.subject || "",
+        text: meta.text || "",
+        planCodes: Array.isArray(meta.planTargets) ? meta.planTargets : [],
+        counts: {
+          sentCount: Number(stats.sent || 0),
+          pendingCount: Number(stats.pending || 0),
+          errorCount: Number(stats.errors || 0),
+        },
+      };
+
+      return res.json({ ok: true, result });
+    } catch (err) {
+      await pushSystemAlert("CAMPAIGN_CREATE_FAILED", { error: String(err?.message || err) });
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // ✅ Reprocessar pendências de uma campanha APENAS para usuários que já estão na janela 24h agora
+  // POST /admin/campaigns/:id/reprocess?limit=5000
+  router.post("/campaigns/:id/reprocess", async (req, res) => {
+    try {
+      const id = String(req.params?.id || "").trim();
+      if (!id) return res.status(400).json({ ok: false, error: "id required" });
+
+      const limit = Number(req.query?.limit || 5000);
+      const result = await reprocessCampaignForActiveWindow(id, { limit });
+
+      return res.json({ ok: true, result });
+    } catch (err) {
+      await pushSystemAlert("CAMPAIGN_REPROCESS_FAILED", { error: String(err?.message || err) });
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
 
       return res.json({ ok: true, result });
     } catch (err) {
@@ -578,6 +673,13 @@ async function send(){
       <button onclick="load()">Atualizar</button>
     </div>
 
+    <div class="row" style="margin-top:10px;">
+      <input id="cpId" placeholder="campaignId (ex: cp_...)" style="min-width:320px;" />
+      <input id="reLimit" placeholder="limit janela (ex: 5000)" value="5000" style="width:180px;" />
+      <button onclick="reprocess()">Reprocessar (janela 24h)</button>
+      <span class="muted">Reenvia somente pendências para usuários que já estão na janela 24h agora.</span>
+    </div>
+
     <div id="tableWrap"></div>
     <h3>Detalhes</h3>
     <pre id="details" class="muted">Clique em "Ver" em alguma campanha.</pre>
@@ -614,6 +716,15 @@ async function load(){
     '<table><thead><tr><th>ID</th><th>Conteúdo</th><th>Contagem</th><th>Ação</th></tr></thead><tbody>'
     + (rows || '<tr><td colspan="4" class="muted">Nenhuma campanha encontrada.</td></tr>')
     + '</tbody></table>';
+}
+
+async function reprocess(){
+  const id = (document.getElementById('cpId').value||'').trim();
+  const lim = (document.getElementById('reLimit').value||'5000').trim();
+  if(!id){ alert('Informe o campaignId'); return; }
+  const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/reprocess?limit=' + encodeURIComponent(lim), { method:'POST' });
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('details').textContent = JSON.stringify(j, null, 2);
 }
 
 async function view(id){
