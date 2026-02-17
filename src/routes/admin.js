@@ -8,6 +8,7 @@ import {
   setUserTrialUsed,
   getUserSnapshot,
   clearLastPrompt, // ✅ V16.4.6: limpar via DEL (não SET "")
+  setLastPrompt,  // ✅ TESTE CONTROLADO: forçar setLastPrompt("")
 } from "../services/state.js";
 
 import {
@@ -290,6 +291,22 @@ async function load(){
 
       const user = await getUserSnapshot(waId);
       return res.json({ ok: true, action: "reset-trial", waId, user });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // ✅ TESTE CONTROLADO: força chamada direta de setLastPrompt("")
+  // Objetivo: provar que o hardening no state.js está funcionando (vazio => DEL)
+  router.get("/state-test/set-lastprompt-empty", async (req, res) => {
+    try {
+      const waId = requireWaId(req);
+
+      // 🔴 proposital: chamar setLastPrompt com string vazia
+      await setLastPrompt(waId, "");
+
+      const user = await getUserSnapshot(waId);
+      return res.json({ ok: true, action: "set-lastprompt-empty", waId, user });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
