@@ -7,8 +7,9 @@ import {
   setUserQuotaUsed,
   setUserTrialUsed,
   getUserSnapshot,
+  listUsers,
   clearLastPrompt, // ✅ V16.4.6: limpar via DEL (não SET "")
-  setLastPrompt, // ✅ TESTE CONTROLADO: forçar setLastPrompt("")
+  setLastPrompt,  // ✅ TESTE CONTROLADO: forçar setLastPrompt("")
 } from "../services/state.js";
 
 import {
@@ -20,16 +21,10 @@ import {
 } from "../services/window24h.js";
 
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
-import {
-  listPlans,
-  upsertPlan,
-  setPlanActive,
-  getPlansHealth,
-  listSystemAlerts,
-  getSystemAlertsCount,
-} from "../services/plans.js";
+import { listPlans, upsertPlan, setPlanActive } from "../services/plans.js";
 
-import { createCampaignAndDispatch, listCampaigns, getCampaign } from "../services/broadcast.js";
+import { pushSystemAlert, listSystemAlerts, getSystemAlertsCount } from "../services/alerts.js";
+import { createAndDispatchCampaign, listCampaigns, getCampaignDetails } from "../services/campaigns.js";
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -83,9 +78,9 @@ export function adminRouter() {
       <div>
         <h3>Produto</h3>
         <a href="/admin/plans">💳 Planos</a><br/>
+        <a href="/admin/window24h-ui">🕒 Janela 24h</a><br/>
         <a href="/admin/broadcast-ui">📣 Broadcast</a><br/>
         <a href="/admin/campaigns-ui">📦 Campanhas</a><br/>
-        <a href="/admin/window24h-ui">🕒 Janela 24h</a><br/>
       </div>
       <div>
         <h3>Atalhos técnicos</h3>
@@ -144,9 +139,6 @@ async function go(path){
     return res.status(200).send(html);
   });
 
-  // -----------------------------
-  // Planos
-  // -----------------------------
   router.get("/plans", async (req, res) => {
     const plans = await listPlans({ includeInactive: true });
 
@@ -222,21 +214,22 @@ async function create(){
   const body = {
     code: (document.getElementById('code').value||'').trim(),
     name: (document.getElementById('name').value||'').trim(),
-    priceCents: Number(document.getElementById('priceCents').value||0),
-    monthlyQuota: Number(document.getElementById('monthlyQuota').value||0),
+    priceCents: Number((document.getElementById('priceCents').value||'').trim()),
+    monthlyQuota: Number((document.getElementById('monthlyQuota').value||'').trim()),
     description: (document.getElementById('description').value||'').trim(),
-    active: true,
+    active: true
   };
   const r = await fetch('/admin/plans', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   const j = await r.json().catch(()=>({}));
-  document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
-  if(j.ok) setTimeout(()=>location.reload(), 300);
+  document.getElementById('msg').textContent = JSON.stringify(j,null,2);
+  if(j.ok) location.reload();
 }
+
 async function toggle(code, active){
-  const r = await fetch('/admin/plans/'+encodeURIComponent(code)+'/active', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({active}) });
+  const r = await fetch('/admin/plans/toggle?code=' + encodeURIComponent(code) + '&active=' + encodeURIComponent(active));
   const j = await r.json().catch(()=>({}));
-  document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
-  if(j.ok) setTimeout(()=>location.reload(), 300);
+  document.getElementById('msg').textContent = JSON.stringify(j,null,2);
+  if(j.ok) location.reload();
 }
 </script>
 </body>
@@ -248,90 +241,25 @@ async function toggle(code, active){
 
   router.post("/plans", async (req, res) => {
     try {
-      const plan = await upsertPlan(req.body || {});
+      const plan = await upsertPlan(req.body);
       return res.json({ ok: true, plan });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
     }
   });
 
-  router.post("/plans/:code/active", async (req, res) => {
+  router.get("/plans/toggle", async (req, res) => {
     try {
-      const active = Boolean(req.body?.active);
-      const plan = await setPlanActive(req.params.code, active);
+      const code = String(req.query?.code || "").trim();
+      const active = String(req.query?.active || "false").trim() === "true";
+      const plan = await setPlanActive(code, active);
       return res.json({ ok: true, plan });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
     }
   });
 
-  // -----------------------------
-  // ✅ Health Planos
-  // -----------------------------
-  router.get("/health-plans", async (req, res) => {
-    const h = await getPlansHealth({ includeInactive: true });
-    return res.json({ ok: true, health: h });
-  });
-
-  // -----------------------------
-  // ✅ Alertas do Sistema (UI + APIs)
-  // -----------------------------
-  router.get("/alerts-count", async (req, res) => {
-    const count = await getSystemAlertsCount();
-    return res.json({ ok: true, count });
-  });
-
-  router.get("/alerts", async (req, res) => {
-    const limit = Number(req.query?.limit || 50);
-    const items = await listSystemAlerts(limit);
-    return res.json({ ok: true, count: items.length, items });
-  });
-
-  router.get("/alerts-ui", async (req, res) => {
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Alertas</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>🚨 Alertas do Sistema</h2>
-    <p><a href="/admin">⬅ Voltar</a></p>
-    <div class="row">
-      <input id="limit" placeholder="limit (ex: 50)" value="50" />
-      <button onclick="load()">Carregar</button>
-    </div>
-    <pre id="out"></pre>
-  </div>
-<script>
-async function load(){
-  const limit = (document.getElementById('limit').value||'50').trim();
-  const r = await fetch('/admin/alerts?limit='+encodeURIComponent(limit));
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-}
-load();
-</script>
-</body>
-</html>`;
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
-  });
-
-  // -----------------------------
-  // Janela 24h (UI já existente)
-  // -----------------------------
   router.get("/window24h-ui", async (req, res) => {
-    const count = await countWindow24hActive();
     const html = `<!doctype html>
 <html>
 <head>
@@ -341,193 +269,45 @@ load();
   <style>
     body { font-family: Arial, sans-serif; padding: 24px; }
     .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
     .muted { color:#666; }
     pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
   </style>
 </head>
 <body>
   <div class="card">
     <h2>🕒 Janela 24h</h2>
-    <div class="muted">Usuários dentro da janela de 24 horas.</div>
     <p><a href="/admin">⬅ Voltar</a></p>
-    <p><b>Ativos agora:</b> ${escapeHtml(String(count))}</p>
-    <button onclick="load()">Carregar lista (JSON)</button>
-    <pre id="out"></pre>
-  </div>
-<script>
-async function load(){
-  const r = await fetch("/admin/window24h");
-  const j = await r.json();
-  document.getElementById("out").textContent = JSON.stringify(j, null, 2);
-}
-</script>
-</body>
-</html>`;
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
-  });
-
-  // -----------------------------
-  // ✅ Broadcast UI
-  // -----------------------------
-  router.get("/broadcast-ui", async (req, res) => {
-    const plans = await listPlans({ includeInactive: false });
-
-    const options =
-      `<option value="">(Todos os planos)</option>` +
-      plans
-        .map((p) => `<option value="${escapeHtml(p.code)}">${escapeHtml(p.name)} (${escapeHtml(p.code)})</option>`)
-        .join("");
-
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Broadcast</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    input, textarea, select, button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; }
-    textarea { width: 100%; min-height: 140px; }
-    button { cursor:pointer; background:white; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    .muted { color:#666; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>📣 Broadcast</h2>
-    <p><a href="/admin">⬅ Voltar</a> | <a href="/admin/campaigns-ui">📦 Ver campanhas</a></p>
 
     <div class="row">
-      <label>Plano alvo:</label>
-      <select id="plan">${options}</select>
-      <span class="muted">Envio imediato só para quem está na janela 24h. Fora da janela fica pendente e envia automaticamente quando entrar.</span>
+      <button onclick="load()">Atualizar</button>
+      <span class="muted">Total ativos na janela: <b id="count">...</b></span>
     </div>
 
-    <p>
-      <input id="subject" placeholder="Assunto (interno)" style="width:100%" />
-    </p>
-    <p>
-      <textarea id="text" placeholder="Texto do broadcast (WhatsApp)"></textarea>
-    </p>
-
-    <div class="row">
-      <button onclick="send()">Enviar campanha</button>
-    </div>
-
-    <pre id="out"></pre>
-  </div>
-
-<script>
-async function send(){
-  const plan = (document.getElementById('plan').value||'').trim();
-  const subject = (document.getElementById('subject').value||'').trim();
-  const text = (document.getElementById('text').value||'').trim();
-
-  const body = { subject, text };
-  if(plan) body.planTargets = [plan];
-
-  const r = await fetch('/admin/campaigns', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body)
-  });
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-}
-</script>
-</body>
-</html>`;
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
-  });
-
-  // -----------------------------
-  // ✅ Campanhas (UI + APIs)
-  // -----------------------------
-  router.get("/campaigns-ui", async (req, res) => {
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Campanhas</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>📦 Campanhas</h2>
-    <p><a href="/admin">⬅ Voltar</a> | <a href="/admin/broadcast-ui">📣 Nova campanha</a></p>
-
-    <div class="row">
-      <input id="limit" placeholder="limit (ex: 30)" value="30" />
-      <button onclick="load()">Carregar</button>
-    </div>
-
-    <pre id="out"></pre>
+    <pre id="out" class="muted">Clique em "Atualizar".</pre>
   </div>
 
 <script>
 async function load(){
-  const limit = (document.getElementById('limit').value||'30').trim();
-  const r = await fetch('/admin/campaigns?limit='+encodeURIComponent(limit));
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+  const r1 = await fetch('/admin/window24h');
+  const j1 = await r1.json().catch(()=>({}));
+  document.getElementById('count').textContent = (j1.count ?? 0);
+  document.getElementById('out').textContent = JSON.stringify(j1, null, 2);
 }
 load();
 </script>
 </body>
 </html>`;
+
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
 
-  router.get("/campaigns", async (req, res) => {
-    const limit = Number(req.query?.limit || 30);
-    const data = await listCampaigns(limit);
-    return res.json(data);
-  });
+  // ----------------------------
+  // ✅ State test endpoints
+  // ----------------------------
 
-  router.get("/campaigns/:id", async (req, res) => {
-    const id = String(req.params.id || "").trim();
-    const data = await getCampaign(id);
-    return res.json(data);
-  });
-
-  router.post("/campaigns", async (req, res) => {
-    try {
-      const subject = String(req.body?.subject || "").trim();
-      const text = String(req.body?.text || "").trim();
-      const planTargets = req.body?.planTargets || null;
-
-      const r = await createCampaignAndDispatch({
-        subject,
-        text,
-        planTargets,
-        mode: "TEXT",
-      });
-
-      return res.json(r);
-    } catch (err) {
-      return res.status(400).json({ ok: false, error: err.message });
-    }
-  });
-
-  // -----------------------------
-  // Testes / State (mantidos)
-  // -----------------------------
   router.get("/state-test/reset-trial", async (req, res) => {
     try {
       const waId = requireWaId(req);
@@ -535,10 +315,6 @@ load();
       await setUserPlan(waId, "");
       await setUserQuotaUsed(waId, 0);
       await setUserTrialUsed(waId, 0);
-
-      // ✅ V16.4.6: Upstash REST não aceita SET com valor vazio de forma confiável
-      await clearLastPrompt(waId);
-
       const user = await getUserSnapshot(waId);
       return res.json({ ok: true, action: "reset-trial", waId, user });
     } catch (err) {
@@ -546,10 +322,26 @@ load();
     }
   });
 
+  router.get("/state-test/clear-lastprompt", async (req, res) => {
+    try {
+      const waId = requireWaId(req);
+      await clearLastPrompt(waId);
+      const user = await getUserSnapshot(waId);
+      return res.json({ ok: true, action: "clear-lastprompt", waId, user });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // ✅ TESTE CONTROLADO (produção): força setLastPrompt("")
+  // Objetivo: provar que o hardening no state.js está funcionando (vazio => DEL)
   router.get("/state-test/set-lastprompt-empty", async (req, res) => {
     try {
       const waId = requireWaId(req);
+
+      // 🔴 proposital: chamar setLastPrompt com string vazia
       await setLastPrompt(waId, "");
+
       const user = await getUserSnapshot(waId);
       return res.json({ ok: true, action: "set-lastprompt-empty", waId, user });
     } catch (err) {
@@ -600,6 +392,345 @@ load();
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
+  });
+
+  // ----------------------------
+  // ✅ Broadcast Inteligente (Campanhas)
+  // - POST /admin/campaigns  => cria + dispatch (janela 24h)
+  // - GET  /admin/campaigns  => lista
+  // - GET  /admin/campaigns/:id => detalhes
+  // - UI: /admin/broadcast-ui e /admin/campaigns-ui
+  // ----------------------------
+
+  router.get("/campaigns", async (req, res) => {
+    try {
+      const limit = Number(req.query?.limit || 50);
+      const items = await listCampaigns({ limit });
+      return res.json({ ok: true, returned: items.length, items });
+    } catch (err) {
+      await pushSystemAlert("CAMPAIGNS_LIST_FAILED", { error: String(err?.message || err) });
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get("/campaigns/:id", async (req, res) => {
+    try {
+      const id = String(req.params?.id || "").trim();
+      if (!id) return res.status(400).json({ ok: false, error: "id required" });
+
+      const item = await getCampaignDetails(id);
+      if (!item) return res.status(404).json({ ok: false, error: "campaign not found" });
+
+      return res.json({ ok: true, item });
+    } catch (err) {
+      await pushSystemAlert("CAMPAIGN_GET_FAILED", { error: String(err?.message || err) });
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.post("/campaigns", async (req, res) => {
+    try {
+      const subject = String(req.body?.subject || "").trim();
+      const text = String(req.body?.text || "").trim();
+      const messageType = String(req.body?.messageType || "TEXT").trim().toUpperCase();
+
+      // planCodes pode vir como array ou string CSV
+      let planCodes = req.body?.planCodes ?? [];
+      if (typeof planCodes === "string") {
+        planCodes = planCodes
+          .split(",")
+          .map((s) => String(s).trim())
+          .filter(Boolean);
+      }
+      if (!Array.isArray(planCodes)) planCodes = [];
+
+      if (!subject && !text) {
+        return res.status(400).json({ ok: false, error: "subject or text is required" });
+      }
+
+      const result = await createAndDispatchCampaign({
+        subject,
+        text,
+        planCodes,
+        messageType: messageType === "TEMPLATE" ? "TEMPLATE" : "TEXT",
+        template: req.body?.template ?? null,
+      });
+
+      return res.json({ ok: true, result });
+    } catch (err) {
+      await pushSystemAlert("CAMPAIGN_CREATE_FAILED", { error: String(err?.message || err) });
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get("/broadcast-ui", async (req, res) => {
+    const plans = await listPlans({ includeInactive: true });
+    const planOptions = (plans || [])
+      .filter((p) => p && p.code)
+      .map((p) => {
+        const code = escapeHtml(p.code);
+        const name = escapeHtml(p.name || p.code);
+        return `<label style="display:inline-flex; gap:6px; align-items:center; margin: 6px 10px 6px 0;">
+          <input type="checkbox" name="plan" value="${code}" /> <span>${name} (<code>${code}</code>)</span>
+        </label>`;
+      })
+      .join("");
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Broadcast</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    input, textarea, button { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #ddd; }
+    textarea { width: 100%; min-height: 160px; }
+    button { cursor: pointer; background: white; }
+    .muted { color: #666; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
+    code { background:#f6f6f6; padding:2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>📣 Broadcast (Campanha)</h2>
+    <p><a href="/admin">⬅ Voltar</a> · <a href="/admin/campaigns-ui">📦 Ver campanhas</a></p>
+
+    <p class="muted">
+      Regras: envia <b>agora</b> somente para quem está na janela 24h; quem estiver fora fica <b>pendente</b> e será enviado automaticamente quando entrar na janela (quando mandar inbound).
+    </p>
+
+    <div class="row">
+      <input id="subject" placeholder="Assunto (opcional)" style="min-width:420px" />
+      <select id="messageType">
+        <option value="TEXT">Texto (agora)</option>
+        <option value="TEMPLATE">Template (futuro)</option>
+      </select>
+      <button onclick="send()">Criar e enviar</button>
+    </div>
+
+    <div style="margin-top: 12px;">
+      <textarea id="text" placeholder="Texto da campanha (ex.: manutenção, aviso, promoção...)"></textarea>
+    </div>
+
+    <h3 style="margin-top:16px;">Filtro por plano</h3>
+    <p class="muted">Se não marcar nenhum, envia para <b>todos</b>.</p>
+    <div>${planOptions || "<span class='muted'>Nenhum plano encontrado.</span>"}</div>
+
+    <pre id="out"></pre>
+  </div>
+
+<script>
+function selectedPlans(){
+  return Array.from(document.querySelectorAll('input[name="plan"]:checked')).map(x => x.value);
+}
+async function send(){
+  const subject = (document.getElementById('subject').value||'').trim();
+  const text = (document.getElementById('text').value||'').trim();
+  const messageType = (document.getElementById('messageType').value||'TEXT').trim();
+  const planCodes = selectedPlans();
+
+  const r = await fetch('/admin/campaigns', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subject, text, messageType, planCodes })
+  });
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+}
+</script>
+</body>
+</html>`;
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  router.get("/campaigns-ui", async (req, res) => {
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Campanhas</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    table { width:100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { padding: 10px; border-bottom: 1px solid #eee; text-align:left; vertical-align: top; }
+    .muted { color:#666; }
+    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
+    code { background:#f6f6f6; padding:2px 6px; border-radius: 6px; }
+    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>📦 Campanhas</h2>
+    <p><a href="/admin">⬅ Voltar</a> · <a href="/admin/broadcast-ui">📣 Nova campanha</a></p>
+
+    <div class="row">
+      <input id="limit" value="50" />
+      <button onclick="load()">Atualizar</button>
+    </div>
+
+    <div id="tableWrap"></div>
+    <h3>Detalhes</h3>
+    <pre id="details" class="muted">Clique em "Ver" em alguma campanha.</pre>
+  </div>
+
+<script>
+function esc(s){ return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+
+async function load(){
+  const limit = Number(document.getElementById('limit').value||50);
+  const r = await fetch('/admin/campaigns?limit=' + encodeURIComponent(limit));
+  const j = await r.json().catch(()=>({}));
+  const items = (j.items||[]);
+
+  let rows = '';
+  for(const it of items){
+    const id = esc(it.id);
+    const createdAt = esc(it.createdAt||'');
+    const subject = esc(it.subject||'');
+    const plans = Array.isArray(it.planCodes) && it.planCodes.length ? it.planCodes.join(', ') : 'TODOS';
+    const sent = it.counts?.sentCount ?? 0;
+    const pending = it.counts?.pendingCount ?? 0;
+    const errors = it.counts?.errorCount ?? 0;
+
+    rows += '<tr>'
+      + '<td><code>' + id + '</code><br/><span class="muted">' + createdAt + '</span></td>'
+      + '<td>' + subject + '<br/><span class="muted">Planos: ' + esc(plans) + '</span></td>'
+      + '<td>Enviados: <b>' + sent + '</b><br/>Pendentes: <b>' + pending + '</b><br/>Erros: <b>' + errors + '</b></td>'
+      + '<td><button onclick="view(\\'' + id + '\\')">Ver</button></td>'
+      + '</tr>';
+  }
+
+  document.getElementById('tableWrap').innerHTML =
+    '<table><thead><tr><th>ID</th><th>Conteúdo</th><th>Contagem</th><th>Ação</th></tr></thead><tbody>'
+    + (rows || '<tr><td colspan="4" class="muted">Nenhuma campanha encontrada.</td></tr>')
+    + '</tbody></table>';
+}
+
+async function view(id){
+  const r = await fetch('/admin/campaigns/' + encodeURIComponent(id));
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('details').textContent = JSON.stringify(j, null, 2);
+}
+
+load();
+</script>
+</body>
+</html>`;
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  // ----------------------------
+  // ✅ Health + Alertas (telemetria)
+  // ----------------------------
+
+  router.get("/health-plans", async (req, res) => {
+    try {
+      const plansAll = await listPlans({ includeInactive: true });
+      const activePlans = (plansAll || []).filter((p) => Boolean(p?.active));
+
+      const health = {
+        ok: activePlans.length > 0,
+        countAll: (plansAll || []).length,
+        countActive: activePlans.length,
+        reason:
+          (plansAll || []).length === 0
+            ? "NO_PLANS"
+            : activePlans.length === 0
+              ? "ALL_INACTIVE"
+              : null,
+      };
+
+      if (!health.ok) {
+        await pushSystemAlert("PLANS_EMPTY_OR_ERROR", {
+          reason: health.reason,
+          countAll: health.countAll,
+          countActive: health.countActive,
+        });
+      }
+
+      return res.json({ ok: true, health });
+    } catch (err) {
+      await pushSystemAlert("PLANS_HEALTH_CHECK_FAILED", { error: String(err?.message || err) });
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get("/alerts-count", async (req, res) => {
+    try {
+      const count = await getSystemAlertsCount();
+      return res.json({ ok: true, count });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get("/alerts", async (req, res) => {
+    try {
+      const limit = Number(req.query?.limit || 50);
+      const items = await listSystemAlerts(limit);
+      return res.json({ ok: true, returned: items.length, items });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  router.get("/alerts-ui", async (req, res) => {
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Alertas</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; }
+    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
+    button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; cursor:pointer; background:white; }
+    pre { background:#f6f6f6; padding: 12px; border-radius: 12px; overflow:auto; }
+    .muted { color:#666; }
+    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
+    input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; width: 120px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>🚨 Alertas do Sistema</h2>
+    <p><a href="/admin">⬅ Voltar</a></p>
+    <div class="row">
+      <div class="muted">Mostra os últimos alertas persistidos em Redis (TTL ~ 7 dias).</div>
+    </div>
+    <div class="row" style="margin-top: 10px;">
+      <input id="limit" value="50" />
+      <button onclick="load()">Atualizar</button>
+    </div>
+    <pre id="out" class="muted">Clique em "Atualizar".</pre>
+  </div>
+
+<script>
+async function load(){
+  const limit = Number(document.getElementById('limit').value || 50);
+  const r = await fetch('/admin/alerts?limit=' + encodeURIComponent(limit));
+  const j = await r.json().catch(()=>({}));
+  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+}
+load();
+</script>
+</body>
+</html>`;
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
   });
 
   return router;
