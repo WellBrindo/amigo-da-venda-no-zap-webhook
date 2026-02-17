@@ -4,7 +4,7 @@ import { Router } from "express";
 import { touch24hWindow } from "../services/window24h.js";
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { handleInboundText } from "../services/flow.js";
-import { processPendingForWaId } from "../services/broadcast.js";
+import { processPendingCampaignsForUser } from "../services/campaigns.js";
 
 export function webhookRouter() {
   const router = Router();
@@ -51,6 +51,21 @@ export function webhookRouter() {
             // 1) marca janela 24h
             await touch24hWindow(String(waId));
 
+            // ✅ 1.1) processa campanhas pendentes (se entrar na janela)
+            // (não interfere no fluxo: envia mensagens adicionais se houver)
+            try {
+              await processPendingCampaignsForUser(String(waId));
+            } catch (err) {
+              console.warn(
+                JSON.stringify({
+                  level: "warn",
+                  tag: "process_pending_campaigns_failed",
+                  waId: String(waId),
+                  error: String(err?.message || err),
+                })
+              );
+            }
+
             // 2) pega texto inbound (só texto por enquanto)
             let inboundText = "";
             if (msg?.type === "text") {
@@ -64,14 +79,6 @@ export function webhookRouter() {
             // 4) responde se necessário
             if (r?.shouldReply && r?.replyText) {
               await sendWhatsAppText({ to: String(waId), text: String(r.replyText) });
-            }
-
-            // 5) ✅ Auto-send: se esse usuário tinha campanhas pendentes, envia agora (janela 24h garantida)
-            // Observação: fazemos após responder o fluxo para não “atropelar” a conversa.
-            try {
-              await processPendingForWaId(String(waId));
-            } catch (err) {
-              console.warn("processPendingForWaId failed:", err?.message || err);
             }
           }
         }
