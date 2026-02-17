@@ -43,7 +43,6 @@ function requireWaId(req) {
 export function adminRouter() {
   const router = Router();
 
-  // -------------------- INDEX --------------------
   router.get("/", async (req, res) => {
     const html = `<!doctype html>
 <html>
@@ -120,20 +119,19 @@ async function go(path){
     return res.status(200).send(html);
   });
 
-  // -------------------- PLANS UI --------------------
   router.get("/plans", async (req, res) => {
     const plans = await listPlans({ includeInactive: true });
 
     const rows = plans
       .map((p) => {
         const code = escapeHtml(p.code);
-        const label = escapeHtml(p.label);
+        const name = escapeHtml(p.name);
         const price = escapeHtml(String(p.priceCents / 100).replace(".", ","));
-        const quota = escapeHtml(String(p.quota));
+        const quota = escapeHtml(String(p.monthlyQuota));
         const active = p.active ? "✅" : "❌";
         return `<tr>
           <td><code>${code}</code></td>
-          <td>${label}</td>
+          <td>${name}</td>
           <td>R$ ${price}</td>
           <td>${quota}</td>
           <td>${active}</td>
@@ -171,9 +169,10 @@ async function go(path){
 
     <div class="row">
       <input id="code" placeholder="code (ex: DE_VEZ_EM_QUANDO)" style="min-width:280px" />
-      <input id="label" placeholder="label (ex: De Vez em Quando)" style="min-width:280px" />
+      <input id="name" placeholder="name (ex: De Vez em Quando)" style="min-width:280px" />
       <input id="priceCents" placeholder="priceCents (ex: 2490)" />
-      <input id="quota" placeholder="quota (ex: 20)" />
+      <input id="monthlyQuota" placeholder="monthlyQuota (ex: 20)" />
+      <input id="description" placeholder="description (ex: 20 descrições/mês)" style="min-width:320px" />
       <button onclick="create()">Criar/Atualizar</button>
     </div>
     <p class="muted">Dica: priceCents em centavos (R$ 24,90 = 2490).</p>
@@ -182,12 +181,11 @@ async function go(path){
     <table>
       <thead>
         <tr>
-          <th>Code</th><th>Label</th><th>Preço</th><th>Cota</th><th>Ativo</th><th>Ação</th>
+          <th>Code</th><th>Nome</th><th>Preço</th><th>Cota</th><th>Ativo</th><th>Ação</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
-
     <pre id="msg"></pre>
   </div>
 
@@ -195,9 +193,11 @@ async function go(path){
 async function create(){
   const body = {
     code: (document.getElementById('code').value||'').trim(),
-    label: (document.getElementById('label').value||'').trim(),
+    name: (document.getElementById('name').value||'').trim(),
     priceCents: Number(document.getElementById('priceCents').value||0),
-    quota: Number(document.getElementById('quota').value||0),
+    monthlyQuota: Number(document.getElementById('monthlyQuota').value||0),
+    description: (document.getElementById('description').value||'').trim(),
+    active: true,
   };
   const r = await fetch('/admin/plans', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
   const j = await r.json().catch(()=>({}));
@@ -237,7 +237,6 @@ async function toggle(code, active){
     }
   });
 
-  // -------------------- 24h WINDOW UI --------------------
   router.get("/window24h-ui", async (req, res) => {
     const count = await countWindow24hActive();
     const html = `<!doctype html>
@@ -260,11 +259,9 @@ async function toggle(code, active){
     <div class="muted">Usuários dentro da janela de 24 horas.</div>
     <p><a href="/admin">⬅ Voltar</a></p>
     <p><b>Ativos agora:</b> ${escapeHtml(String(count))}</p>
-
     <button onclick="load()">Carregar lista (JSON)</button>
     <pre id="out"></pre>
   </div>
-
 <script>
 async function load(){
   const r = await fetch("/admin/window24h");
@@ -279,7 +276,6 @@ async function load(){
     return res.status(200).send(html);
   });
 
-  // -------------------- JSON / actions --------------------
   router.get("/state-test/reset-trial", async (req, res) => {
     try {
       const waId = requireWaId(req);
