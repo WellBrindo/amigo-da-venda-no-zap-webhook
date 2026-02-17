@@ -1,11 +1,10 @@
 // src/services/broadcast.js
-// ✅ V16.4.8 — Broadcast inteligente com campanhas:
+// ✅ V16.4.7 — Broadcast inteligente com campanhas:
 // - Filtra por plano
 // - Envia somente para usuários na janela 24h
 // - Fora da janela: fica pendente
 // - Ao entrar na janela (touch inbound): envia automaticamente
 // - Registra campanhas e estatísticas (sent/pending/errors)
-// - ✅ Reprocesso manual: reenviar pendências apenas para quem já está na janela 24h
 
 import {
   redisSet,
@@ -238,6 +237,11 @@ export async function listCampaigns(limit = 30) {
 }
 
 /**
+ * ✅ Auto-send pendências quando o usuário entra na janela 24h
+ * Chame isso no webhook inbound (após touch24hWindow).
+ */
+
+/**
  * ✅ Reprocessa (reenviar) APENAS pendências da campanha para usuários que JÁ estão na janela 24h agora.
  * - Não move usuários para janela.
  * - Não toca em usuários fora da janela (continuam pendentes).
@@ -318,10 +322,7 @@ export async function reprocessCampaignForActiveWindow(campaignId, opts = {}) {
   return { ok: true, campaignId: id, pendingBefore, attempted, sent, errors, pendingAfter };
 }
 
-/**
- * ✅ Auto-send pendências quando o usuário entra na janela 24h
- * Chame isso no webhook inbound (após touch24hWindow).
- */
+
 export async function processPendingForWaId(waId) {
   const id = safeStr(waId);
   if (!id) return { ok: true, processed: 0 };
