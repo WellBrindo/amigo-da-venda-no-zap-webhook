@@ -1,6 +1,8 @@
 // src/services/redis.js
 // Upstash Redis REST helpers (Node.js ESM)
-// ✅ V16.0.11 — Fix definitivo: SET usa body RAW (não JSON.stringify)
+// ✅ V16.4.4 — Produção definitiva:
+// - redisSet suporta value="" sem quebrar (evita ERR wrong number of arguments for 'set')
+// - Mantém compatibilidade com chamadas atuais (path-based) quando value não é vazio
 
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -12,10 +14,13 @@ function assertRedisEnv() {
 }
 
 /**
- * Upstash REST rule:
- * POST /SET/key  + body = value
- * Body é anexado como último argumento do comando.
- * NÃO precisa ser JSON.
+ * Upstash REST:
+ * - Args são segmentos do path
+ * - Body do POST é anexado como último argumento do comando (quando enviado)
+ *
+ * Ex:
+ * POST /SET/foo/bar           -> SET foo bar
+ * POST /SET/foo  (body:"")    -> SET foo ""
  */
 async function upstash(path, bodyValue) {
   assertRedisEnv();
@@ -28,7 +33,9 @@ async function upstash(path, bodyValue) {
     method: "POST",
     headers: {
       Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
-      "Content-Type": "text/plain",
+      // Mantemos JSON por compatibilidade geral, mas o body pode ser string.
+      // Upstash não exige JSON; ele apenas lê o body como último argumento.
+      "Content-Type": hasBody ? "text/plain" : "application/json",
     },
     body: hasBody ? String(bodyValue) : undefined,
   });
@@ -59,12 +66,26 @@ export async function redisGet(key) {
   return upstash(`/GET/${encodeURIComponent(key)}`);
 }
 
+/**
+ * ✅ Produção definitiva:
+ * - value === "" => envia no body (POST /SET/<key> com body vazio)
+ * - value !== "" => usa path (POST /SET/<key>/<value>)
+ */
 export async function redisSet(key, value) {
-  if (value === undefined) {
-    throw new Error("redisSet: value is required");
-  }
   const k = encodeURIComponent(key);
-  return upstash(`/SET/${k}`, String(value));
+
+  if (value === undefined) {
+    throw new Error("redisSet: value is required (can be empty string, but not undefined)");
+  }
+
+  const v = String(value);
+
+  // value vazio: não pode virar segmento vazio no path
+  if (v.length === 0) {
+    return upstash(`/SET/${k}`, "");
+  }
+
+  return upstash(`/SET/${k}/${encodeURIComponent(v)}`);
 }
 
 export async function redisDel(key) {
@@ -79,6 +100,7 @@ export async function redisIncrBy(key, delta = 1) {
   );
 }
 
+// 🔹 detectar tipo da chave
 export async function redisType(key) {
   return upstash(`/TYPE/${encodeURIComponent(key)}`);
 }
