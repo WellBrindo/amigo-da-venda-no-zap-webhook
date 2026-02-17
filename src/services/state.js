@@ -5,6 +5,8 @@ export const USER_STATUSES = [
   "TRIAL",
   "ACTIVE",
   "WAIT_PLAN",
+  "WAIT_DOC",        // ✅ novo
+  "WAIT_PAY_METHOD", // ✅ novo
   "PAYMENT_PENDING",
   "BLOCKED",
   "OTHER",
