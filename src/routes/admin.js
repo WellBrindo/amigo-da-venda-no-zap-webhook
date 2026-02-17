@@ -26,7 +26,7 @@ function escapeHtml(s) {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll(\"\", "&quot;")
+    .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 }
 
@@ -62,6 +62,7 @@ export function adminRouter() {
     input, button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; }
     button { cursor: pointer; background: white; }
     .row { display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
   </style>
 </head>
 <body>
@@ -83,7 +84,7 @@ export function adminRouter() {
     </div>
 
     <hr/>
-    <h3>Estado do usuário (teste)</h3>
+    <h3>Usuário (teste rápido)</h3>
     <div class="row">
       <input id="waId" placeholder="waId (somente números) ex: 5511..." style="min-width:320px" />
       <button onclick="go('/admin/state-test/get')">Ver state</button>
@@ -93,7 +94,7 @@ export function adminRouter() {
     </div>
     <p class="muted">Dica: cole seu número sem + e sem espaços (ex.: 5511960765975).</p>
 
-    <pre id="out" style="background:#f6f6f6;padding:12px;border-radius:12px;overflow:auto;"></pre>
+    <pre id="out"></pre>
 
     <hr/>
     <p class="muted">Observação: o Admin usa Basic Auth (senha = ADMIN_SECRET).</p>
@@ -160,6 +161,7 @@ async function go(path){
     button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
     .muted { color:#666; }
     .row { display:flex; gap: 10px; flex-wrap: wrap; }
+    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
   </style>
 </head>
 <body>
@@ -185,7 +187,8 @@ async function go(path){
       </thead>
       <tbody>${rows}</tbody>
     </table>
-    <pre id="msg" style="background:#f6f6f6;padding:12px;border-radius:12px;overflow:auto;"></pre>
+
+    <pre id="msg"></pre>
   </div>
 
 <script>
@@ -213,15 +216,6 @@ async function toggle(code, active){
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
-  });
-
-  router.get("/plans.json", async (req, res) => {
-    try {
-      const plans = await listPlans({ includeInactive: true });
-      return res.json({ ok: true, plans });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: err.message });
-    }
   });
 
   router.post("/plans", async (req, res) => {
@@ -263,7 +257,7 @@ async function toggle(code, active){
 <body>
   <div class="card">
     <h2>🕒 Janela 24h</h2>
-    <div class="muted">Usuários dentro da janela de 24 horas (útil para evitar custo de mensagem).</div>
+    <div class="muted">Usuários dentro da janela de 24 horas.</div>
     <p><a href="/admin">⬅ Voltar</a></p>
     <p><b>Ativos agora:</b> ${escapeHtml(String(count))}</p>
 
