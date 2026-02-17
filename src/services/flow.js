@@ -19,6 +19,7 @@
 
 import { generateAdText } from "./openai/generate.js";
 import { incDescriptionMetrics } from "./metrics.js";
+import { getCopyText } from "./copy.js";
 
 import {
   ensureUserExists,
@@ -124,12 +125,12 @@ function noReply() {
 }
 
 // -------------------- Copy / Mensagens --------------------
-function msgAskName() {
-  return "Oi! 👋😊\n\nEu sou o *Amigo das Vendas*.\n\nAntes de tudo, me diga seu *nome completo*, por favor 🙂";
+async function msgAskName(waId){
+  return await getCopyText("FLOW_ASK_NAME", { waId });
 }
 
-function msgAskProduct() {
-  return "Perfeito! ✅\n\nAgora me diga: *o que você vende* ou *qual serviço você presta*?\n\nPode ser simples, tipo:\n“Vendo bolo de chocolate por R$30”";
+async function msgAskProduct(waId){
+  return await getCopyText("FLOW_ASK_PRODUCT", { waId });
 }
 
 async function msgTrialOverAndPlans() {
@@ -165,53 +166,34 @@ async function msgPlansOnly() {
   return lines.join("\n");
 }
 
-function msgAskPaymentMethod(plan) {
-  return (
-    `Show! ✅ Plano escolhido: *${plan.name}* (R$ ${moneyBRFromCents(plan.priceCents)} / mês)\n\n` +
-    "Agora escolha a forma de pagamento:\n\n" +
-    "1) *Cartão* (assinatura recorrente)\n" +
-    "2) *PIX* (pagamento manual todo mês)\n\n" +
-    "Responda com *1* ou *2*."
-  );
+async function msgAskPaymentMethod(waId, plan){
+  return await getCopyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", {
+    waId,
+    vars: {
+      planName: plan?.name || "",
+      planPrice: plan?.priceCents ? moneyBRFromCents(plan.priceCents) : "",
+    },
+  });
 }
 
-function msgAskDoc() {
-  return (
-    "Nossa, quase esqueci 😄\n" +
-    "Pra eu conseguir gerar e registrar o pagamento, preciso do seu *CPF ou CNPJ* (somente números).\n\n" +
-    "Pode me enviar, por favor?\n" +
-    "Fica tranquilo(a): eu uso só pra isso e *não aparece em mensagens nem em logs*."
-  );
+async function msgAskDoc(waId){
+  return await getCopyText("FLOW_ASK_DOC", { waId });
 }
 
-function msgInvalidDoc() {
-  return (
-    "Uhmm… acho que algum dígito ficou diferente aí 🥺😄\n" +
-    "Dá uma olhadinha e me envia de novo, por favor, somente números:\n\n" +
-    "CPF: 11 dígitos\n" +
-    "CNPJ: 14 dígitos"
-  );
+async function msgInvalidDoc(waId){
+  return await getCopyText("FLOW_INVALID_DOC", { waId });
 }
 
-function msgAfterAdAskTemplateChoice(currentMode) {
-  const hint =
-    currentMode === "FIXED"
-      ? "(*Hoje você está no TEMPLATE, que costuma converter mais.*)"
-      : "(*Hoje você está no modo LIVRE.*)";
-  return (
-    "\n\n" +
-    "Quer manter o *template*?\n\n" +
-    "1) Sim (manter template)\n" +
-    "2) Quero *formatação livre*\n\n" +
-    `${hint}\n\n` +
-    "Você também pode digitar *TEMPLATE* ou *LIVRE* a qualquer momento."
-  );
+async function msgAfterAdAskTemplateChoice(waId, currentMode){
+  const hintKey = currentMode === "FIXED" ? "FLOW_HINT_TEMPLATE_FIXED" : "FLOW_HINT_TEMPLATE_FREE";
+  const hint = await getCopyText(hintKey, { waId });
+  return await getCopyText("FLOW_AFTER_AD_TEMPLATE_CHOICE", { waId, vars: { hint } });
 }
 
-function msgTemplateSet(mode) {
-  if (mode === "FREE") {
-    return "Fechado! ✅ A partir de agora vou gerar em *formatação livre*.\n\nQuando quiser voltar, digite *TEMPLATE*.";
-  }
+async function msgTemplateSet(waId, mode){
+  if (mode === "FREE") return await getCopyText("FLOW_TEMPLATE_SWITCH_TO_FREE", { waId });
+  return await getCopyText("FLOW_TEMPLATE_KEEP_FIXED", { waId });
+}
   return "Boa! ✅ Vou manter o *template* (ele costuma converter mais).\n\nQuando quiser mudar, digite *LIVRE*.";
 }
 
@@ -227,17 +209,17 @@ export async function handleInboundText({ waId, text }) {
   // Comandos globais de preferência de template
   if (wantsTemplateCommand(inbound)) {
     await setTemplateMode(id, "FIXED");
-    return reply(msgTemplateSet("FIXED"));
+    return reply(await msgTemplateSet(id, "FIXED"));
   }
   if (wantsFreeCommand(inbound)) {
     await setTemplateMode(id, "FREE");
-    return reply(msgTemplateSet("FREE"));
+    return reply(await msgTemplateSet(id, "FREE"));
   }
 
   const status = await getUserStatus(id);
 
   if (status === ST.BLOCKED) {
-    return reply("Seu acesso está bloqueado no momento. Se isso for um engano, fale com o suporte.");
+    return reply(await getCopyText("FLOW_BLOCKED", { waId: id }));
   }
 
   // ✅ Se o usuário manda "oi" e ainda não tem nome, inicia onboarding
@@ -245,7 +227,7 @@ export async function handleInboundText({ waId, text }) {
     const name = await getUserFullName(id);
     if (!name) {
       await setUserStatus(id, ST.WAIT_NAME);
-      return reply(msgAskName());
+      return reply(await msgAskName(id));
     }
   }
 
@@ -255,18 +237,18 @@ export async function handleInboundText({ waId, text }) {
     if (name.length < 3) return reply("Me envia seu *nome completo* por favor 🙂");
     await setUserFullName(id, name);
     await setUserStatus(id, ST.WAIT_PRODUCT);
-    return reply(msgAskProduct());
+    return reply(await msgAskProduct(id));
   }
 
   // 2) Onboarding: produto/serviço
   if (status === ST.WAIT_PRODUCT) {
-    if (isGreeting(inbound)) return reply(msgAskProduct());
+    if (isGreeting(inbound)) return reply(await msgAskProduct(id));
     return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true });
   }
 
   // 3) Trial
   if (status === ST.TRIAL) {
-    if (isGreeting(inbound)) return reply(msgAskProduct());
+    if (isGreeting(inbound)) return reply(await msgAskProduct(id));
     return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true });
   }
 
@@ -279,7 +261,7 @@ export async function handleInboundText({ waId, text }) {
     await setUserPlan(id, plan.code);
     await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
 
-    return reply(msgAskPaymentMethod(plan));
+    return reply(await msgAskPaymentMethod(id, plan));
   }
 
   // 5) Forma de pagamento
@@ -291,13 +273,13 @@ export async function handleInboundText({ waId, text }) {
     await setPaymentMethod(id, pm);
     await setUserStatus(id, ST.WAIT_DOC);
 
-    return reply(msgAskDoc());
+    return reply(await msgAskDoc(id));
   }
 
   // 6) Documento (CPF/CNPJ) + cria cobrança/assinatura
   if (status === ST.WAIT_DOC) {
     const v = validateDoc(inbound);
-    if (!v.ok) return reply(msgInvalidDoc());
+    if (!v.ok) return reply(await msgInvalidDoc(id));
 
     // Guarda somente mascarado
     await setUserDocMasked(id, v.type, v.last4);
@@ -312,7 +294,7 @@ export async function handleInboundText({ waId, text }) {
     const pm = await getPaymentMethod(id);
     if (!pm) {
       await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
-      return reply(msgAskPaymentMethod(plan));
+      return reply(await msgAskPaymentMethod(id, plan));
     }
 
     // customer
@@ -365,7 +347,7 @@ export async function handleInboundText({ waId, text }) {
 
   // 8) ACTIVE
   if (status === ST.ACTIVE) {
-    if (isGreeting(inbound)) return reply(msgAskProduct());
+    if (isGreeting(inbound)) return reply(await msgAskProduct(id));
     return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false });
   }
 
