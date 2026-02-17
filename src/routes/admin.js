@@ -52,6 +52,181 @@ function escapeHtml(s) {
     .replaceAll("'", "&#39;");
 }
 
+function layoutBase({ title, activePath = "/admin", content = "", headExtra = "", scriptExtra = "" }) {
+  const menu = renderSidebar(activePath);
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title || "Admin")}</title>
+  <style>
+    :root{
+      --bg:#f5f7fb;
+      --card:#fff;
+      --text:#111827;
+      --muted:#6b7280;
+      --border:#e5e7eb;
+      --shadow: 0 6px 18px rgba(17,24,39,.06);
+      --radius: 14px;
+      --sidebar:#0f172a;
+      --sidebar2:#111c35;
+      --accent:#2563eb;
+    }
+    *{ box-sizing:border-box; }
+    body{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:var(--text); }
+    a{ color:var(--accent); text-decoration:none; }
+    a:hover{ text-decoration:underline; }
+    .app{ display:flex; min-height:100vh; }
+    .side{
+      width: 280px; flex: 0 0 280px;
+      background: linear-gradient(180deg, var(--sidebar), var(--sidebar2));
+      color:#e5e7eb; padding:18px 14px; position:sticky; top:0; height:100vh; overflow:auto;
+      border-right: 1px solid rgba(255,255,255,.06);
+    }
+    .brand{ display:flex; gap:10px; align-items:center; padding:10px 10px 14px 10px; }
+    .logo{
+      width:36px; height:36px; border-radius: 10px;
+      background: rgba(37,99,235,.18);
+      display:flex; align-items:center; justify-content:center; font-weight:800;
+    }
+    .brand h1{ font-size:14px; margin:0; letter-spacing:.2px; }
+    .brand .sub{ font-size:12px; color: rgba(229,231,235,.72); margin-top:2px; }
+    .nav{ margin-top: 6px; }
+    details{ border-radius: 12px; }
+    details + details{ margin-top: 10px; }
+    summary{
+      cursor:pointer; list-style:none;
+      padding:10px 10px; border-radius: 12px;
+      display:flex; align-items:center; justify-content:space-between;
+      color:#e5e7eb; font-weight:700; font-size:13px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.08);
+    }
+    summary::-webkit-details-marker{ display:none; }
+    .nav a.item{
+      display:flex; gap:10px; align-items:center;
+      padding:9px 10px; margin:6px 2px 0 2px;
+      border-radius: 12px;
+      color: rgba(229,231,235,.86);
+      border: 1px solid transparent;
+      text-decoration:none;
+    }
+    .nav a.item:hover{ background: rgba(255,255,255,.08); }
+    .nav a.item.active{
+      background: rgba(37,99,235,.18);
+      border-color: rgba(37,99,235,.35);
+      color:#fff;
+    }
+    .nav .hint{ font-size:12px; color: rgba(229,231,235,.65); padding: 8px 10px 0 10px; }
+    .main{ flex:1; padding: 22px 22px 40px 22px; }
+    .topbar{
+      display:flex; align-items:center; justify-content:space-between; gap:12px;
+      max-width: 1180px; margin: 0 auto 16px auto;
+    }
+    .topbar h2{ margin:0; font-size:20px; letter-spacing:.2px; }
+    .topbar .meta{ color:var(--muted); font-size:12px; }
+    .wrap{ max-width: 1180px; margin: 0 auto; }
+    .card{ background:var(--card); border:1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+    .card.pad{ padding:16px; }
+    .grid{ display:grid; gap:12px; }
+    .grid.cols2{ grid-template-columns: 1fr 1fr; }
+    .grid.cols3{ grid-template-columns: repeat(3, 1fr); }
+    @media (max-width: 980px){ .side{ display:none; } .grid.cols2,.grid.cols3{ grid-template-columns:1fr; } .main{ padding:16px; } }
+    .kpi{ padding:14px; border-radius: 14px; border: 1px solid var(--border); background: #fff; }
+    .kpi .t{ font-size:12px; color:var(--muted); font-weight:700; }
+    .kpi .v{ font-size:26px; font-weight:800; margin-top:6px; }
+    .muted{ color:var(--muted); }
+    input, select, textarea, button{
+      font: inherit; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border);
+      background:#fff;
+    }
+    textarea{ width:100%; min-height: 140px; }
+    button{ cursor:pointer; background:#fff; }
+    button.primary{ background: rgba(37,99,235,.10); border-color: rgba(37,99,235,.35); }
+    button.danger{ background: rgba(239,68,68,.10); border-color: rgba(239,68,68,.35); }
+    .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    table{ width:100%; border-collapse: collapse; }
+    th, td{ padding: 10px 8px; border-bottom: 1px solid var(--border); text-align:left; }
+    code{ background:#f3f4f6; padding: 2px 6px; border-radius: 8px; }
+    .pill{ display:inline-flex; gap:8px; align-items:center; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; background:#fff; }
+    .hr{ height:1px; background: var(--border); margin:14px 0; }
+  </style>
+  ${headExtra || ""}
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      ${menu}
+    </aside>
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h2>${escapeHtml(title || "Admin")}</h2>
+          <div class="meta">Amigo das Vendas · Admin</div>
+        </div>
+        <div class="meta"><a href="/health" style="color:inherit">/health</a> · <a href="/health-redis" style="color:inherit">/health-redis</a></div>
+      </div>
+      <div class="wrap">
+        ${content || ""}
+      </div>
+    </main>
+  </div>
+  ${scriptExtra || ""}
+</body>
+</html>`;
+}
+
+function renderSidebar(activePath){
+  const ap = String(activePath||"");
+  const item = (href, label, icon) => {
+    const active = ap === href ? "active" : "";
+    return `<a class="item ${active}" href="${href}"><span>${icon||"•"}</span><span>${escapeHtml(label)}</span></a>`;
+  };
+
+  // Cascata (details)
+  return `
+    <div class="brand">
+      <div class="logo">AV</div>
+      <div>
+        <h1>Amigo das Vendas</h1>
+        <div class="sub">Painel Admin</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <div class="hint">Navegação</div>
+
+      <details open>
+        <summary>📊 Produto <span>▾</span></summary>
+        ${item("/admin", "Início", "🏠")}
+        ${item("/admin/dashboard", "Dashboard", "📈")}
+        ${item("/admin/plans", "Planos", "💳")}
+      </details>
+
+      <details open>
+        <summary>📣 Comunicação <span>▾</span></summary>
+        ${item("/admin/broadcast-ui", "Broadcast", "📣")}
+        ${item("/admin/campaigns-ui", "Campanhas", "📦")}
+      </details>
+
+      <details>
+        <summary>👥 Usuários <span>▾</span></summary>
+        ${item("/admin/users-ui", "Ações / Consulta", "👤")}
+        ${item("/admin/window24h-ui", "Janela 24h", "🕒")}
+      </details>
+
+      <details>
+        <summary>⚙️ Sistema <span>▾</span></summary>
+        ${item("/admin/alerts-ui", "Alertas", "🚨")}
+        ${item("/asaas/test", "Asaas Test", "🧾")}
+      </details>
+
+      <div class="hint" style="margin-top:10px;">Dica: tudo é protegido por Basic Auth (ADMIN_SECRET).</div>
+    </nav>
+  `;
+}
+
 function requireWaId(req) {
   const waId = String(req.query?.waId || "").trim();
   if (!waId) {
@@ -213,206 +388,264 @@ export function adminRouter() {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
   });
-
 router.get("/dashboard", async (req, res) => {
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Dashboard</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 1100px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    .muted { color: #666; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-    input, button { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #ddd; }
-    button { cursor: pointer; background: white; }
-    .grid { display: grid; gap: 12px; grid-template-columns: repeat(3, 1fr); }
-    @media (max-width: 950px) { .grid { grid-template-columns: 1fr; } }
-    .kpi { border: 1px solid #eee; border-radius: 12px; padding: 12px; }
-    .kpi h3 { margin: 0 0 6px 0; font-size: 14px; color:#555; font-weight: 600; }
-    .kpi .v { font-size: 28px; font-weight: 700; }
-    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { border-bottom: 1px solid #eee; padding: 8px 6px; text-align: left; }
-    code { background:#f6f6f6; padding:2px 6px; border-radius: 6px; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    .pill { display:inline-block; padding: 4px 10px; border: 1px solid #eee; border-radius: 999px; margin: 4px 6px 0 0; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>📊 Dashboard</h2>
-    <p><a href="/admin">⬅ Voltar</a></p>
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">📊 Dashboard</h3>
+            <div class="muted">Métricas globais, histórico (30d/12m) e opcional por usuário.</div>
+          </div>
+          <div class="muted">Dica: use <code>waId</code> para ver o individual.</div>
+        </div>
 
-    <div class="row" style="margin: 10px 0 14px 0;">
-      <input id="waId" placeholder="waId (opcional) para métricas individuais" style="min-width: 360px;" />
-      <button onclick="load()">Atualizar</button>
-    </div>
-    <div class="row" style="margin: 0 0 14px 0;">
-      <input id="days" type="number" min="1" max="365" value="30" style="width:120px;" />
-      <span class="muted">dias</span>
-      <input id="months" type="number" min="1" max="36" value="12" style="width:120px;" />
-      <span class="muted">meses</span>
-      <span class="muted" style="margin-left:8px;">ou intervalo:</span>
-      <input id="start" type="date" />
-      <input id="end" type="date" />
-      <button onclick="applyRange()">Aplicar intervalo</button>
-      <button onclick="resetRange()">Reset 30d/12m</button>
-      <span class="muted">Histórico global + opcional por usuário (se informar waId).</span>
-    </div>
+        <div class="hr"></div>
 
+        <div class="row">
+          <input id="waId" placeholder="waId (opcional) ex: 5511..." style="min-width:320px" />
+          <button class="primary" onclick="loadAll()">Atualizar</button>
+        </div>
 
-    <div class="grid">
-      <div class="kpi">
-        <h3>Descrições hoje (global)</h3>
-        <div class="v" id="kpiDay">—</div>
-        <div class="muted" id="kpiDayLabel"></div>
+        <div class="row" style="margin-top:10px;">
+          <input id="days" type="number" min="1" max="365" value="30" style="width:120px;" />
+          <span class="muted">dias</span>
+          <input id="months" type="number" min="1" max="36" value="12" style="width:120px;" />
+          <span class="muted">meses</span>
+          <span class="muted" style="margin-left:8px;">ou intervalo:</span>
+          <input id="start" type="date" />
+          <input id="end" type="date" />
+          <button onclick="applyRange()">Aplicar</button>
+          <button onclick="resetRange()">Reset</button>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="grid cols3">
+          <div class="kpi">
+            <div class="t">Descrições hoje (global)</div>
+            <div class="v" id="kpiDay">—</div>
+            <div class="muted" id="kpiDayLabel"></div>
+          </div>
+          <div class="kpi">
+            <div class="t">Descrições no mês (global)</div>
+            <div class="v" id="kpiMonth">—</div>
+            <div class="muted" id="kpiMonthLabel"></div>
+          </div>
+          <div class="kpi">
+            <div class="t">Usuários na janela 24h</div>
+            <div class="v" id="kpi24h">—</div>
+            <div class="muted">últimas 24 horas (inbound)</div>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <h4 style="margin:0 0 6px 0;">Usuários</h4>
+        <div class="row">
+          <span class="pill">Total: <b id="uTotal">—</b></span>
+          <span class="pill">TRIAL: <b id="uTrial">—</b></span>
+          <span class="pill">ACTIVE: <b id="uActive">—</b></span>
+          <span class="pill">WAIT_PLAN: <b id="uWait">—</b></span>
+          <span class="pill">PAYMENT_PENDING: <b id="uPayPend">—</b></span>
+          <span class="pill">BLOCKED: <b id="uBlocked">—</b></span>
+          <span class="pill">UNKNOWN: <b id="uUnknown">—</b></span>
+        </div>
+        <div id="usersError" class="muted" style="margin-top:8px;"></div>
+
+        <div class="hr"></div>
+
+        <h4 style="margin:0 0 8px 0;">Planos (contagem)</h4>
+        <div id="plans"></div>
+
+        <div class="hr"></div>
+
+        <div class="grid cols2">
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;">
+              <h4 style="margin:0;">Série diária (Global)</h4>
+              <div class="muted" id="daysLabel"></div>
+            </div>
+            <canvas id="chartDays" width="900" height="240" style="width:100%; border:1px solid var(--border); border-radius:12px;"></canvas>
+            <div id="daysTable"></div>
+          </div>
+
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;">
+              <h4 style="margin:0;">Série mensal (Global)</h4>
+              <div class="muted" id="monthsLabel"></div>
+            </div>
+            <canvas id="chartMonths" width="900" height="240" style="width:100%; border:1px solid var(--border); border-radius:12px;"></canvas>
+            <div id="monthsTable"></div>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <details>
+          <summary class="muted">Ver JSON bruto</summary>
+          <pre id="raw" style="white-space:pre-wrap;"></pre>
+        </details>
       </div>
-      <div class="kpi">
-        <h3>Descrições no mês (global)</h3>
-        <div class="v" id="kpiMonth">—</div>
-        <div class="muted" id="kpiMonthLabel"></div>
-      </div>
-      <div class="kpi">
-        <h3>Usuários na janela 24h</h3>
-        <div class="v" id="kpi24h">—</div>
-        <div class="muted">últimas 24 horas (inbound)</div>
-      </div>
-    </div>
 
-    <h3 style="margin-top:18px;">Usuários</h3>
-    <p class="muted">Totais e distribuição por status / plano (best-effort).</p>
+      <script>
+        function esc(s){
+          return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'","&#39;");
+        }
+        function qs(){
+          const waId = (document.getElementById('waId').value || '').trim();
+          const days = (document.getElementById('days').value || '30').trim();
+          const months = (document.getElementById('months').value || '12').trim();
+          const start = (document.getElementById('start').value || '').trim();
+          const end = (document.getElementById('end').value || '').trim();
+          const p = new URLSearchParams();
+          if(waId) p.set('waId', waId);
+          if(start && end){ p.set('start', start); p.set('end', end); }
+          else { p.set('days', days); }
+          p.set('months', months);
+          return p.toString();
+        }
+        function resetRange(){
+          document.getElementById('days').value = 30;
+          document.getElementById('months').value = 12;
+          document.getElementById('start').value = '';
+          document.getElementById('end').value = '';
+          loadAll();
+        }
+        function applyRange(){ loadAll(); }
 
-    <div class="row">
-      <div class="pill">Total: <b id="uTotal">—</b></div>
-      <div class="pill">TRIAL: <b id="uTrial">—</b></div>
-      <div class="pill">ACTIVE: <b id="uActive">—</b></div>
-      <div class="pill">WAIT_PLAN: <b id="uWait">—</b></div>
-      <div class="pill">PAYMENT_PENDING: <b id="uPayPend">—</b></div>
-      <div class="pill">BLOCKED: <b id="uBlocked">—</b></div>
-      <div class="pill">UNKNOWN: <b id="uUnknown">—</b></div>
-    </div>
+        function drawLine(canvasId, points, labelKey){
+          const c = document.getElementById(canvasId);
+          if(!c) return;
+          const ctx = c.getContext('2d');
+          const w = c.width, h = c.height;
+          ctx.clearRect(0,0,w,h);
 
-    <div id="usersError" class="muted" style="margin-top:8px;"></div>
+          if(!points || !points.length){
+            ctx.fillText('Sem dados', 10, 20);
+            return;
+          }
 
-    <h3 style="margin-top:18px;">Planos (contagem)</h3>
-    <div id="plans"></div>
+          const vals = points.map(p => Number(p.count||0));
+          const max = Math.max(1, ...vals);
+          const min = Math.min(0, ...vals);
 
-    <h3 style="margin-top:18px;">Métricas por usuário (opcional)</h3>
-    <div id="userBox" class="muted">Informe um waId acima para ver métricas individuais.</div>
+          const padL = 36, padR = 10, padT = 10, padB = 24;
+          const iw = w - padL - padR;
+          const ih = h - padT - padB;
 
-    <h3 style="margin-top:18px;">Histórico (Global)</h3>
-    <p class="muted">Série diária (dias / intervalo) e série mensal (últimos meses). Use o seletor acima para ajustar.</p>
+          ctx.beginPath();
+          ctx.moveTo(padL, padT);
+          ctx.lineTo(padL, padT + ih);
+          ctx.lineTo(padL + iw, padT + ih);
+          ctx.strokeStyle = "#94a3b8";
+          ctx.stroke();
 
-    <div class="grid" style="grid-template-columns: 1fr 1fr;">
-      <div class="kpi">
-        <h3>Série diária (Global)</h3>
-        <canvas id="chartDays" width="520" height="220" style="width:100%; border:1px solid #eee; border-radius:12px;"></canvas>
-        <div class="muted" id="daysLabel" style="margin-top:6px;"></div>
-        <div id="daysTable"></div>
-      </div>
-      <div class="kpi">
-        <h3>Série mensal (Global)</h3>
-        <canvas id="chartMonths" width="520" height="220" style="width:100%; border:1px solid #eee; border-radius:12px;"></canvas>
-        <div class="muted" id="monthsLabel" style="margin-top:6px;"></div>
-        <div id="monthsTable"></div>
-      </div>
-    </div>
+          ctx.beginPath();
+          points.forEach((p, i) => {
+            const x = padL + (iw * (i / Math.max(1, points.length - 1)));
+            const v = Number(p.count||0);
+            const y = padT + ih - (ih * ((v - min) / (max - min || 1)));
+            if(i===0) ctx.moveTo(x,y);
+            else ctx.lineTo(x,y);
+          });
+          ctx.strokeStyle = "#2563eb";
+          ctx.lineWidth = 2;
+          ctx.stroke();
 
-    <h3 style="margin-top:18px;">Histórico (Usuário — opcional)</h3>
-    <p class="muted">Informe um <code>waId</code> no topo para ver a série diária/mensal daquele usuário.</p>
-    <div class="grid" style="grid-template-columns: 1fr 1fr;">
-      <div class="kpi">
-        <h3>Série diária (Usuário)</h3>
-        <canvas id="chartUserDays" width="520" height="220" style="width:100%; border:1px solid #eee; border-radius:12px;"></canvas>
-        <div class="muted" id="userDaysLabel" style="margin-top:6px;"></div>
-        <div id="userDaysTable"></div>
-      </div>
-      <div class="kpi">
-        <h3>Série mensal (Usuário)</h3>
-        <canvas id="chartUserMonths" width="520" height="220" style="width:100%; border:1px solid #eee; border-radius:12px;"></canvas>
-        <div class="muted" id="userMonthsLabel" style="margin-top:6px;"></div>
-        <div id="userMonthsTable"></div>
-      </div>
-    </div>
+          ctx.fillStyle = "#64748b";
+          ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+          ctx.fillText(String(points[0][labelKey] || ''), padL, h - 8);
+          const last = points[points.length-1];
+          const lastLabel = String(last[labelKey] || '');
+          const tw = ctx.measureText(lastLabel).width;
+          ctx.fillText(lastLabel, w - padR - tw, h - 8);
+          ctx.fillText(String(max), 6, 16);
+        }
 
-    <hr style="margin-top:18px;"/>
-    <details>
-      <summary class="muted">Ver JSON bruto</summary>
-      <pre id="raw"></pre>
-    </details>
-  </div>
+        function renderMiniTable(containerId, points, labelKey){
+          const el = document.getElementById(containerId);
+          if(!el) return;
+          if(!points || !points.length){ el.innerHTML = '<span class="muted">Sem dados.</span>'; return; }
+          const last = points.slice(-10);
+          const rows = last.map(p => '<tr><td><code>'+esc(p[labelKey])+'</code></td><td><b>'+esc(p.count)+'</b></td></tr>').join('');
+          el.innerHTML = '<table><thead><tr><th>Período</th><th>Qtd</th></tr></thead><tbody>'+rows+'</tbody></table><div class="muted">Mostrando últimos 10 pontos.</div>';
+        }
 
-<script>
-function esc(s){
-  return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'","&#39;");
-}
+        async function loadHistory(){
+          const query = qs();
+          const r = await fetch('/admin/dashboard/history?' + query);
+          const j = await r.json().catch(()=>({}));
+          const gd = j?.global?.days;
+          const gm = j?.global?.months;
 
+          const gdPts = gd?.points || [];
+          const gmPts = gm?.points || [];
 
-function qs(){
-  const waId = (document.getElementById('waId').value || '').trim();
-  const days = (document.getElementById('days').value || '30').trim();
-  const months = (document.getElementById('months').value || '12').trim();
-  const start = (document.getElementById('start').value || '').trim();
-  const end = (document.getElementById('end').value || '').trim();
-  const p = new URLSearchParams();
-  if(waId) p.set('waId', waId);
-  if(start && end){ p.set('start', start); p.set('end', end); }
-  else { p.set('days', days); }
-  p.set('months', months);
-  return p.toString();
-}
+          document.getElementById('daysLabel').textContent = gd?.ok ? (gd.start + ' → ' + gd.end) : ('⚠️ ' + (gd?.error||''));
+          document.getElementById('monthsLabel').textContent = gm?.ok ? (gm.start + ' → ' + gm.end) : ('⚠️ ' + (gm?.error||''));
 
-function resetRange(){
-  document.getElementById('days').value = 30;
-  document.getElementById('months').value = 12;
-  document.getElementById('start').value = '';
-  document.getElementById('end').value = '';
-  load();
-}
+          drawLine('chartDays', gdPts, 'day');
+          drawLine('chartMonths', gmPts, 'month');
+          renderMiniTable('daysTable', gdPts, 'day');
+          renderMiniTable('monthsTable', gmPts, 'month');
 
-function applyRange(){
-  // se start/end preenchidos, o backend usa intervalo; se não, usa days
-  load();
-}
+          return j;
+        }
 
-function drawLine(canvasId, points, labelKey){
-  const c = document.getElementById(canvasId);
-  if(!c) return;
-  const ctx = c.getContext('2d');
-  const w = c.width, h = c.height;
-  ctx.clearRect(0,0,w,h);
+        async function loadAll(){
+          const waId = (document.getElementById('waId').value || '').trim();
+          const url = waId ? '/admin/dashboard/data?waId=' + encodeURIComponent(waId) : '/admin/dashboard/data';
+          const r = await fetch(url);
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
 
-  if(!points || !points.length){
-    ctx.fillText('Sem dados', 10, 20);
-    return;
-  }
+          const g = j.global || {};
+          document.getElementById('kpiDay').textContent = g.dayCount ?? '0';
+          document.getElementById('kpiDayLabel').textContent = g.day ? ('Dia: ' + g.day) : '';
+          document.getElementById('kpiMonth').textContent = g.monthCount ?? '0';
+          document.getElementById('kpiMonthLabel').textContent = g.month ? ('Mês: ' + g.month) : '';
+          document.getElementById('kpi24h').textContent = j.window24hCount ?? '0';
 
-  const vals = points.map(p => Number(p.count||0));
-  const max = Math.max(1, ...vals);
-  const min = Math.min(0, ...vals);
+          const u = (j.users || {});
+          document.getElementById('uTotal').textContent = u.total ?? '0';
+          const st = u.statuses || {};
+          document.getElementById('uTrial').textContent = st.TRIAL ?? '0';
+          document.getElementById('uActive').textContent = st.ACTIVE ?? '0';
+          document.getElementById('uWait').textContent = st.WAIT_PLAN ?? '0';
+          document.getElementById('uPayPend').textContent = st.PAYMENT_PENDING ?? '0';
+          document.getElementById('uBlocked').textContent = st.BLOCKED ?? '0';
+          document.getElementById('uUnknown').textContent = st.UNKNOWN ?? '0';
+          document.getElementById('usersError').textContent = u.error ? ('⚠️ users:index: ' + u.error) : '';
 
-  // padding
-  const padL = 36, padR = 10, padT = 10, padB = 24;
-  const iw = w - padL - padR;
-  const ih = h - padT - padB;
+          const plans = u.plans || {};
+          const sysPlans = Array.isArray(j.systemPlans) ? j.systemPlans : [];
+          const byCode = {};
+          for (const p of sysPlans) {
+            const code = String(p?.code || '').toUpperCase().trim();
+            if (code) byCode[code] = p;
+          }
+          function fmtBRL(cents){
+            const v = (Number(cents)||0)/100;
+            try { return v.toLocaleString('pt-BR', {style:'currency', currency:'BRL'}); } catch { return 'R$ ' + v.toFixed(2); }
+          }
+          const planHtml = Object.keys(plans).sort().map(k => {
+            const meta = byCode[String(k||'').toUpperCase().trim()];
+            const label = meta ? (esc(meta.name || '') + ' · ' + fmtBRL(meta.priceCents) + ' · ' + esc(meta.description || (meta.monthlyQuota ? (meta.monthlyQuota + ' descrições/mês') : ''))) : '';
+            const extra = label ? ('<div class="muted" style="font-size:12px;margin-top:2px;">' + label + '</div>') : '';
+            return '<span class="pill"><code>'+esc(k)+'</code>: <b>'+plans[k]+'</b>' + extra + '</span>';
+          }).join(' ');
+          document.getElementById('plans').innerHTML = planHtml || '<span class="muted">Sem dados.</span>';
 
-  // axes
-  ctx.beginPath();
-  ctx.moveTo(padL, padT);
-  ctx.lineTo(padL, padT + ih);
-  ctx.lineTo(padL + iw, padT + ih);
-  ctx.stroke();
+          const hist = await loadHistory();
+          return { j, hist };
+        }
 
-  // line
-  ctx.beginPath();
-  points.forEach((p, i) => {
-    const x = padL + (iw * (i / Math.max(1, points.length - 1)));
-    const v = Number(p.count||0);
-    const y = padT + ih - (ih * ((v - min) / (max - min || 1)));
-    if(i===0) ctx.moveTo(x,y);
-    else ctx.lineTo(x,y);
+        loadAll();
+      </script>
+    `;
+    const html = layoutBase({ title: "Dashboard", activePath: "/admin/dashboard", content: inner });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
   });
   ctx.stroke();
 
@@ -555,101 +788,217 @@ load();
 </html>`;
     res.type("html").send(html);
   });
+router.get("/", async (req, res) => {
+    const html = layoutBase({
+      title: "Início",
+      activePath: "/admin",
+      content: `
+        <div class="grid cols2">
+          <div class="card pad">
+            <h3 style="margin:0 0 6px 0;">Painel</h3>
+            <div class="muted">Ações principais e atalhos organizados.</div>
+            <div class="hr"></div>
+            <div class="grid cols2">
+              <a class="card pad" href="/admin/dashboard" style="display:block;">
+                <div class="muted" style="font-weight:700;">📊 Dashboard</div>
+                <div class="muted">Métricas globais, histórico e usuário.</div>
+              </a>
+              <a class="card pad" href="/admin/users-ui" style="display:block;">
+                <div class="muted" style="font-weight:700;">👥 Usuários</div>
+                <div class="muted">Consulta e ações por waId.</div>
+              </a>
+              <a class="card pad" href="/admin/plans" style="display:block;">
+                <div class="muted" style="font-weight:700;">💳 Planos</div>
+                <div class="muted">Gerenciar catálogo e ativação.</div>
+              </a>
+              <a class="card pad" href="/admin/broadcast-ui" style="display:block;">
+                <div class="muted" style="font-weight:700;">📣 Broadcast</div>
+                <div class="muted">Criar envios por plano e janela.</div>
+              </a>
+            </div>
+          </div>
 
-
-  router.get("/", async (req, res) => {
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Admin</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    a { display: inline-block; margin: 6px 0; }
-    .muted { color: #666; }
-    code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
-    .grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
-    @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
-    input, button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; }
-    button { cursor: pointer; background: white; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>Admin</h2>
-    <p class="muted">Menu</p>
-
-    <div class="grid">
-      <div>
-        <h3>Produto</h3>
-        <a href="/admin/dashboard">📊 Dashboard</a><br/>
-        <a href="/admin/plans">💳 Planos</a><br/>
-        <a href="/admin/broadcast-ui">📣 Broadcast</a><br/>
-        <a href="/admin/campaigns-ui">📦 Campanhas</a><br/>
-        <a href="/admin/window24h-ui">🕒 Janela 24h</a><br/>
-      </div>
-      <div>
-        <h3>Atalhos técnicos</h3>
-        <a href="/health">✅ Health</a><br/>
-        <a href="/health-redis">🧠 Health Redis</a><br/>
-        <a href="/admin/health-plans">🧾 Health Planos</a><br/>
-        <a href="/admin/alerts-ui">🚨 Alertas do Sistema <span id="alertsCount"></span></a><br/>
-      </div>
-    </div>
-
-    <hr/>
-    <h3>Usuário (teste rápido)</h3>
-    <div class="row">
-      <input id="waId" placeholder="waId (somente números) ex: 5511..." style="min-width:320px" />
-      <button onclick="go('/admin/state-test/get')">Ver state</button>
-      <button onclick="go('/admin/state-test/reset-trial')">Reset TRIAL</button>
-      <button onclick="go('/admin/window24h/touch')">Touch 24h</button>
-      <button onclick="go('/admin/send-test')">Enviar 'oi'</button>
-    </div>
-    <p class="muted">Dica: cole seu número sem + e sem espaços (ex.: 5511960765975).</p>
-
-    <pre id="out"></pre>
-
-    <hr/>
-    <p class="muted">Observação: o Admin usa Basic Auth (senha = ADMIN_SECRET).</p>
-  </div>
-
-<script>
-function getWaId(){
-  return (document.getElementById('waId').value || '').trim();
-}
-async function go(path){
-  const waId = getWaId();
-  if(!waId){ alert('Informe o waId'); return; }
-  const url = path + '?waId=' + encodeURIComponent(waId);
-  const r = await fetch(url);
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-}
-
-(async function loadAlertsCount(){
-  try{
-    const r = await fetch('/admin/alerts-count');
-    const j = await r.json().catch(()=>({}));
-    const n = Number(j.count||0);
-    if(n>0){
-      document.getElementById('alertsCount').textContent = ' ('+n+')';
-    }
-  }catch(e){}
-})();
-</script>
-</body>
-</html>`;
+          <div class="card pad">
+            <h3 style="margin:0 0 6px 0;">Sistema</h3>
+            <div class="muted">Saúde e diagnóstico rápido.</div>
+            <div class="hr"></div>
+            <div class="row">
+              <a class="pill" href="/health">✅ Health</a>
+              <a class="pill" href="/health-redis">🧠 Health Redis</a>
+              <a class="pill" href="/admin/health-plans">🧾 Health Planos (JSON)</a>
+              <a class="pill" href="/admin/alerts-ui">🚨 Alertas</a>
+              <a class="pill" href="/asaas/test">🧾 Asaas Test</a>
+            </div>
+            <div class="hr"></div>
+            <div class="muted">Observação: ações avançadas estão nas seções do menu.</div>
+          </div>
+        </div>
+      `,
+    });
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
 
   // -----------------------------
+  // 👥 Usuários (UI) — ações que antes eram apenas por URL
+  // -----------------------------
+  router.get("/users-ui", async (req, res) => {
+    const html = layoutBase({
+      title: "Usuários",
+      activePath: "/admin/users-ui",
+      content: `
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;">
+            <div>
+              <h3 style="margin:0 0 6px 0;">Ações por waId</h3>
+              <div class="muted">Consulta e comandos operacionais, sem depender de URLs “soltas”.</div>
+            </div>
+            <div class="muted">Ex.: <code>5511960765975</code></div>
+          </div>
+
+          <div class="hr"></div>
+
+          <div class="row">
+            <input id="waId" placeholder="waId (somente números) ex: 5511..." style="min-width:320px" />
+            <button class="primary" onclick="loadSnapshot()">Consultar</button>
+            <button onclick="touchWindow()">Touch Janela 24h</button>
+            <button onclick="sendTest()">Enviar 'oi'</button>
+          </div>
+
+          <div class="row" style="margin-top:10px;">
+            <button class="danger" onclick="resetTrial()">Reset TRIAL</button>
+            <button onclick="setStatus('ACTIVE')">Forçar ACTIVE</button>
+            <button onclick="setStatus('BLOCKED')">Forçar BLOCKED</button>
+            <button onclick="clearPrompt()">Limpar lastPrompt</button>
+          </div>
+
+          <div class="hr"></div>
+          <div class="grid cols2">
+            <div class="kpi">
+              <div class="t">Status</div>
+              <div class="v" id="kStatus">—</div>
+              <div class="muted" id="kPlan">Plano: —</div>
+            </div>
+            <div class="kpi">
+              <div class="t">Uso</div>
+              <div class="v" id="kUsage">—</div>
+              <div class="muted" id="kUsage2">—</div>
+            </div>
+          </div>
+
+          <div class="hr"></div>
+          <details>
+            <summary class="muted">Ver JSON bruto</summary>
+            <pre id="out" style="white-space:pre-wrap;"></pre>
+          </details>
+        </div>
+
+        <script>
+          function waId(){
+            return (document.getElementById('waId').value || '').trim();
+          }
+          async function fetchJson(url, opt){
+            const r = await fetch(url, opt);
+            const j = await r.json().catch(()=>({}));
+            return { r, j };
+          }
+          function renderUser(j){
+            const u = j?.user || j?.user?.snapshot || j?.user?.snapshot || j?.user;
+            const snap = j?.user || j?.userSnapshot || j?.user?.snapshot || j?.user;
+            const user = j?.user || j?.userSnapshot || j?.user;
+            const s = (j?.user && j.user.status) ? j.user : (j?.userSnapshot || j?.user || j?.user?.snapshot || {});
+            const status = (s?.status || '—');
+            const plan = (s?.plan || '—');
+            const quotaUsed = (s?.quotaUsed ?? '—');
+            const trialUsed = (s?.trialUsed ?? '—');
+            document.getElementById('kStatus').textContent = String(status);
+            document.getElementById('kPlan').textContent = 'Plano: ' + String(plan);
+            document.getElementById('kUsage').textContent = String(quotaUsed);
+            document.getElementById('kUsage2').textContent = 'trialUsed: ' + String(trialUsed);
+          }
+
+          async function loadSnapshot(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            const {j} = await fetchJson('/admin/state-test/get?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+            renderUser(j);
+          }
+
+          async function resetTrial(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            const {j} = await fetchJson('/admin/state-test/reset-trial?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+            renderUser(j);
+          }
+
+          async function touchWindow(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            const {j} = await fetchJson('/admin/window24h/touch?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+          }
+
+          async function sendTest(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            const {j} = await fetchJson('/admin/send-test?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+          }
+
+          async function setStatus(st){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            // Mantemos como operação via endpoints existentes (estável). Se quiser UI completa de status/plan/quota, evoluímos depois.
+            const body = { status: st };
+            const {j} = await fetchJson('/admin/users/status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ waId:id, status:st }) });
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+          }
+
+          async function clearPrompt(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            const {j} = await fetchJson('/admin/users/clear-lastprompt?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+          }
+
+          // Carrega snapshot se waId vier na query string (opcional)
+          (function init(){
+            const p = new URLSearchParams(location.search);
+            const id = (p.get('waId')||'').trim();
+            if(id){ document.getElementById('waId').value = id; loadSnapshot(); }
+          })();
+        </script>
+      `,
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  // APIs de usuário (para UI clean, sem depender de múltiplas URLs)
+  router.post("/users/status", async (req, res) => {
+    try {
+      const waId = String(req.body?.waId || "").trim();
+      const status = String(req.body?.status || "").trim();
+      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+      if (!status) return res.status(400).json({ ok: false, error: "status required" });
+      await setUserStatus(waId, status);
+      const user = await getUserSnapshot(waId);
+      return res.json({ ok: true, waId, status, user });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/users/clear-lastprompt", async (req, res) => {
+    try {
+      const waId = requireWaId(req);
+      await clearLastPrompt(waId);
+      const user = await getUserSnapshot(waId);
+      return res.json({ ok: true, waId, action: "clearLastPrompt", user });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+    }
+  });
+
+// -----------------------------
   // Planos
   // -----------------------------
   router.get("/plans", async (req, res) => {
@@ -659,8 +1008,9 @@ async function go(path){
       .map((p) => {
         const code = escapeHtml(p.code);
         const name = escapeHtml(p.name);
-        const price = escapeHtml(String(p.priceCents / 100).replace(".", ","));
-        const quota = escapeHtml(String(p.monthlyQuota));
+        const price = escapeHtml(String((p.priceCents || 0) / 100).replace(".", ","));
+        const quota = escapeHtml(String(p.monthlyQuota ?? ""));
+        const desc = escapeHtml(String(p.description ?? ""));
         const active = p.active ? "✅" : "❌";
         return `<tr>
           <td><code>${code}</code></td>
@@ -668,6 +1018,7 @@ async function go(path){
           <td>R$ ${price}</td>
           <td>${quota}</td>
           <td>${active}</td>
+          <td style="max-width:420px;">${desc}</td>
           <td>
             <button onclick="toggle('${code}', ${p.active ? "false" : "true"})">
               ${p.active ? "Desativar" : "Ativar"}
@@ -677,79 +1028,74 @@ async function go(path){
       })
       .join("");
 
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Planos</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    table { width:100%; border-collapse: collapse; }
-    th, td { padding: 10px; border-bottom: 1px solid #eee; text-align:left; }
-    code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
-    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
-    .muted { color:#666; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>💳 Planos</h2>
-    <p><a href="/admin">⬅ Voltar</a></p>
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">💳 Planos</h3>
+            <div class="muted">Catálogo do sistema (ativos e inativos).</div>
+          </div>
+          <div class="muted">priceCents em centavos · R$ 24,90 = 2490</div>
+        </div>
 
-    <div class="row">
-      <input id="code" placeholder="code (ex: DE_VEZ_EM_QUANDO)" style="min-width:280px" />
-      <input id="name" placeholder="name (ex: De Vez em Quando)" style="min-width:280px" />
-      <input id="priceCents" placeholder="priceCents (ex: 2490)" />
-      <input id="monthlyQuota" placeholder="monthlyQuota (ex: 20)" />
-      <input id="description" placeholder="description (ex: 20 descrições/mês)" style="min-width:320px" />
-      <button onclick="create()">Criar/Atualizar</button>
-    </div>
-    <p class="muted">Dica: priceCents em centavos (R$ 24,90 = 2490).</p>
+        <div class="hr"></div>
 
-    <hr/>
-    <table>
-      <thead>
-        <tr>
-          <th>Code</th><th>Nome</th><th>Preço</th><th>Cota</th><th>Ativo</th><th>Ação</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <pre id="msg"></pre>
-  </div>
+        <div class="row">
+          <input id="code" placeholder="code (ex: DE_VEZ_EM_QUANDO)" style="min-width:260px" />
+          <input id="name" placeholder="name (ex: De Vez em Quando)" style="min-width:260px" />
+          <input id="priceCents" placeholder="priceCents (ex: 2490)" style="width:170px" />
+          <input id="monthlyQuota" placeholder="monthlyQuota (ex: 20)" style="width:190px" />
+          <input id="description" placeholder="description (ex: 20 descrições/mês)" style="min-width:260px" />
+          <button class="primary" onclick="create()">Criar/Atualizar</button>
+        </div>
 
-<script>
-async function create(){
-  const body = {
-    code: (document.getElementById('code').value||'').trim(),
-    name: (document.getElementById('name').value||'').trim(),
-    priceCents: Number(document.getElementById('priceCents').value||0),
-    monthlyQuota: Number(document.getElementById('monthlyQuota').value||0),
-    description: (document.getElementById('description').value||'').trim(),
-    active: true,
-  };
-  const r = await fetch('/admin/plans', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
-  if(j.ok) setTimeout(()=>location.reload(), 300);
-}
-async function toggle(code, active){
-  const r = await fetch('/admin/plans/'+encodeURIComponent(code)+'/active', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({active}) });
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
-  if(j.ok) setTimeout(()=>location.reload(), 300);
-}
-</script>
-</body>
-</html>`;
+        <div class="hr"></div>
 
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th><th>Nome</th><th>Preço</th><th>Cota</th><th>Ativo</th><th>Descrição</th><th>Ação</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+
+        <div class="hr"></div>
+        <details>
+          <summary class="muted">Ver resposta</summary>
+          <pre id="msg" style="white-space:pre-wrap;"></pre>
+        </details>
+      </div>
+
+      <script>
+        async function create(){
+          const body = {
+            code: (document.getElementById('code').value||'').trim(),
+            name: (document.getElementById('name').value||'').trim(),
+            priceCents: Number((document.getElementById('priceCents').value||'0').trim()),
+            monthlyQuota: Number((document.getElementById('monthlyQuota').value||'0').trim()),
+            description: (document.getElementById('description').value||'').trim(),
+            active: true,
+          };
+          const r = await fetch('/admin/plans', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
+          if(j.ok) setTimeout(()=>location.reload(), 250);
+        }
+        async function toggle(code, active){
+          const r = await fetch('/admin/plans/'+encodeURIComponent(code)+'/active', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({active}) });
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
+          if(j.ok) setTimeout(()=>location.reload(), 250);
+        }
+      </script>
+    `;
+
+    const html = layoutBase({ title: "Planos", activePath: "/admin/plans", content: inner });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
+
 
   router.post("/plans", async (req, res) => {
     try {
@@ -793,211 +1139,307 @@ async function toggle(code, active){
   });
 
   router.get("/alerts-ui", async (req, res) => {
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Alertas</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>🚨 Alertas do Sistema</h2>
-    <p><a href="/admin">⬅ Voltar</a></p>
-    <div class="row">
-      <input id="limit" placeholder="limit (ex: 50)" value="50" />
-      <button onclick="load()">Carregar</button>
-    </div>
-    <pre id="out"></pre>
-  </div>
-<script>
-async function load(){
-  const limit = (document.getElementById('limit').value||'50').trim();
-  const r = await fetch('/admin/alerts?limit='+encodeURIComponent(limit));
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-}
-load();
-</script>
-</body>
-</html>`;
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">🚨 Alertas</h3>
+            <div class="muted">Registro de avisos do sistema (para detectar falhas cedo).</div>
+          </div>
+          <button class="primary" onclick="load()">Atualizar</button>
+        </div>
+
+        <div class="hr"></div>
+
+        <div id="out" class="muted">Carregando…</div>
+
+        <div class="hr"></div>
+        <details>
+          <summary class="muted">Ver JSON bruto</summary>
+          <pre id="raw" style="white-space:pre-wrap;"></pre>
+        </details>
+      </div>
+
+      <script>
+        function esc(s){
+          return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+        }
+        async function load(){
+          const r = await fetch('/admin/alerts');
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+
+          const items = Array.isArray(j.items) ? j.items : [];
+          if(!items.length){
+            document.getElementById('out').innerHTML = '<div class="muted">Nenhum alerta registrado.</div>';
+            return;
+          }
+
+          const html = '<table><thead><tr><th>Quando</th><th>Nível</th><th>Evento</th><th>Detalhes</th></tr></thead><tbody>' +
+            items.map(it => {
+              return '<tr>' +
+                '<td><code>'+esc(it.ts||'')+'</code></td>' +
+                '<td>'+esc(it.level||'')+'</td>' +
+                '<td>'+esc(it.event||'')+'</td>' +
+                '<td style="max-width:640px; white-space:pre-wrap;">'+esc(it.message||'')+'</td>' +
+              '</tr>';
+            }).join('') +
+            '</tbody></table>';
+
+          document.getElementById('out').innerHTML = html;
+        }
+        load();
+      </script>
+    `;
+    const html = layoutBase({ title: "Alertas", activePath: "/admin/alerts-ui", content: inner });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
+
 
   // -----------------------------
   // Janela 24h (UI já existente)
   // -----------------------------
   router.get("/window24h-ui", async (req, res) => {
-    const count = await countWindow24hActive();
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Janela 24h</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    .muted { color:#666; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>🕒 Janela 24h</h2>
-    <div class="muted">Usuários dentro da janela de 24 horas.</div>
-    <p><a href="/admin">⬅ Voltar</a></p>
-    <p><b>Ativos agora:</b> ${escapeHtml(String(count))}</p>
-    <button onclick="load()">Carregar lista (JSON)</button>
-    <pre id="out"></pre>
-  </div>
-<script>
-async function load(){
-  const r = await fetch("/admin/window24h");
-  const j = await r.json();
-  document.getElementById("out").textContent = JSON.stringify(j, null, 2);
-}
-</script>
-</body>
-</html>`;
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">🕒 Janela 24h</h3>
+            <div class="muted">Usuários que falaram com o bot nas últimas 24 horas (regra da janela do WhatsApp).</div>
+          </div>
+          <button class="primary" onclick="load()">Atualizar</button>
+        </div>
 
+        <div class="hr"></div>
+
+        <div class="row">
+          <input id="filter" placeholder="filtrar por waId (contém)" style="min-width:320px" />
+          <button onclick="load()">Aplicar filtro</button>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="row">
+          <span class="pill">Total: <b id="total">—</b></span>
+          <span class="pill">Agora: <b id="now">—</b></span>
+        </div>
+
+        <div class="hr"></div>
+
+        <div id="list" class="muted">Carregando…</div>
+
+        <div class="hr"></div>
+        <details>
+          <summary class="muted">Ver JSON bruto</summary>
+          <pre id="raw" style="white-space:pre-wrap;"></pre>
+        </details>
+      </div>
+
+      <script>
+        function esc(s){
+          return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+        }
+        async function load(){
+          const f = (document.getElementById('filter').value||'').trim();
+          const r = await fetch('/admin/window24h' + (f ? ('?filter=' + encodeURIComponent(f)) : ''));
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+
+          document.getElementById('total').textContent = String(j.count ?? 0);
+          document.getElementById('now').textContent = new Date().toLocaleString('pt-BR');
+
+          const users = Array.isArray(j.users) ? j.users : [];
+          if(!users.length){
+            document.getElementById('list').innerHTML = '<div class="muted">Nenhum usuário na janela.</div>';
+            return;
+          }
+
+          const html = '<table><thead><tr><th>waId</th><th>Last Seen</th><th>Ações</th></tr></thead><tbody>' +
+            users.map(u => {
+              return '<tr>' +
+                '<td><code>'+esc(u.waId||'')+'</code></td>' +
+                '<td>'+esc(u.lastSeen||'')+'</td>' +
+                '<td class="row">' +
+                  '<a class="pill" href="/admin/users-ui?waId='+encodeURIComponent(u.waId||'')+'">abrir</a>' +
+                  '<a class="pill" href="/admin/send-test?waId='+encodeURIComponent(u.waId||'')+'">send-test</a>' +
+                '</td>' +
+              '</tr>';
+            }).join('') +
+            '</tbody></table>';
+
+          document.getElementById('list').innerHTML = html;
+        }
+        load();
+      </script>
+    `;
+    const html = layoutBase({ title: "Janela 24h", activePath: "/admin/window24h-ui", content: inner });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
+
 
   // -----------------------------
   // ✅ Broadcast UI
   // -----------------------------
   router.get("/broadcast-ui", async (req, res) => {
-    const plans = await listPlans({ includeInactive: false });
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">📣 Broadcast</h3>
+            <div class="muted">Cria uma campanha e dispara automaticamente apenas para usuários na janela 24h. Quem estiver fora fica pendente e será enviado ao entrar na janela.</div>
+          </div>
+          <a class="pill" href="/admin/campaigns-ui">📦 Ver campanhas</a>
+        </div>
 
-    const options =
-      `<option value="">(Todos os planos)</option>` +
-      plans
-        .map((p) => `<option value="${escapeHtml(p.code)}">${escapeHtml(p.name)} (${escapeHtml(p.code)})</option>`)
-        .join("");
+        <div class="hr"></div>
 
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Broadcast</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    input, textarea, select, button { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; }
-    textarea { width: 100%; min-height: 140px; }
-    button { cursor:pointer; background:white; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    .muted { color:#666; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>📣 Broadcast</h2>
-    <p><a href="/admin">⬅ Voltar</a> | <a href="/admin/campaigns-ui">📦 Ver campanhas</a></p>
+        <div class="row">
+          <label class="pill">Plano alvo:
+            <select id="plan">
+              <option value="">(todos os planos)</option>
+              <option value="DE_VEZ_EM_QUANDO">DE_VEZ_EM_QUANDO</option>
+              <option value="SEMPRE_POR_PERTO">SEMPRE_POR_PERTO</option>
+              <option value="MELHOR_AMIGO">MELHOR_AMIGO</option>
+            </select>
+          </label>
+        </div>
 
-    <div class="row">
-      <label>Plano alvo:</label>
-      <select id="plan">${options}</select>
-      <span class="muted">Envio imediato só para quem está na janela 24h. Fora da janela fica pendente e envia automaticamente quando entrar.</span>
-    </div>
+        <div style="margin-top:10px;">
+          <input id="subject" placeholder="Assunto interno (ex: Promo fevereiro)" style="min-width:420px; width:100%;" />
+        </div>
 
-    <p>
-      <input id="subject" placeholder="Assunto (interno)" style="width:100%" />
-    </p>
-    <p>
-      <textarea id="text" placeholder="Texto do broadcast (WhatsApp)"></textarea>
-    </p>
+        <div style="margin-top:10px;">
+          <textarea id="message" placeholder="Mensagem do broadcast (texto)"></textarea>
+        </div>
 
-    <div class="row">
-      <button onclick="send()">Enviar campanha</button>
-    </div>
+        <div class="row" style="margin-top:10px;">
+          <button class="primary" onclick="send()">Criar campanha e enviar (24h)</button>
+          <span id="status" class="muted"></span>
+        </div>
 
-    <pre id="out"></pre>
-  </div>
+        <div class="hr"></div>
+        <details>
+          <summary class="muted">Ver resposta</summary>
+          <pre id="out" style="white-space:pre-wrap;"></pre>
+        </details>
+      </div>
 
-<script>
-async function send(){
-  const plan = (document.getElementById('plan').value||'').trim();
-  const subject = (document.getElementById('subject').value||'').trim();
-  const text = (document.getElementById('text').value||'').trim();
+      <script>
+        async function send(){
+          const plan = (document.getElementById('plan').value||'').trim();
+          const subject = (document.getElementById('subject').value||'').trim();
+          const text = (document.getElementById('message').value||'').trim();
+          if(!subject){ alert('Informe o assunto'); return; }
+          if(!text){ alert('Escreva a mensagem'); return; }
 
-  const body = { subject, text };
-  if(plan) body.planTargets = [plan];
+          const body = { subject, text, planTargets: plan ? [plan] : [] };
 
-  const r = await fetch('/admin/campaigns', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body)
-  });
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-}
-</script>
-</body>
-</html>`;
-
+          document.getElementById('status').textContent = 'Enviando...';
+          const r = await fetch('/admin/campaigns', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+          document.getElementById('status').textContent = j.ok ? '✅ Campanha criada e disparo iniciado' : ('⚠️ ' + (j.error||'erro'));
+        }
+      </script>
+    `;
+    const html = layoutBase({ title: "Broadcast", activePath: "/admin/broadcast-ui", content: inner });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
+
+
 
   // -----------------------------
   // ✅ Campanhas (UI + APIs)
   // -----------------------------
   router.get("/campaigns-ui", async (req, res) => {
-    const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Campanhas</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 24px; }
-    .card { max-width: 980px; border: 1px solid #e5e5e5; border-radius: 12px; padding: 18px; }
-    pre { background:#f6f6f6; padding:12px; border-radius:12px; overflow:auto; }
-    button, input { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid #ddd; background:white; cursor:pointer; }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items:center; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>📦 Campanhas</h2>
-    <p><a href="/admin">⬅ Voltar</a> | <a href="/admin/broadcast-ui">📣 Nova campanha</a></p>
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">📦 Campanhas</h3>
+            <div class="muted">Histórico de envios, pendentes e reprocesamento (somente quem já está na janela 24h).</div>
+          </div>
+          <div class="row">
+            <button class="primary" onclick="load()">Atualizar</button>
+            <a class="pill" href="/admin/broadcast-ui">📣 Novo broadcast</a>
+          </div>
+        </div>
 
-    <div class="row">
-      <input id="limit" placeholder="limit (ex: 30)" value="30" />
-      <button onclick="load()">Carregar</button>
-    </div>
+        <div class="hr"></div>
 
-    <pre id="out"></pre>
-  </div>
+        <div id="list" class="muted">Carregando…</div>
 
-<script>
-async function load(){
-  const limit = (document.getElementById('limit').value||'30').trim();
-  const r = await fetch('/admin/campaigns?limit='+encodeURIComponent(limit));
-  const j = await r.json().catch(()=>({}));
-  document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-}
-load();
-</script>
-</body>
-</html>`;
+        <div class="hr"></div>
+        <details>
+          <summary class="muted">Ver JSON bruto</summary>
+          <pre id="raw" style="white-space:pre-wrap;"></pre>
+        </details>
+      </div>
+
+      <script>
+        function esc(s){
+          return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+        }
+
+        async function load(){
+          const r = await fetch('/admin/campaigns');
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+
+          const items = Array.isArray(j.items) ? j.items : [];
+          if(!items.length){
+            document.getElementById('list').innerHTML = '<div class="muted">Nenhuma campanha registrada.</div>';
+            return;
+          }
+
+          const html = '<table><thead><tr><th>Data</th><th>Assunto</th><th>Plano alvo</th><th>Total</th><th>Enviados</th><th>Pendentes</th><th>Erros</th><th>Ações</th></tr></thead><tbody>' +
+            items.map(it => {
+              const id = esc(it.id||'');
+              return '<tr>' +
+                '<td><code>'+esc(it.createdAt||'')+'</code></td>' +
+                '<td>'+esc(it.subject||'')+'</td>' +
+                '<td><code>'+esc(it.targetPlan||'')+'</code></td>' +
+                '<td><b>'+esc(it.totalUsers||0)+'</b></td>' +
+                '<td><b>'+esc(it.sentCount||0)+'</b></td>' +
+                '<td><b>'+esc(it.pendingCount||0)+'</b></td>' +
+                '<td><b>'+esc(it.errorCount||0)+'</b></td>' +
+                '<td class="row">' +
+                  '<a class="pill" href="#" onclick="reprocess(\\''+id+'\\');return false;">reprocess 24h</a>' +
+                  '<a class="pill" href="#" onclick="details(\\''+id+'\\');return false;">detalhes</a>' +
+                '</td>' +
+              '</tr>';
+            }).join('') +
+            '</tbody></table>';
+
+          document.getElementById('list').innerHTML = html;
+        }
+
+        async function details(id){
+          const r = await fetch('/admin/campaigns/' + encodeURIComponent(id));
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+          alert('Detalhes carregados no JSON bruto.');
+        }
+
+        async function reprocess(id){
+          if(!confirm('Reprocessar apenas usuários que JÁ estão na janela 24h agora?')) return;
+          const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/reprocess-window24h', { method:'POST' });
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+          await load();
+        }
+
+        load();
+      </script>
+    `;
+    const html = layoutBase({ title: "Campanhas", activePath: "/admin/campaigns-ui", content: inner });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
+
 
   router.get("/campaigns", async (req, res) => {
     const limit = Number(req.query?.limit || 30);
