@@ -1,10 +1,11 @@
 // src/routes/webhook.js
+// ✅ V16.4.8 — Webhook robusto + campanhas padronizadas no broadcast.js
 import { Router } from "express";
 
 import { touch24hWindow } from "../services/window24h.js";
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { handleInboundText } from "../services/flow.js";
-import { processPendingCampaignsForUser } from "../services/campaigns.js";
+import { processPendingForWaId } from "../services/broadcast.js";
 
 export function webhookRouter() {
   const router = Router();
@@ -51,10 +52,10 @@ export function webhookRouter() {
             // 1) marca janela 24h
             await touch24hWindow(String(waId));
 
-            // ✅ 1.1) processa campanhas pendentes (se entrar na janela)
+            // ✅ 1.1) processa campanhas pendentes (padronizado em broadcast.js)
             // (não interfere no fluxo: envia mensagens adicionais se houver)
             try {
-              await processPendingCampaignsForUser(String(waId));
+              await processPendingForWaId(String(waId));
             } catch (err) {
               console.warn(
                 JSON.stringify({
