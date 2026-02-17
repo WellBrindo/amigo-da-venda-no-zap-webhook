@@ -1,10 +1,11 @@
 // src/services/broadcast.js
-// ✅ V16.4.7 — Broadcast inteligente com campanhas:
+// ✅ V16.4.8 — Broadcast inteligente com campanhas:
 // - Filtra por plano
 // - Envia somente para usuários na janela 24h
 // - Fora da janela: fica pendente
 // - Ao entrar na janela (touch inbound): envia automaticamente
 // - Registra campanhas e estatísticas (sent/pending/errors)
+// - ✅ Reprocesso manual: reenviar pendências apenas para quem já está na janela 24h
 
 import {
   redisSet,
@@ -234,6 +235,87 @@ export async function listCampaigns(limit = 30) {
   }
 
   return { ok: true, count: out.length, campaigns: out };
+}
+
+/**
+ * ✅ Reprocessa (reenviar) APENAS pendências da campanha para usuários que JÁ estão na janela 24h agora.
+ * - Não move usuários para janela.
+ * - Não toca em usuários fora da janela (continuam pendentes).
+ * - Útil quando você criou a campanha e, por algum motivo, o envio imediato falhou/foi interrompido.
+ */
+export async function reprocessCampaignForActiveWindow(campaignId, opts = {}) {
+  const id = safeStr(campaignId);
+  if (!id) throw new Error("campaignId required");
+
+  const limit = Math.max(1, Math.min(20000, Number(opts.limit || 5000)));
+
+  // Pega meta (para recuperar texto)
+  const rawMeta = await redisGet(campaignKeyMeta(id)).catch(() => "");
+  let meta = null;
+  try {
+    meta = rawMeta ? JSON.parse(rawMeta) : null;
+  } catch {
+    meta = null;
+  }
+
+  const text = safeStr(meta?.text);
+  if (!text) {
+    await recordError(id, "-", "Campaign meta missing text (reprocess skipped)");
+    return { ok: true, campaignId: id, attempted: 0, sent: 0, errors: 1, pendingBefore: 0, pendingAfter: 0 };
+  }
+
+  const pendingList = await redisSMembers(campaignKeyPending(id)).catch(() => []);
+  const pending = Array.isArray(pendingList) ? pendingList.map((x) => safeStr(x)).filter(Boolean) : [];
+  const pendingBefore = pending.length;
+
+  if (pendingBefore === 0) {
+    return { ok: true, campaignId: id, attempted: 0, sent: 0, errors: 0, pendingBefore: 0, pendingAfter: 0 };
+  }
+
+  const windowWaIds = await listWindow24hActive(nowMs(), limit);
+  const windowSet = new Set((windowWaIds || []).map((x) => safeStr(x)));
+
+  const targets = pending.filter((waId) => windowSet.has(safeStr(waId)));
+  const attempted = targets.length;
+
+  let sent = 0;
+  let errors = 0;
+
+  for (const waId of targets) {
+    try {
+      await sendWhatsAppText({ to: waId, text });
+      await redisSAdd(campaignKeySent(id), waId);
+      await redisSRem(campaignKeyPending(id), waId);
+      sent += 1;
+    } catch (err) {
+      errors += 1;
+      await recordError(id, waId, err?.message || err);
+      // mantém pendente para tentar novamente
+    }
+  }
+
+  const pendingAfter = Number(await redisSCard(campaignKeyPending(id)).catch(() => pendingBefore)) || 0;
+
+  // Se zerou pendências, remove do índice global de campanhas pendentes
+  if (pendingAfter === 0) {
+    await redisSRem(PENDING_CAMPAIGNS_SET, id).catch(() => 0);
+  } else {
+    // garante que a campanha está indexada como pendente
+    await redisSAdd(PENDING_CAMPAIGNS_SET, id).catch(() => 0);
+  }
+
+  await ensureCampaignTTL(id);
+
+  await pushSystemAlert("CAMPAIGN_REPROCESS_WINDOW24H", {
+    id,
+    pendingBefore,
+    attempted,
+    sent,
+    errors,
+    pendingAfter,
+  });
+
+  return { ok: true, campaignId: id, pendingBefore, attempted, sent, errors, pendingAfter };
 }
 
 /**
