@@ -38,9 +38,18 @@ import {
   setLastPrompt,
   getPaymentMethod,
   setPaymentMethod,
+  getUserDocMasked,
   setUserDocMasked,
   getAsaasCustomerId,
   setAsaasCustomerId,
+  getAsaasSubscriptionId,
+  setAsaasSubscriptionId,
+  setMenuPrevStatus,
+  getMenuPrevStatus,
+  clearMenuPrevStatus,
+  setCardValidUntil,
+  getCardValidUntil,
+  setCardCanceledAt,
 } from "./state.js";
 
 import { getMenuPlans, getPlanByChoice, renderPlansMenu } from "./Plans.js";
@@ -51,6 +60,8 @@ import {
   createCustomer,
   createPixPayment,
   createRecurringCardPaymentLink,
+  getSubscription,
+  cancelSubscription,
 } from "./asaas/client.js";
 
 // -------------------- Config --------------------
@@ -69,6 +80,10 @@ const ST = Object.freeze({
   WAIT_PLAN: "WAIT_PLAN",
   WAIT_PAYMENT_METHOD: "WAIT_PAYMENT_METHOD",
   WAIT_DOC: "WAIT_DOC",
+
+  WAIT_MENU: "WAIT_MENU",
+  WAIT_MENU_NEW_NAME: "WAIT_MENU_NEW_NAME",
+  WAIT_MENU_NEW_DOC: "WAIT_MENU_NEW_DOC",
 });
 
 // -------------------- Helpers --------------------
@@ -101,6 +116,50 @@ function wantsTemplateCommand(t) {
 function wantsFreeCommand(t) {
   const s = upper(t);
   return s === "LIVRE" || s === "FREE";
+}
+
+
+function wantsMenuCommand(t) {
+  const s = upper(t);
+  return s === "MENU" || s === "MENÚ";
+}
+
+function normalizeMenuChoice(t) {
+  const s = cleanText(t);
+  // aceita "1", "1)", "1." etc
+  const m = s.match(/^(\d{1,2})\s*[)\.\-:]?/);
+  if (!m) return "";
+  const n = String(m[1] || "").trim();
+  // menu tem 1..10
+  if (!n) return "";
+  const num = Number(n);
+  if (!Number.isFinite(num)) return "";
+  if (num < 1 || num > 10) return "";
+  return String(num);
+}
+
+function formatDateBR(iso) {
+  const s = String(iso || "").trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "";
+  return `${m[3]}/${m[2]}`;
+}
+
+function daysUntilISO(iso) {
+  const s = String(iso || "").trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
+  const target = new Date(y, mo, d, 23, 59, 59);
+  const now = new Date();
+  const diffMs = target.getTime() - now.getTime();
+  return Math.ceil(diffMs / (24 * 60 * 60 * 1000));
+}
+
+function isISODateInFutureOrToday(iso) {
+  const days = daysUntilISO(iso);
+  if (days === null) return false;
+  return days >= 0;
 }
 
 function todayISO() {
@@ -195,6 +254,70 @@ async function msgTemplateSet(waId, mode){
   return await getCopyText("FLOW_TEMPLATE_KEEP_FIXED", { waId });
 }
 
+
+async function msgMenuMain(waId) {
+  return await getCopyText("FLOW_MENU_MAIN", { waId });
+}
+
+async function msgMenuAskNewName(waId) {
+  return await getCopyText("FLOW_MENU_ASK_NEW_NAME", { waId });
+}
+
+async function msgMenuAskNewDoc(waId) {
+  return await getCopyText("FLOW_MENU_ASK_NEW_DOC", { waId });
+}
+
+async function msgMenuUrlHelp(waId) {
+  return await getCopyText("FLOW_MENU_URL_HELP", { waId });
+}
+
+async function msgMenuUrlFeedback(waId) {
+  return await getCopyText("FLOW_MENU_URL_FEEDBACK", { waId });
+}
+
+async function msgMenuUrlInstagram(waId) {
+  return await getCopyText("FLOW_MENU_URL_INSTAGRAM", { waId });
+}
+
+async function msgMenuCancelNotFound(waId) {
+  return await getCopyText("FLOW_MENU_CANCEL_NOT_FOUND", { waId });
+}
+
+async function msgMenuCancelOk(waId, { renewalBr = "", daysLeft = "" } = {}) {
+  return await getCopyText("FLOW_MENU_CANCEL_OK", {
+    waId,
+    vars: { renewalBr, daysLeft },
+  });
+}
+
+async function msgMenuMySubscription(waId) {
+  const planCode = await getUserPlan(waId);
+  const plans = await getMenuPlans();
+  const plan = (plans || []).find((p) => p.code === planCode) || null;
+
+  const planName = plan?.name || (planCode ? String(planCode) : "Sem plano");
+  const quotaTotal = Number(plan?.monthlyQuota || 0) || 0;
+  const used = await getUserQuotaUsed(waId);
+
+  // renovação do cartão (quando existir)
+  const validUntil = await getCardValidUntil(waId);
+  const renewalBr = formatDateBR(validUntil) || "—";
+  const days = daysUntilISO(validUntil);
+  const daysLeft = typeof days === "number" ? String(days) : "—";
+
+  const base = [
+    "*Minha assinatura*",
+    "",
+    `📦 Plano: ${planName}`,
+    `📊 Uso no mês: ${used} / ${quotaTotal || "—"}`,
+    `📅 Renovação (Cartão): ${renewalBr} — faltam ${daysLeft} dia(s)`,
+    "",
+    "Instagram: https://www.instagram.com/amigo.das.vendas/",
+  ].join("\n");
+
+  return base;
+}
+
 // -------------------- Core --------------------
 export async function handleInboundText({ waId, text }) {
   const id = cleanText(waId);
@@ -214,11 +337,142 @@ export async function handleInboundText({ waId, text }) {
     return reply(await msgTemplateSet(id, "FREE"));
   }
 
+  // Comando global: MENU
+  if (wantsMenuCommand(inbound)) {
+    const cur = await getUserStatus(id);
+    await setMenuPrevStatus(id, cur);
+    await setUserStatus(id, ST.WAIT_MENU);
+    return reply(await msgMenuMain(id));
+  }
+
+
   const status = await getUserStatus(id);
 
   if (status === ST.BLOCKED) {
     return reply(await getCopyText("FLOW_BLOCKED", { waId: id }));
   }
+
+  // 0) MENU (estado dedicado)
+  if (status === ST.WAIT_MENU) {
+    const choice = normalizeMenuChoice(inbound);
+
+    // Se não for número válido, sai do menu e trata como "próxima descrição"
+    if (!choice) {
+      const prev = await getMenuPrevStatus(id);
+      await clearMenuPrevStatus(id);
+      if (prev && prev !== ST.WAIT_MENU) {
+        await setUserStatus(id, prev);
+      } else {
+        // fallback seguro
+        await setUserStatus(id, ST.WAIT_PRODUCT);
+      }
+      // Reprocessa a mesma mensagem com o status restaurado
+      return await handleInboundText({ waId: id, text: inbound });
+    }
+
+    // opção 1: Minha assinatura
+    if (choice === "1") {
+      return reply(await msgMenuMySubscription(id));
+    }
+
+    // opção 2: Alterar para anúncio FIXO
+    if (choice === "2") {
+      await setTemplateMode(id, "FIXED");
+      return reply(await msgTemplateSet(id, "FIXED"));
+    }
+
+    // opção 3: Alterar para anúncio LIVRE
+    if (choice === "3") {
+      await setTemplateMode(id, "FREE");
+      return reply(await msgTemplateSet(id, "FREE"));
+    }
+
+    // opção 4: Planos
+    if (choice === "4") {
+      return reply(await msgPlansOnly());
+    }
+
+    // opção 5: Cancelar plano (cartão)
+    if (choice === "5") {
+      const subId = await getAsaasSubscriptionId(id);
+      if (!subId) return reply(await msgMenuCancelNotFound(id));
+
+      // tenta capturar próxima renovação antes de cancelar
+      let nextDue = "";
+      try {
+        const sub = await getSubscription({ subscriptionId: subId });
+        nextDue = String(sub?.nextDueDate || sub?.nextPaymentDate || "").trim();
+        if (nextDue) {
+          await setCardValidUntil(id, nextDue);
+        }
+      } catch (_) {
+        // best-effort; não quebra produção
+      }
+
+      // cancela recorrência
+      await cancelSubscription({ subscriptionId: subId });
+
+      await setCardCanceledAt(id, new Date().toISOString());
+
+      const renewalBr = formatDateBR(nextDue) || formatDateBR(await getCardValidUntil(id)) || "—";
+      const days = daysUntilISO(nextDue || (await getCardValidUntil(id)));
+      const daysLeft = typeof days === "number" ? String(days) : "—";
+
+      return reply(await msgMenuCancelOk(id, { renewalBr, daysLeft }));
+    }
+
+    // opção 6: Alterar nome
+    if (choice === "6") {
+      await setUserStatus(id, ST.WAIT_MENU_NEW_NAME);
+      return reply(await msgMenuAskNewName(id));
+    }
+
+    // opção 7: Alterar CPF/CNPJ
+    if (choice === "7") {
+      await setUserStatus(id, ST.WAIT_MENU_NEW_DOC);
+      return reply(await msgMenuAskNewDoc(id));
+    }
+
+    // opção 8: Ajuda
+    if (choice === "8") return reply(await msgMenuUrlHelp(id));
+
+    // opção 9: Formulário
+    if (choice === "9") return reply(await msgMenuUrlFeedback(id));
+
+    // opção 10: Instagram
+    if (choice === "10") return reply(await msgMenuUrlInstagram(id));
+
+    // fallback (não deve acontecer)
+    return reply(await msgMenuMain(id));
+  }
+
+  // 0.1) MENU — alteração de nome
+  if (status === ST.WAIT_MENU_NEW_NAME) {
+    const name = inbound;
+    if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
+    await setUserFullName(id, name);
+
+    // volta ao menu
+    await setUserStatus(id, ST.WAIT_MENU);
+    return reply("✅ Nome atualizado!
+
+" + (await msgMenuMain(id)));
+  }
+
+  // 0.2) MENU — alteração de CPF/CNPJ
+  if (status === ST.WAIT_MENU_NEW_DOC) {
+    const v = validateDoc(inbound);
+    if (!v.ok) return reply(await msgInvalidDoc(id));
+
+    await setUserDocMasked(id, v.type, v.last4);
+
+    // volta ao menu
+    await setUserStatus(id, ST.WAIT_MENU);
+    return reply("✅ CPF/CNPJ atualizado!
+
+" + (await msgMenuMain(id)));
+  }
+
 
   // ✅ Se o usuário manda "oi" e ainda não tem nome, inicia onboarding
   if (isGreeting(inbound)) {
@@ -366,6 +620,16 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
       return reply(await msgTrialOverAndPlans());
     }
   } else {
+    // ACTIVE: checa validade do cartão (quando recorrência foi cancelada)
+    const validUntil = await getCardValidUntil(id);
+    if (validUntil && !isISODateInFutureOrToday(validUntil)) {
+      const pm = await getPaymentMethod(id);
+      if (pm === "CARD") {
+        await setUserStatus(id, ST.WAIT_PLAN);
+        return reply((await getCopyText("FLOW_QUOTA_BLOCKED", { waId: id })) + "\n\n" + (await msgPlansOnly()));
+      }
+    }
+
     // ACTIVE: checa quota do plano
     const planCode = await getUserPlan(id);
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
