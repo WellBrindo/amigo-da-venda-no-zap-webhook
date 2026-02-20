@@ -1,4 +1,4 @@
-import { redisGet, redisSet, redisZAdd, redisZCount, redisZRangeByScore } from "./redis.js";
+import { redisGet, redisSet, redisDel, redisZAdd, redisZRem, redisZCount, redisZRangeByScore } from "./redis.js";
 import { indexUser } from "./state.js";
 
 const KEY_Z_WINDOW_24H = "z:window24h";
@@ -66,4 +66,15 @@ export async function listWindow24hActive(tsMs = nowMs(), limit = 500) {
   // Upstash retorna array de members (strings)
   const waIds = Array.isArray(items) ? items : [];
   return waIds;
+}
+
+export async function clear24hWindowForUser(waId) {
+  const id = String(waId ?? '').trim();
+  if (!id) throw new Error('Missing waId');
+  // best-effort: remove last inbound timestamp + remove member from zset
+  await Promise.allSettled([
+    redisDel(keyLastInboundTs(id)),
+    redisZRem(KEY_Z_WINDOW_24H, id),
+  ]);
+  return { ok: true, waId: id };
 }
