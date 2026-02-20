@@ -16,7 +16,7 @@
 // - Esse contador é "descrições geradas com sucesso" (após resposta da OpenAI).
 // - Não substitui trialUsed/quotaUsed; é complementar para dashboard.
 
-import { redisGet, redisIncrBy, redisExpire } from "./redis.js";
+import { redisGet, redisIncrBy, redisExpire, redisDel } from "./redis.js";
 
 const TTL_DAY_SECONDS = 60 * 60 * 24 * 90;    // 90 dias
 const TTL_MONTH_SECONDS = 60 * 60 * 24 * 450; // ~15 meses
@@ -360,3 +360,50 @@ export async function getUserDaysRange({ waId, start, end } = {}) {
   return { ok: true, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ day: l, count: values[i] })) };
 }
 
+// -----------------------------
+// 🧹 Reset de métricas por usuário (sem SCAN/KEYS)
+// - Remove chaves day/month do usuário em um intervalo fixo
+// - Útil para “resetar como se nunca tivesse escrito” em número de teste
+// -----------------------------
+
+export async function resetUserDescriptionMetrics(waId, { days = 120, months = 18, endDate = new Date() } = {}) {
+  const id = safeStr(waId);
+  if (!id) return { ok: false, error: 'waId required' };
+
+  const dN = clampInt(days, 1, 400, 120);
+  const mN = clampInt(months, 1, 48, 18);
+
+  const end = new Date(endDate.getTime());
+  const dayEnd = fmtYmd(end);
+
+  // Dias
+  const startDay = addDays(end, -(dN - 1));
+  const dayKeys = [];
+  for (let i = 0; i < dN; i++) {
+    const d = fmtYmd(addDays(startDay, i));
+    dayKeys.push(kUserDay(id, d));
+  }
+
+  // Meses
+  const endMonth = new Date(end.getTime());
+  endMonth.setDate(1);
+  const startMonth = addMonths(endMonth, -(mN - 1));
+  const monthKeys = [];
+  for (let i = 0; i < mN; i++) {
+    const m = fmtYm(addMonths(startMonth, i));
+    monthKeys.push(kUserMonth(id, m));
+  }
+
+  let delCount = 0;
+  const all = [...dayKeys, ...monthKeys];
+  for (const k of all) {
+    try {
+      await redisDel(k);
+      delCount++;
+    } catch (_) {
+      // best-effort
+    }
+  }
+
+  return { ok: true, waId: id, deleted: delCount, ranges: { days: { start: fmtYmd(startDay), end: dayEnd, count: dN }, months: { start: fmtYm(startMonth), end: fmtYm(endMonth), count: mN } } };
+}
