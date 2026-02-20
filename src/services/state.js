@@ -12,6 +12,7 @@ import {
   redisDel,
   redisSAdd,
   redisSMembers,
+  redisSRem,
   redisType,
 } from "./redis.js";
 
@@ -541,6 +542,44 @@ export async function resetUserToTrial(waId) {
     setCardCanceledAt(waId, ""),
   ]);
   return true;
+}
+
+// ⚠️ Reset TOTAL (para número de teste) — remove tudo como se nunca tivesse escrito
+// Regras:
+// - NÃO chama ensureUserExists (para não recriar chaves)
+// - NÃO usa SCAN/KEYS
+// - Remove do índice users:index
+// - Não mexe em métricas/copy/window24h (isso é feito por módulos específicos)
+export async function resetUserAsNew(waId) {
+  const id = safeStr(waId);
+  if (!id) throw new Error('waId required');
+
+  const keys = [
+    keyStatus(id),
+    keyPlan(id),
+    keyQuotaUsed(id),
+    keyTrialUsed(id),
+    keyLastPrompt(id),
+    keyTemplateMode(id),
+    keyFullName(id),
+    keyDocType(id),
+    keyDocLast4(id),
+    keyDocLegacy(id),
+    keyPaymentMethod(id),
+    keyAsaasCustomerId(id),
+    keyAsaasSubscriptionId(id),
+    keyMenuPrevStatus(id),
+    keyCardValidUntil(id),
+    keyCardCanceledAt(id),
+  ];
+
+  // best-effort: apaga todas as chaves conhecidas
+  await Promise.allSettled(keys.map((k) => redisDel(k)));
+
+  // remove do índice
+  await Promise.allSettled([redisSRem(USERS_INDEX_KEY, id)]);
+
+  return { ok: true, waId: id, deletedKeys: keys.length, removedFromIndex: true };
 }
 
 // ===================== SNAPSHOT =====================
