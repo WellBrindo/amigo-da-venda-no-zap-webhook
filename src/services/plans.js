@@ -27,6 +27,7 @@ const DEFAULT_PLANS = [
     priceCents: 2490,
     monthlyQuota: 20,
     active: true,
+    maxRefinements: 2,
     description: "20 descrições/mês",
   },
   {
@@ -35,6 +36,7 @@ const DEFAULT_PLANS = [
     priceCents: 3490,
     monthlyQuota: 60,
     active: true,
+    maxRefinements: 2,
     description: "60 descrições/mês",
   },
   {
@@ -43,6 +45,7 @@ const DEFAULT_PLANS = [
     priceCents: 4990,
     monthlyQuota: 200,
     active: true,
+    maxRefinements: 2,
     description: "200 descrições/mês",
   },
 ];
@@ -146,7 +149,12 @@ export async function getPlan(code) {
   const raw = await redisGet(planKey(code));
   if (!raw) return null;
   try {
-    return JSON.parse(raw);
+    const plan = JSON.parse(raw);
+    // Backward-compatible default
+    if (typeof plan?.maxRefinements !== "number" || !Number.isFinite(plan.maxRefinements)) {
+      plan.maxRefinements = 2;
+    }
+    return plan;
   } catch {
     await pushSystemAlert("PLAN_PARSE_ERROR", {
       key: planKey(code),
@@ -167,10 +175,13 @@ export async function upsertPlan(input) {
   const monthlyQuota = toInt(input?.monthlyQuota, "monthlyQuota");
   if (monthlyQuota < 0) throw new Error("monthlyQuota must be >= 0");
 
+
+  const maxRefinements = toInt(input?.maxRefinements ?? 2, "maxRefinements");
+  if (maxRefinements < 0) throw new Error("maxRefinements must be >= 0");
   const active = Boolean(input?.active);
   const description = String(input?.description || "").trim();
 
-  const plan = { code, name, priceCents, monthlyQuota, active, description };
+  const plan = { code, name, priceCents, monthlyQuota, maxRefinements, active, description };
 
   await redisSet(planKey(code), JSON.stringify(plan));
 
