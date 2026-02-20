@@ -36,6 +36,14 @@ import {
   getUserQuotaUsed,
   incUserQuotaUsed,
   setLastPrompt,
+  clearLastPrompt,
+  getLastAd,
+  setLastAd,
+  clearLastAd,
+  getRefineCount,
+  setRefineCount,
+  incRefineCount,
+  clearRefineCount,
   getPaymentMethod,
   setPaymentMethod,
   getUserDocMasked,
@@ -124,6 +132,11 @@ function wantsMenuCommand(t) {
   return s === "MENU" || s === "MENÚ";
 }
 
+function wantsOkCommand(t) {
+  const s = upper(t);
+  return s === "OK" || s === "PRONTO" || s === "PROXIMO" || s === "PRÓXIMO";
+}
+
 function normalizeMenuChoice(t) {
   const s = cleanText(t);
   // aceita "1", "1)", "1." etc
@@ -184,27 +197,12 @@ function noReply() {
 }
 
 // -------------------- Copy / Mensagens --------------------
-async function copyText(key, opts = {}) {
-  const waId = opts?.waId ?? null;
-  const vars = opts?.vars ?? null;
-
-  let firstName = "";
-  if (waId) {
-    const fullName = await getUserFullName(String(waId));
-    firstName = String(fullName || "").trim().split(/\s+/)[0] || "";
-  }
-
-  const firstNameComma = firstName ? `, ${firstName}` : "";
-  const mergedVars = { ...(vars || {}), firstName, firstNameComma };
-  return await getCopyText(key, { ...opts, waId, vars: mergedVars });
-}
-
 async function msgAskName(waId){
-  return await copyText("FLOW_ASK_NAME", { waId });
+  return await getCopyText("FLOW_ASK_NAME", { waId });
 }
 
 async function msgAskProduct(waId){
-  return await copyText("FLOW_ASK_PRODUCT", { waId });
+  return await getCopyText("FLOW_ASK_PRODUCT", { waId });
 }
 
 async function msgTrialOverAndPlans() {
@@ -241,7 +239,7 @@ async function msgPlansOnly() {
 }
 
 async function msgAskPaymentMethod(waId, plan){
-  return await copyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", {
+  return await getCopyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", {
     waId,
     vars: {
       planName: plan?.name || "",
@@ -251,55 +249,55 @@ async function msgAskPaymentMethod(waId, plan){
 }
 
 async function msgAskDoc(waId){
-  return await copyText("FLOW_ASK_DOC", { waId });
+  return await getCopyText("FLOW_ASK_DOC", { waId });
 }
 
 async function msgInvalidDoc(waId){
-  return await copyText("FLOW_INVALID_DOC", { waId });
+  return await getCopyText("FLOW_INVALID_DOC", { waId });
 }
 
 async function msgAfterAdAskTemplateChoice(waId, currentMode){
   const hintKey = currentMode === "FIXED" ? "FLOW_HINT_TEMPLATE_FIXED" : "FLOW_HINT_TEMPLATE_FREE";
-  const hint = await copyText(hintKey, { waId });
-  return await copyText("FLOW_AFTER_AD_TEMPLATE_CHOICE", { waId, vars: { hint } });
+  const hint = await getCopyText(hintKey, { waId });
+  return await getCopyText("FLOW_AFTER_AD_TEMPLATE_CHOICE", { waId, vars: { hint } });
 }
 
 async function msgTemplateSet(waId, mode){
-  if (mode === "FREE") return await copyText("FLOW_TEMPLATE_SWITCH_TO_FREE", { waId });
-  return await copyText("FLOW_TEMPLATE_KEEP_FIXED", { waId });
+  if (mode === "FREE") return await getCopyText("FLOW_TEMPLATE_SWITCH_TO_FREE", { waId });
+  return await getCopyText("FLOW_TEMPLATE_KEEP_FIXED", { waId });
 }
 
 
 async function msgMenuMain(waId) {
-  return await copyText("FLOW_MENU_MAIN", { waId });
+  return await getCopyText("FLOW_MENU_MAIN", { waId });
 }
 
 async function msgMenuAskNewName(waId) {
-  return await copyText("FLOW_MENU_ASK_NEW_NAME", { waId });
+  return await getCopyText("FLOW_MENU_ASK_NEW_NAME", { waId });
 }
 
 async function msgMenuAskNewDoc(waId) {
-  return await copyText("FLOW_MENU_ASK_NEW_DOC", { waId });
+  return await getCopyText("FLOW_MENU_ASK_NEW_DOC", { waId });
 }
 
 async function msgMenuUrlHelp(waId) {
-  return await copyText("FLOW_MENU_URL_HELP", { waId });
+  return await getCopyText("FLOW_MENU_URL_HELP", { waId });
 }
 
 async function msgMenuUrlFeedback(waId) {
-  return await copyText("FLOW_MENU_URL_FEEDBACK", { waId });
+  return await getCopyText("FLOW_MENU_URL_FEEDBACK", { waId });
 }
 
 async function msgMenuUrlInstagram(waId) {
-  return await copyText("FLOW_MENU_URL_INSTAGRAM", { waId });
+  return await getCopyText("FLOW_MENU_URL_INSTAGRAM", { waId });
 }
 
 async function msgMenuCancelNotFound(waId) {
-  return await copyText("FLOW_MENU_CANCEL_NOT_FOUND", { waId });
+  return await getCopyText("FLOW_MENU_CANCEL_NOT_FOUND", { waId });
 }
 
 async function msgMenuCancelOk(waId, { renewalBr = "", daysLeft = "" } = {}) {
-  return await copyText("FLOW_MENU_CANCEL_OK", {
+  return await getCopyText("FLOW_MENU_CANCEL_OK", {
     waId,
     vars: { renewalBr, daysLeft },
   });
@@ -372,7 +370,7 @@ export async function handleInboundText({ waId, text }) {
   }
 
   if (status === ST.BLOCKED) {
-    return reply(await copyText("FLOW_BLOCKED", { waId: id }));
+    return reply(await getCopyText("FLOW_BLOCKED", { waId: id }));
   }
 
   // 0) MENU (estado dedicado)
@@ -472,7 +470,7 @@ export async function handleInboundText({ waId, text }) {
   // 0.1) MENU — alteração de nome
   if (status === ST.WAIT_MENU_NEW_NAME) {
     const name = inbound;
-    if (name.length < 3) return reply(await copyText("FLOW_NAME_TOO_SHORT", { waId: id }));
+    if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
     await setUserFullName(id, name);
 
     // volta ao menu
@@ -618,6 +616,20 @@ export async function handleInboundText({ waId, text }) {
 
   // 8) ACTIVE
   if (status === ST.ACTIVE) {
+    if (wantsOkCommand(inbound)) {
+      await clearLastAd(id);
+      await clearRefineCount(id);
+      await clearLastPrompt(id);
+      return reply("Show! ✅\n\nMe manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.");
+    }
+    if (wantsOkCommand(inbound)) {
+      await clearLastAd(id);
+      await clearRefineCount(id);
+      await clearLastPrompt(id);
+      return reply("Show! ✅
+
+Me manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.");
+    }
     if (isGreeting(inbound)) return reply(await msgAskProduct(id));
     return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false });
   }
@@ -631,10 +643,24 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
   const id = waId;
   const userText = inboundText;
 
-  // TRIAL: checa limite
+  const lastAd = await getLastAd(id);
+  const isRefinement = !!lastAd;
+
+  // Regra de consumo (refinamentos):
+  // 1 descrição + até 2 refinamentos = 1 crédito
+  // Refinamento 3, 5, 7, ... => consome +1 crédito
+  const currentRefines = isRefinement ? await getRefineCount(id) : 0;
+  const nextRefines = isRefinement ? (currentRefines + 1) : 0;
+  const willConsumeExtraCredit =
+    isRefinement && nextRefines >= 3 && (nextRefines % 2 === 1);
+
+  const creditsNeeded = isRefinement ? (willConsumeExtraCredit ? 1 : 0) : 1;
+
+
+  // TRIAL: checa limite (considera refinamentos que não consomem crédito)
   if (isTrial) {
     const used = await getUserTrialUsed(id);
-    if (used >= TRIAL_LIMIT) {
+    if (creditsNeeded > 0 && used >= TRIAL_LIMIT) {
       await setUserStatus(id, ST.WAIT_PLAN);
       return reply(await msgTrialOverAndPlans());
     }
@@ -645,7 +671,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
       const pm = await getPaymentMethod(id);
       if (pm === "CARD") {
         await setUserStatus(id, ST.WAIT_PLAN);
-        return reply((await copyText("FLOW_QUOTA_BLOCKED", { waId: id })) + "\n\n" + (await msgPlansOnly()));
+        return reply((await getCopyText("FLOW_QUOTA_BLOCKED", { waId: id })) + "\n\n" + (await msgPlansOnly()));
       }
     }
 
@@ -669,35 +695,51 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
   // OpenAI
   let ad = "";
   try {
-    const r = await generateAdText({ userText, mode });
+    const promptToSend = isRefinement
+      ? `ANUNCIO_ATUAL:\n${lastAd}\n\nAJUSTES_SOLICITADOS:\n${userText}`
+      : userText;
+
+    const r = await generateAdText({ userText: promptToSend, mode });
     ad = r.text;
   } catch {
     return reply("Tive um probleminha técnico para gerar sua descrição agora 😕\n\nPode tentar novamente em alguns instantes?");
   }
 
-  // salva prompt
+  // salva prompt (último texto do usuário)
   await setLastPrompt(id, userText);
 
-  // conta uso
-  if (isTrial) await incUserTrialUsed(id, 1);
-  else await incUserQuotaUsed(id, 1);
+  // salva o último anúncio para refinamentos
+  await setLastAd(id, ad);
 
-  // métricas globais + por usuário (best-effort; não pode quebrar produção)
-  try {
-    await incDescriptionMetrics(id, 1);
-  } catch (err) {
-    console.warn(
-      JSON.stringify({
-        level: "warn",
-        tag: "metrics_inc_failed",
-        waId: id,
-        isTrial: !!isTrial,
-        error: String(err?.message || err),
-      })
-    );
+  // controla contagem de refinamentos e consumo de créditos
+  if (isRefinement) {
+    await setRefineCount(id, nextRefines);
+  } else {
+    await clearRefineCount(id);
   }
 
-    return reply(ad + (await msgAfterAdAskTemplateChoice(id, mode)));
+  // conta uso apenas quando há consumo de crédito
+  if (creditsNeeded > 0) {
+    if (isTrial) await incUserTrialUsed(id, creditsNeeded);
+    else await incUserQuotaUsed(id, creditsNeeded);
+
+    // métricas globais + por usuário (best-effort; não pode quebrar produção)
+    try {
+      await incDescriptionMetrics(id, creditsNeeded);
+    } catch (err) {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          tag: "metrics_inc_failed",
+          waId: id,
+          isTrial: !!isTrial,
+          error: String(err?.message || err),
+        })
+      );
+    }
+  }
+
+  return reply(ad + (await msgAfterAdAskTemplateChoice(id, mode)));
 }
 
 // -------------------- Asaas helpers --------------------
