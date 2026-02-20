@@ -197,8 +197,7 @@ Responda com *1*, *2* ou *3*.`,
     "E) CTA forte (1 linha).",
     "",
     "IMPORTANTE: mantenha o anúncio entre 8 e 16 linhas no total. Evite repetição. Não escreva explicações — apenas o anúncio final."
-  ].join("\n")
-"),
+  ].join("\n"),
 
   OPENAI_SYSTEM_FREE: [
     "Você é o *Amigo das Vendas*, redator publicitário especialista em anúncios de alta conversão para WhatsApp (Brasil).",
@@ -215,8 +214,7 @@ Responda com *1*, *2* ou *3*.`,
     "- Termine com CTA forte e simples, chamando para falar no WhatsApp agora.",
     "",
     "Saída: somente o anúncio final, sem comentários."
-  ].join("\n")
-"),
+  ].join("\n"),
 });
 
 // Catálogo para UI (ordem e categorias)
