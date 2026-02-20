@@ -1047,6 +1047,7 @@ router.get("/", async (req, res) => {
         const name = escapeHtml(p.name);
         const price = escapeHtml(String((p.priceCents || 0) / 100).replace(".", ","));
         const quota = escapeHtml(String(p.monthlyQuota ?? ""));
+        const refin = escapeHtml(String(p.maxRefinements ?? 2));
         const desc = escapeHtml(String(p.description ?? ""));
         const active = p.active ? "✅" : "❌";
         return `<tr>
@@ -1054,6 +1055,7 @@ router.get("/", async (req, res) => {
           <td>${name}</td>
           <td>R$ ${price}</td>
           <td>${quota}</td>
+          <td>${refin}</td>
           <td>${active}</td>
           <td style="max-width:420px;">${desc}</td>
           <td>
@@ -1082,6 +1084,7 @@ router.get("/", async (req, res) => {
           <input id="name" placeholder="name (ex: De Vez em Quando)" style="min-width:260px" />
           <input id="priceCents" placeholder="priceCents (ex: 2490)" style="width:170px" />
           <input id="monthlyQuota" placeholder="monthlyQuota (ex: 20)" style="width:190px" />
+          <input id="maxRefinements" placeholder="maxRefinements (ex: 2)" style="width:220px" />
           <input id="description" placeholder="description (ex: 20 descrições/mês)" style="min-width:260px" />
           <button class="primary" onclick="create()">Criar/Atualizar</button>
         </div>
@@ -1091,7 +1094,7 @@ router.get("/", async (req, res) => {
         <table>
           <thead>
             <tr>
-              <th>Code</th><th>Nome</th><th>Preço</th><th>Cota</th><th>Ativo</th><th>Descrição</th><th>Ação</th>
+              <th>Code</th><th>Nome</th><th>Preço</th><th>Cota</th><th>Refin.</th><th>Ativo</th><th>Descrição</th><th>Ação</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -1111,6 +1114,7 @@ router.get("/", async (req, res) => {
             name: (document.getElementById('name').value||'').trim(),
             priceCents: Number((document.getElementById('priceCents').value||'0').trim()),
             monthlyQuota: Number((document.getElementById('monthlyQuota').value||'0').trim()),
+            maxRefinements: Number((document.getElementById('maxRefinements').value||'2').trim()),
             description: (document.getElementById('description').value||'').trim(),
             active: true,
           };
