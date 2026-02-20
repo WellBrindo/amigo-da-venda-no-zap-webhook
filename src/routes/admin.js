@@ -10,6 +10,7 @@ import {
   listUsers,
   clearLastPrompt, // ✅ V16.4.6: limpar via DEL (não SET "")
   setLastPrompt, // ✅ TESTE CONTROLADO: forçar setLastPrompt("")
+  resetUserAsNew, // 🧹 reset total (número de teste)
 } from "../services/state.js";
 
 import {
@@ -18,6 +19,7 @@ import {
   listWindow24hActive,
   getLastInboundTs,
   nowMs,
+  clear24hWindowForUser,
 } from "../services/window24h.js";
 
 import {
@@ -29,6 +31,7 @@ import {
   getUserLastNDays,
   getUserLastNMonths,
   getUserDaysRange,
+  resetUserDescriptionMetrics,
 } from "../services/metrics.js";
 
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
@@ -888,6 +891,7 @@ router.get("/", async (req, res) => {
 
           <div class="row" style="margin-top:10px;">
             <button class="danger" onclick="resetTrial()">Reset TRIAL</button>
+            <button class="danger" onclick="resetUser()">Reset TOTAL (como novo)</button>
             <button onclick="setStatus('ACTIVE')">Forçar ACTIVE</button>
             <button onclick="setStatus('BLOCKED')">Forçar BLOCKED</button>
             <button onclick="clearPrompt()">Limpar lastPrompt</button>
@@ -950,6 +954,15 @@ router.get("/", async (req, res) => {
             const {j} = await fetchJson('/admin/state-test/reset-trial?waId=' + encodeURIComponent(id));
             document.getElementById('out').textContent = JSON.stringify(j, null, 2);
             renderUser(j);
+          }
+
+          async function resetUser(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            if(!confirm('Isso vai remover TODO o estado do usuário (teste) como se nunca tivesse escrito. Continuar?')) return;
+            const {j} = await fetchJson('/admin/state-test/reset-user?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+            // Não chamamos get snapshot automaticamente, porque o reset remove as keys e o snapshot recria.
+            // Se quiser ver, clique em Consultar.
           }
 
           async function touchWindow(){
@@ -1773,6 +1786,48 @@ router.get("/", async (req, res) => {
 
       const user = await getUserSnapshot(waId);
       return res.json({ ok: true, action: "reset-trial", waId, user });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // 🧹 Reset TOTAL (número de teste): remove estado, métricas, janela 24h e overrides de copy
+  router.get('/state-test/reset-user', async (req, res) => {
+    try {
+      const waId = requireWaId(req);
+
+      // 1) Estado (user:*) + remove do users:index
+      const st = await resetUserAsNew(waId);
+
+      // 2) Janela 24h (zset + last inbound ts) — best-effort
+      const w = await clear24hWindowForUser(waId).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+
+      // 3) Métricas (user day/month) — best-effort
+      const m = await resetUserDescriptionMetrics(waId, { days: 120, months: 18 }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+
+      // 4) Copy overrides por usuário — best-effort
+      let copyDeleted = 0;
+      let copyKeys = [];
+      try {
+        copyKeys = await listCopyKeys();
+        for (const k of (copyKeys || [])) {
+          await delCopyUser(waId, k).catch(() => null);
+          copyDeleted++;
+        }
+      } catch (err) {
+        // ignore (best-effort)
+      }
+
+      return res.json({
+        ok: true,
+        action: 'reset-user-total',
+        waId,
+        state: st,
+        window24h: w,
+        metrics: m,
+        copy: { ok: true, keys: copyKeys?.length || 0, deleted: copyDeleted },
+        note: 'Após esse reset, o usuário volta a ser “novo”. O snapshot (Consultar) recria defaults (TRIAL/FIXED).',
+      });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
