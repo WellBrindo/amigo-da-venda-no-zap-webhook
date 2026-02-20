@@ -1,5 +1,5 @@
 // src/routes/admin.js
-import { Router } from "express";
+import express, { Router } from "express";
 
 import {
   setUserStatus,
@@ -262,6 +262,10 @@ function requireWaId(req) {
 
 export function adminRouter() {
   const router = Router();
+
+  // Parse x-www-form-urlencoded bodies (HTML <form> POST)
+  // Fixes Copy UI "key required" when using native form submits.
+  router.use(express.urlencoded({ extended: false }));
 
   // ===================== Dashboard (Métricas consolidadas) =====================
   // ✅ V16.4.9 — Dashboard consolidado (global + por usuário)
