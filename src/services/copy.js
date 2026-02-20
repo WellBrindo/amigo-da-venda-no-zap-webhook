@@ -198,6 +198,7 @@ Responda com *1*, *2* ou *3*.`,
     "",
     "IMPORTANTE: mantenha o anúncio entre 8 e 16 linhas no total. Evite repetição. Não escreva explicações — apenas o anúncio final."
   ].join("
+")
 "),
 
   OPENAI_SYSTEM_FREE: [
@@ -216,6 +217,7 @@ Responda com *1*, *2* ou *3*.`,
     "",
     "Saída: somente o anúncio final, sem comentários."
   ].join("
+")
 "),
 });
 
