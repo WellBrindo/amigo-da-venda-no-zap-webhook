@@ -65,6 +65,16 @@ const keyPaymentMethod = (waId) => `user:${waId}:paymentMethod`;
 const keyAsaasCustomerId = (waId) => `user:${waId}:asaasCustomerId`;
 const keyAsaasSubscriptionId = (waId) => `user:${waId}:asaasSubscriptionId`;
 
+
+// ===================== MENU (bot) =====================
+const keyMenuPrevStatus = (waId) => `user:${waId}:menuPrevStatus`;
+
+// ===================== CARD (assinatura) =====================
+// Data (YYYY-MM-DD) até quando o usuário mantém acesso após cancelar recorrência.
+const keyCardValidUntil = (waId) => `user:${waId}:cardValidUntil`;
+// Timestamp ISO de quando o usuário cancelou (auditoria leve).
+const keyCardCanceledAt = (waId) => `user:${waId}:cardCanceledAt`;
+
 function safeStr(v) {
   return String(v ?? "").trim();
 }
@@ -454,6 +464,64 @@ export async function getAsaasSubscriptionId(waId) {
   return safeStr(v);
 }
 
+
+// ===================== Menu Prev Status =====================
+export async function setMenuPrevStatus(waId, prevStatus) {
+  await indexUser(waId);
+  const s = safeStr(prevStatus).toUpperCase();
+  if (!s) {
+    await redisDel(keyMenuPrevStatus(waId));
+    return "";
+  }
+  await redisSet(keyMenuPrevStatus(waId), s);
+  return s;
+}
+
+export async function getMenuPrevStatus(waId) {
+  const v = await redisGet(keyMenuPrevStatus(waId));
+  return safeStr(v).toUpperCase();
+}
+
+export async function clearMenuPrevStatus(waId) {
+  await indexUser(waId);
+  await redisDel(keyMenuPrevStatus(waId));
+  return true;
+}
+
+// ===================== Card Validity / Cancel =====================
+export async function setCardValidUntil(waId, isoDate) {
+  await indexUser(waId);
+  const d = safeStr(isoDate);
+  if (!d) {
+    await redisDel(keyCardValidUntil(waId));
+    return "";
+  }
+  // formato esperado: YYYY-MM-DD (não validar pesado aqui)
+  await redisSet(keyCardValidUntil(waId), d);
+  return d;
+}
+
+export async function getCardValidUntil(waId) {
+  const v = await redisGet(keyCardValidUntil(waId));
+  return safeStr(v);
+}
+
+export async function setCardCanceledAt(waId, isoTs) {
+  await indexUser(waId);
+  const ts = safeStr(isoTs);
+  if (!ts) {
+    await redisDel(keyCardCanceledAt(waId));
+    return "";
+  }
+  await redisSet(keyCardCanceledAt(waId), ts);
+  return ts;
+}
+
+export async function getCardCanceledAt(waId) {
+  const v = await redisGet(keyCardCanceledAt(waId));
+  return safeStr(v);
+}
+
 // ===================== Reset helpers =====================
 export async function resetUserToTrial(waId) {
   await ensureUserExists(waId);
@@ -468,6 +536,9 @@ export async function resetUserToTrial(waId) {
     clearUserDoc(waId),
     setAsaasCustomerId(waId, ""), // já faz DEL internamente
     setAsaasSubscriptionId(waId, ""), // já faz DEL internamente
+    clearMenuPrevStatus(waId),
+    setCardValidUntil(waId, ""),
+    setCardCanceledAt(waId, ""),
   ]);
   return true;
 }
@@ -488,6 +559,8 @@ export async function getUserSnapshot(waId) {
     paymentMethod,
     asaasCustomerId,
     asaasSubscriptionId,
+    cardValidUntil,
+    cardCanceledAt,
   ] = await Promise.all([
     getUserStatus(waId),
     getUserPlan(waId),
@@ -500,6 +573,8 @@ export async function getUserSnapshot(waId) {
     getPaymentMethod(waId),
     getAsaasCustomerId(waId),
     getAsaasSubscriptionId(waId),
+    getCardValidUntil(waId),
+    getCardCanceledAt(waId),
   ]);
 
   return {
@@ -515,5 +590,7 @@ export async function getUserSnapshot(waId) {
     paymentMethod: paymentMethod || "",
     asaasCustomerId: asaasCustomerId || "",
     asaasSubscriptionId: asaasSubscriptionId || "",
+    cardValidUntil: cardValidUntil || "",
+    cardCanceledAt: cardCanceledAt || "",
   };
 }
