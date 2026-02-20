@@ -43,7 +43,7 @@ Antes que eu esqueça 😄
 Qual é o seu NOME COMPLETO?`,
 
   // FLOW — Coleta de contexto
-  FLOW_ASK_PRODUCT: "Perfeito! ✅\n\nAgora me diga: *o que você vende* ou *qual serviço você presta*?\n\nPode ser simples, tipo: “vendo bolo R$30” 😄",
+  FLOW_ASK_PRODUCT: "Perfeito{{firstNameComma}}! ✅\n\nAgora me diga: *o que você vende* ou *qual serviço você presta*?\n\nPode ser simples, tipo: “vendo bolo R$30” 😄",
   FLOW_ASK_REFINEMENT: "Certo! ✅\n\nAgora me diga o que você quer *melhorar* nesse anúncio.\n\nExemplo: “deixa mais curto”, “coloca mais emoção”, “foca no preço”, etc.",
   FLOW_ASK_TEMPLATE_CHOICE:
     "Agora me diga como você prefere as próximas descrições:\n\n1) *Modelo FIXO* (padrão, sempre no mesmo formato)\n2) *Modelo LIVRE* (o Amigo escolhe o melhor formato)\n\nResponda com *1* ou *2* 🙂",
