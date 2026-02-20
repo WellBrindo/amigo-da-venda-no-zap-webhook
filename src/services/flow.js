@@ -348,6 +348,14 @@ export async function handleInboundText({ waId, text }) {
 
   const status = await getUserStatus(id);
 
+  // ✅ Primeiro contato (ou usuário sem nome): sempre pedir nome antes de seguir no fluxo.
+  // Mantém comandos globais (TEMPLATE/LIVRE/MENU) funcionando acima.
+  const __name = await getUserFullName(id);
+  if (!__name && status !== ST.WAIT_NAME && status !== ST.WAIT_MENU_NEW_NAME && status !== ST.WAIT_MENU_NEW_DOC) {
+    await setUserStatus(id, ST.WAIT_NAME);
+    return reply(await msgAskName(id));
+  }
+
   if (status === ST.BLOCKED) {
     return reply(await getCopyText("FLOW_BLOCKED", { waId: id }));
   }
@@ -674,7 +682,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     );
   }
 
-  return reply(ad + msgAfterAdAskTemplateChoice(mode));
+    return reply(ad + (await msgAfterAdAskTemplateChoice(id, mode)));
 }
 
 // -------------------- Asaas helpers --------------------
