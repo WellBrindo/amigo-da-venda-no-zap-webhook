@@ -454,7 +454,7 @@ export async function handleInboundText({ waId, text }) {
 
     // volta ao menu
     await setUserStatus(id, ST.WAIT_MENU);
-    return reply("✅ Nome atualizado!\n\n" + (await msgMenuMain(id)));
+    return reply(`✅ Nome atualizado!\n\n${await msgMenuMain(id)}`);
   }
 
   // 0.2) MENU — alteração de CPF/CNPJ
@@ -466,8 +466,8 @@ export async function handleInboundText({ waId, text }) {
 
     // volta ao menu
     await setUserStatus(id, ST.WAIT_MENU);
-    return reply("✅ CPF/CNPJ atualizado!\n\n" + (await msgMenuMain(id)));
-    }
+    return reply(`✅ CPF/CNPJ atualizado!\n\n${await msgMenuMain(id)}`);
+  }
 
 
   // ✅ Se o usuário manda "oi" e ainda não tem nome, inicia onboarding
