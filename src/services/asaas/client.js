@@ -122,3 +122,32 @@ export async function createRecurringCardPaymentLink({
 
   return asaasFetch("/paymentLinks", { method: "POST", body: payload });
 }
+
+// -------------------- Subscriptions --------------------
+// Observação: Asaas pode oferecer endpoints diferentes para cancelar.
+// Estratégia segura:
+// 1) Tentar POST /subscriptions/{id}/cancel
+// 2) Se falhar (404/405), tentar DELETE /subscriptions/{id}
+
+export async function getSubscription({ subscriptionId }) {
+  const id = String(subscriptionId || "").trim();
+  if (!id) throw new Error("subscriptionId required");
+  return asaasFetch(`/subscriptions/${id}`, { method: "GET" });
+}
+
+export async function cancelSubscription({ subscriptionId }) {
+  const id = String(subscriptionId || "").trim();
+  if (!id) throw new Error("subscriptionId required");
+
+  // 1) POST cancel (quando disponível)
+  try {
+    return await asaasFetch(`/subscriptions/${id}/cancel`, { method: "POST" });
+  } catch (err) {
+    const st = Number(err?.status || 0);
+    // 404/405/400: tenta alternativa
+    if (st && st !== 404 && st !== 405 && st !== 400) throw err;
+  }
+
+  // 2) DELETE subscription
+  return asaasFetch(`/subscriptions/${id}`, { method: "DELETE" });
+}
