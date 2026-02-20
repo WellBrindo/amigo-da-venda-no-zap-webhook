@@ -197,8 +197,7 @@ Responda com *1*, *2* ou *3*.`,
     "E) CTA forte (1 linha).",
     "",
     "IMPORTANTE: mantenha o anúncio entre 8 e 16 linhas no total. Evite repetição. Não escreva explicações — apenas o anúncio final."
-  ].join("
-")
+  ].join("\n")
 "),
 
   OPENAI_SYSTEM_FREE: [
@@ -216,8 +215,7 @@ Responda com *1*, *2* ou *3*.`,
     "- Termine com CTA forte e simples, chamando para falar no WhatsApp agora.",
     "",
     "Saída: somente o anúncio final, sem comentários."
-  ].join("
-")
+  ].join("\n")
 "),
 });
 
