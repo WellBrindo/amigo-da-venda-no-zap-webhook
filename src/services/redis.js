@@ -186,6 +186,10 @@ export async function redisZScore(key, member) {
   return upstash(`/ZSCORE/${encodeURIComponent(key)}/${encodeURIComponent(String(member))}`);
 }
 
+export async function redisZRem(key, member) {
+  return upstash(`/ZREM/${encodeURIComponent(key)}/${encodeURIComponent(String(member))}`);
+}
+
 export async function redisZCount(key, min, max) {
   return upstash(
     `/ZCOUNT/${encodeURIComponent(key)}/${encodeURIComponent(String(min))}/${encodeURIComponent(String(max))}`
