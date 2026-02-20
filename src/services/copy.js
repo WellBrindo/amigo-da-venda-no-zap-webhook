@@ -33,14 +33,14 @@ function applyVars(text, vars = {}) {
 export const DEFAULT_COPY = Object.freeze({
   // FLOW — Identidade / Onboarding
   FLOW_WELCOME: "Oi! 👋😊\n\nEu sou o *Amigo das Vendas*.",
-  FLOW_ASK_NAME: "Oi! 👋😊
+  FLOW_ASK_NAME: `Oi! 👋😊
 
 Eu sou o Amigo das Vendas — pode me chamar de Amigo.
 
 Você me diz o que você vende ou o serviço que você presta, e eu te devolvo um anúncio prontinho pra você copiar e mandar nos grupos do WhatsApp.
 
 Antes que eu esqueça 😄
-Qual é o seu NOME COMPLETO?",
+Qual é o seu NOME COMPLETO?`,
 
   // FLOW — Coleta de contexto
   FLOW_ASK_PRODUCT: "Perfeito! ✅\n\nAgora me diga: *o que você vende* ou *qual serviço você presta*?\n\nPode ser simples, tipo: “vendo bolo R$30” 😄",
