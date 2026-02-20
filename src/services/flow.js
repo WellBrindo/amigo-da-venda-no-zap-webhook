@@ -626,9 +626,7 @@ export async function handleInboundText({ waId, text }) {
       await clearLastAd(id);
       await clearRefineCount(id);
       await clearLastPrompt(id);
-      return reply("Show! ✅
-
-Me manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.");
+      return reply("Show! ✅\\n\\nMe manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.");
     }
     if (isGreeting(inbound)) return reply(await msgAskProduct(id));
     return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false });
