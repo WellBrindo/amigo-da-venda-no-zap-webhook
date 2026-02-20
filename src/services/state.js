@@ -317,6 +317,67 @@ export async function clearLastPrompt(waId) {
   return true;
 }
 
+
+// ===================== Last Ad (for refinements) =====================
+function keyLastAd(waId) {
+  return `user:${waId}:lastAd`;
+}
+
+export async function getLastAd(waId) {
+  const v = await redisGet(keyLastAd(waId));
+  return safeStr(v);
+}
+
+export async function setLastAd(waId, adText) {
+  await indexUser(waId);
+  const t = safeStr(adText);
+
+  // Nunca SET vazio (Upstash REST pode interpretar como SET sem value)
+  if (!t) {
+    await redisDel(keyLastAd(waId));
+    return "";
+  }
+
+  await redisSet(keyLastAd(waId), t);
+  return t;
+}
+
+export async function clearLastAd(waId) {
+  await indexUser(waId);
+  await redisDel(keyLastAd(waId));
+  return true;
+}
+
+// ===================== Refinement Count =====================
+function keyRefineCount(waId) {
+  return `user:${waId}:refineCount`;
+}
+
+export async function getRefineCount(waId) {
+  const v = await redisGet(keyRefineCount(waId));
+  return toInt(v, 0);
+}
+
+export async function setRefineCount(waId, n) {
+  await indexUser(waId);
+  const v = toInt(n, 0);
+  await redisSet(keyRefineCount(waId), String(v));
+  return v;
+}
+
+export async function incRefineCount(waId, by = 1) {
+  await indexUser(waId);
+  const inc = toInt(by, 1);
+  const v = await redisIncrBy(keyRefineCount(waId), inc);
+  return toInt(v, 0);
+}
+
+export async function clearRefineCount(waId) {
+  await indexUser(waId);
+  await redisDel(keyRefineCount(waId));
+  return true;
+}
+
 // ===================== Template Mode =====================
 export async function getTemplateMode(waId) {
   const v = await redisGet(keyTemplateMode(waId));
