@@ -304,6 +304,23 @@ async function msgMenuCancelOk(waId, { renewalBr = "", daysLeft = "" } = {}) {
 }
 
 async function msgMenuMySubscription(waId) {
+  const status = await getUserStatus(waId);
+
+  // TRIAL: mostra como plano Trial (5 grátis) mesmo sem user:plan
+  if (status === ST.TRIAL || status === ST.WAIT_NAME || status === ST.WAIT_PRODUCT) {
+    const usedTrial = await getUserTrialUsed(waId);
+    const base = [
+      "*Minha assinatura*",
+      "",
+      "📦 Plano: Trial",
+      `📊 Uso no mês: ${usedTrial} / ${TRIAL_LIMIT}`,
+      "📅 Renovação (Cartão): — — faltam — dia(s)",
+      "",
+      "Instagram: https://www.instagram.com/amigo.das.vendas/",
+    ].join("\n");
+    return base;
+  }
+
   const planCode = await getUserPlan(waId);
   const plans = await getMenuPlans();
   const plan = (plans || []).find((p) => p.code === planCode) || null;
@@ -330,7 +347,6 @@ async function msgMenuMySubscription(waId) {
 
   return base;
 }
-
 // -------------------- Core --------------------
 export async function handleInboundText({ waId, text }) {
   const id = cleanText(waId);
@@ -645,12 +661,26 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
   const isRefinement = !!lastAd;
 
   // Regra de consumo (refinamentos):
-  // 1 descrição + até 2 refinamentos = 1 crédito
-  // Refinamento 3, 5, 7, ... => consome +1 crédito
-  const currentRefines = isRefinement ? await getRefineCount(id) : 0;
-  const nextRefines = isRefinement ? (currentRefines + 1) : 0;
-  const willConsumeExtraCredit =
-    isRefinement && nextRefines >= 3 && (nextRefines % 2 === 1);
+  // - 1 descrição inicial sempre consome 1 crédito
+  // - Refinamentos "grátis" por descrição = maxRefinements do plano
+  // - Ao ultrapassar o limite, consome +1 crédito e reinicia o ciclo (refineCount volta para 1)
+  //   Ex.: maxRefinements=2 => consome no refinamento 3,5,7...
+
+  const DEFAULT_MAX_REFINEMENTS = 2;
+
+  let maxRefinements = DEFAULT_MAX_REFINEMENTS;
+  if (!isTrial) {
+    const planCode = await getUserPlan(id);
+    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
+    const fromPlan = Number(plan?.maxRefinements);
+    if (Number.isFinite(fromPlan) && fromPlan >= 0) maxRefinements = Math.trunc(fromPlan);
+  }
+
+  const currentRefines = isRefinement ? await getRefineCount(id) : 0; // refinamentos na "rodada" atual
+  const attemptedNext = isRefinement ? (currentRefines + 1) : 0;
+
+  const willConsumeExtraCredit = isRefinement && attemptedNext > maxRefinements;
+  const nextRefines = isRefinement ? (willConsumeExtraCredit ? 1 : attemptedNext) : 0;
 
   const creditsNeeded = isRefinement ? (willConsumeExtraCredit ? 1 : 0) : 1;
 
