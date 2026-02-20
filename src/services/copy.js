@@ -121,6 +121,21 @@ Responda com *1*, *2* ou *3*.`,
   FLOW_ASK_PAYMENT_METHOD_WITH_PLAN:
     "Show! ✅ Plano escolhido: *{{planName}}* (R$ {{planPrice}} / mês)\n\nAgora escolha a forma de pagamento:\n\n1) *Cartão* (assinatura recorrente)\n2) *PIX* (pagamento manual todo mês)\n\nResponda com *1* ou *2*.",
 
+  // FLOW — MENU (comando "MENU")
+  FLOW_MENU_MAIN:
+    "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
+  FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como você quer que eu salve).",
+  FLOW_MENU_ASK_NEW_DOC: "Certo! ✅\n\nMe envie seu *CPF ou CNPJ* (somente números) para atualizar.",
+  FLOW_MENU_URL_HELP: "Aqui está nosso site: https://www.amigodasvendas.com.br",
+  FLOW_MENU_URL_FEEDBACK: "Pode enviar por aqui: https://www.amigodasvendas.com.br/formulario",
+  FLOW_MENU_URL_INSTAGRAM: "Instagram: https://www.instagram.com/amigo.das.vendas/",
+  FLOW_MENU_CANCEL_NOT_FOUND:
+    "Não encontrei uma assinatura ativa no cartão para cancelar agora 😕\n\nSe você acha que isso é um erro, fale com o suporte pelo formulário:\nhttps://www.amigodasvendas.com.br/formulario",
+  // Vars: renewalBr, daysLeft
+  FLOW_MENU_CANCEL_OK:
+    "✅ Pronto! A recorrência do *Cartão* foi cancelada.\n\nVocê continua com acesso até *{{renewalBr}}* (faltam {{daysLeft}} dia(s)).\n\nQuando chegar a data, é só escolher um plano novamente pelo *MENU* 😉",
+
+
   // OPENAI — Prompts
   OPENAI_SYSTEM_FIXED: [
     "Você é um redator publicitário especialista em anúncios curtos para WhatsApp.",
@@ -179,6 +194,16 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_TEMPLATE_SWITCH_TO_FREE", label: "Confirma trocar para LIVRE" },
   { category: "Flow", key: "FLOW_TEMPLATE_KEEP_FIXED", label: "Confirma manter FIXO" },
   { category: "Flow", key: "FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", label: "Pagamento com plano (dinâmico)" },
+
+
+  { category: "Flow", key: "FLOW_MENU_MAIN", label: "Menu principal (MENU)" },
+  { category: "Flow", key: "FLOW_MENU_ASK_NEW_NAME", label: "Menu: pedir novo nome" },
+  { category: "Flow", key: "FLOW_MENU_ASK_NEW_DOC", label: "Menu: pedir novo CPF/CNPJ" },
+  { category: "Flow", key: "FLOW_MENU_URL_HELP", label: "Menu: URL Ajuda" },
+  { category: "Flow", key: "FLOW_MENU_URL_FEEDBACK", label: "Menu: URL Formulário" },
+  { category: "Flow", key: "FLOW_MENU_URL_INSTAGRAM", label: "Menu: URL Instagram" },
+  { category: "Flow", key: "FLOW_MENU_CANCEL_NOT_FOUND", label: "Menu: cancelar cartão (não encontrado)" },
+  { category: "Flow", key: "FLOW_MENU_CANCEL_OK", label: "Menu: cancelar cartão (sucesso)" },
 
   { category: "OpenAI", key: "OPENAI_SYSTEM_FIXED", label: "Prompt FIXO (system)" },
   { category: "OpenAI", key: "OPENAI_SYSTEM_FREE", label: "Prompt LIVRE (system)" },
