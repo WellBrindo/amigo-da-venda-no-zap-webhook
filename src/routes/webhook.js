@@ -77,9 +77,17 @@ export function webhookRouter() {
             // 3) roteia para o motor de fluxo
             const r = await handleInboundText({ waId: String(waId), text: inboundText });
 
-            // 4) responde se necessário
-            if (r?.shouldReply && r?.replyText) {
-              await sendWhatsAppText({ to: String(waId), text: String(r.replyText) });
+            // 4) responde se necessário (suporta múltiplas mensagens)
+            if (r?.shouldReply) {
+              const replies = Array.isArray(r?.replies) && r.replies.length
+                ? r.replies
+                : (r?.replyText ? [r.replyText] : []);
+
+              for (const t of replies) {
+                const msgText = String(t || "").trim();
+                if (!msgText) continue;
+                await sendWhatsAppText({ to: String(waId), text: msgText });
+              }
             }
           }
         }
