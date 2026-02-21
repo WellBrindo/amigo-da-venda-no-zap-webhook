@@ -29,6 +29,8 @@ import {
   setUserFullName,
   getTemplateMode,
   setTemplateMode,
+  getTemplatePrompted,
+  setTemplatePrompted,
   getUserTrialUsed,
   incUserTrialUsed,
   getUserPlan,
@@ -290,6 +292,9 @@ function enforceAdFormatting(adText) {
     const line = String(lines[i] || "");
     if (!line.trim()) continue;
 
+    // evita duplo negrito (ex.: já veio com *Nome*)
+    if (line.includes(\"*\")) continue;
+
     // não mexer em bullets (normalmente começam com emoji)
     if (/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(line.trim())) continue;
 
@@ -475,6 +480,12 @@ function extractBizProfileFromText(text) {
   // WhatsApp (se houver)
   const wa = plain.match(/\+?55\s*\(?\d{2}\)?\s*\d{4,5}[\-\s]?\d{4}/);
   if (wa) profile.whatsapp = String(wa[0]).replace(/\s+/g, " ").trim();
+
+  // Fallback: se não detectou nome, tenta pegar o 1º trecho em negrito no corpo
+  if (!profile.companyName) {
+    const rawBold = raw.match(/\*([^*]{2,80})\*\s+(é|oferece|atua|ajuda|entrega|faz)\b/i);
+    if (rawBold && rawBold[1]) profile.companyName = String(rawBold[1]).trim();
+  }
 
   // remove vazios
   for (const k of Object.keys(profile)) {
@@ -667,7 +678,18 @@ async function msgMenuMySubscription(waId) {
   const status = await getUserStatus(waId);
 
   // TRIAL: mostra como plano Trial (5 grátis) mesmo sem user:plan
-  if (status === ST.TRIAL || status === ST.WAIT_NAME || status === ST.WAIT_PRODUCT) {
+  const planCodeForTrialCheck = await getUserPlan(waId);
+  if (
+    status === ST.TRIAL ||
+    status === ST.WAIT_NAME ||
+    status === ST.WAIT_PRODUCT ||
+    status === ST.WAIT_MENU ||
+    status === ST.WAIT_TEMPLATE_MODE ||
+    status === ST.WAIT_SAVE_PROFILE
+  ) {
+    // Se ainda não há plano pago associado, tratamos como Trial para a tela de assinatura
+    if (!planCodeForTrialCheck) {
+
     const usedTrial = await getUserTrialUsed(waId);
     const base = [
       "*Minha assinatura*",
@@ -901,6 +923,7 @@ export async function handleInboundText({ waId, text }) {
 
     const mode = c === "2" ? "FREE" : "FIXED";
     await setTemplateMode(id, mode);
+    await setTemplatePrompted(id, true);
 
     // prepara sugestão de perfil (se houver dados)
     const ad = await getLastAd(id);
@@ -1236,11 +1259,20 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   const formattedAd = enforceAdFormatting(ad);
 
-  // Depois de cada anúncio, pedimos a preferência de template em uma mensagem separada
-  await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
-  await setUserStatus(id, ST.WAIT_TEMPLATE_MODE);
+  // Pós-anúncio:
+  // - A escolha FIXO/LIVRE aparece apenas na 1ª descrição (templatePrompted = false)
+  // - Depois disso, seguimos direto para a mensagem curta de refinamento
+  const alreadyPrompted = await getTemplatePrompted(id);
 
-  return replyMulti([formattedAd, await msgAfterAdAskTemplateChoice(id, mode)]);
+  if (!alreadyPrompted) {
+    await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
+    await setUserStatus(id, ST.WAIT_TEMPLATE_MODE);
+    return replyMulti([formattedAd, await msgAfterAdAskTemplateChoice(id, mode)]);
+  }
+
+  // Mantém o status atual e apenas orienta refinamentos
+  const refineMsg = await getCopyText("FLOW_REFINE_PROMPT_SHORT", { waId: id });
+  return replyMulti([formattedAd, refineMsg]);
 }
 
 // -------------------- Asaas helpers --------------------
