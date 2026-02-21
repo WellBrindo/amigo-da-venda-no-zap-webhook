@@ -75,6 +75,14 @@ const keyMenuPrevStatus = (waId) => `user:${waId}:menuPrevStatus`;
 const keyCardValidUntil = (waId) => `user:${waId}:cardValidUntil`;
 // Timestamp ISO de quando o usuário cancelou (auditoria leve).
 const keyCardCanceledAt = (waId) => `user:${waId}:cardCanceledAt`;
+// ===================== BIZ PROFILE (auto preenchimento) =====================
+// Perfil salvo de dados da empresa (nome/atendimento/local/horário/whatsapp etc)
+const keyBizProfile = (waId) => `user:${waId}:bizProfile`;
+// Perfil pendente (sugestão detectada) aguardando confirmação do usuário
+const keyPendingBizProfile = (waId) => `user:${waId}:pendingBizProfile`;
+// Status anterior (para estados transitórios como escolha de template / salvar perfil)
+const keyPrevStatus = (waId) => `user:${waId}:prevStatus`;
+
 
 function safeStr(v) {
   return String(v ?? "").trim();
@@ -108,6 +116,24 @@ function normalizeMaybeJsonString(raw) {
   if (/^"+$/.test(s)) return "";
 
   return s;
+}
+
+function safeJsonParse(raw) {
+  const s = safeStr(raw);
+  if (!s) return null;
+  try {
+    return JSON.parse(s);
+  } catch (_) {
+    return null;
+  }
+}
+
+function safeJsonStringify(obj) {
+  try {
+    return JSON.stringify(obj ?? {});
+  } catch (_) {
+    return "{}";
+  }
 }
 
 function maskDocFromParts(docType, docLast4) {
@@ -550,6 +576,70 @@ export async function clearMenuPrevStatus(waId) {
   return true;
 }
 
+
+// ===================== Prev Status (transitórios) =====================
+export async function setPrevStatus(waId, prevStatus) {
+  await indexUser(waId);
+  const s = safeStr(prevStatus).toUpperCase();
+  if (!s) {
+    await redisDel(keyPrevStatus(waId));
+    return "";
+  }
+  await redisSet(keyPrevStatus(waId), s);
+  return s;
+}
+
+export async function getPrevStatus(waId) {
+  const v = await redisGet(keyPrevStatus(waId));
+  return safeStr(v).toUpperCase();
+}
+
+export async function clearPrevStatus(waId) {
+  await indexUser(waId);
+  await redisDel(keyPrevStatus(waId));
+  return true;
+}
+
+// ===================== Biz Profile (salvo) =====================
+export async function getBizProfile(waId) {
+  const raw = await redisGet(keyBizProfile(waId));
+  const obj = safeJsonParse(raw);
+  return obj && typeof obj === "object" ? obj : null;
+}
+
+export async function setBizProfile(waId, profileObj) {
+  await indexUser(waId);
+  const s = safeJsonStringify(profileObj);
+  await redisSet(keyBizProfile(waId), s);
+  return true;
+}
+
+export async function clearBizProfile(waId) {
+  await indexUser(waId);
+  await redisDel(keyBizProfile(waId));
+  return true;
+}
+
+// ===================== Biz Profile (pendente) =====================
+export async function getPendingBizProfile(waId) {
+  const raw = await redisGet(keyPendingBizProfile(waId));
+  const obj = safeJsonParse(raw);
+  return obj && typeof obj === "object" ? obj : null;
+}
+
+export async function setPendingBizProfile(waId, profileObj) {
+  await indexUser(waId);
+  const s = safeJsonStringify(profileObj);
+  await redisSet(keyPendingBizProfile(waId), s);
+  return true;
+}
+
+export async function clearPendingBizProfile(waId) {
+  await indexUser(waId);
+  await redisDel(keyPendingBizProfile(waId));
+  return true;
+}
+
 // ===================== Card Validity / Cancel =====================
 export async function setCardValidUntil(waId, isoDate) {
   await indexUser(waId);
@@ -599,6 +689,9 @@ export async function resetUserToTrial(waId) {
     setAsaasCustomerId(waId, ""), // já faz DEL internamente
     setAsaasSubscriptionId(waId, ""), // já faz DEL internamente
     clearMenuPrevStatus(waId),
+    clearPrevStatus(waId),
+    clearBizProfile(waId),
+    clearPendingBizProfile(waId),
     setCardValidUntil(waId, ""),
     setCardCanceledAt(waId, ""),
   ]);
@@ -632,6 +725,9 @@ export async function resetUserAsNew(waId) {
     keyMenuPrevStatus(id),
     keyCardValidUntil(id),
     keyCardCanceledAt(id),
+    keyPrevStatus(id),
+    keyBizProfile(id),
+    keyPendingBizProfile(id),
   ];
 
   // best-effort: apaga todas as chaves conhecidas
