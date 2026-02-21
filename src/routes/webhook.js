@@ -7,6 +7,10 @@ import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { handleInboundText } from "../services/flow.js";
 import { processPendingForWaId } from "../services/broadcast.js";
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 export function webhookRouter() {
   const router = Router();
 
@@ -86,7 +90,22 @@ export function webhookRouter() {
               for (const t of replies) {
                 const msgText = String(t || "").trim();
                 if (!msgText) continue;
-                await sendWhatsAppText({ to: String(waId), text: msgText });
+
+                try {
+                  await sendWhatsAppText({ to: String(waId), text: msgText });
+                } catch (err) {
+                  console.warn(
+                    JSON.stringify({
+                      level: "warn",
+                      tag: "send_whatsapp_reply_failed",
+                      waId: String(waId),
+                      error: String(err?.message || err),
+                    })
+                  );
+                }
+
+                // pequena pausa para evitar rate-limit e manter a ordem
+                await sleep(80);
               }
             }
           }
