@@ -701,18 +701,19 @@ async function msgMenuMySubscription(waId) {
   ) {
     // Se ainda não há plano pago associado, tratamos como Trial para a tela de assinatura
     if (!planCodeForTrialCheck) {
-
-    const usedTrial = await getUserTrialUsed(waId);
-    const base = [
-      "*Minha assinatura*",
-      "",
-      "📦 Plano: Trial",
-      `📊 Uso no mês: ${usedTrial} / ${TRIAL_LIMIT}`,
-      "📅 Renovação (Cartão): — — faltam — dia(s)",
-      "",
-      "Instagram: https://www.instagram.com/amigo.das.vendas/",
-    ].join("\n");
-    return base;
+      const usedTrial = await getUserTrialUsed(waId);
+      const base = [
+        "*Minha assinatura*",
+        "",
+        "📦 Plano: Trial",
+        `📊 Uso no mês: ${usedTrial} / ${TRIAL_LIMIT}`,
+        "📅 Renovação (Cartão): — — faltam — dia(s)",
+        "",
+        "Instagram: https://www.instagram.com/amigo.das.vendas/",
+      ].join("\n");
+      return base;
+    }
+    // Se houver plano pago associado mesmo em estados iniciais, seguimos com o fluxo de plano pago abaixo.
   }
 
   const planCode = await getUserPlan(waId);
