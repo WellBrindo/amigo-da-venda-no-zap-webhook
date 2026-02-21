@@ -136,6 +136,7 @@ Responda com *1*, *2* ou *3*.`,
     "Seu acesso está bloqueado no momento. Se isso for um engano, fale com o suporte.",
 
   FLOW_AFTER_AD_TEMPLATE_CHOICE:
+  FLOW_ASK_SAVE_PROFILE: "Notei que você incluiu alguns dados da sua empresa. Quer que eu salve isso para usar automaticamente nos próximos anúncios?\n\nVou salvar:\n{{profileLines}}\n\n1) Sim, pode salvar\n2) Não, obrigado",
     "\n\nQuer manter o *template*?\n\n1) Sim (manter template)\n2) Quero *formatação livre*\n\n{{hint}}\n\nVocê também pode digitar *TEMPLATE* ou *LIVRE* a qualquer momento.",
 
   FLOW_HINT_TEMPLATE_FIXED: "(*Hoje você está no TEMPLATE, que costuma converter mais.*)",
@@ -171,9 +172,12 @@ FLOW_SAVE_PROFILE_NOT_SAVED_CONFIRM: "Fechado! ✅ Não vou salvar esses dados p
 FLOW_SAVE_PROFILE_CHANGE_LATER: "Se quiser mudar isso depois, digite *MENU* e ajuste sua preferência.",
 
 FLOW_AFTER_SAVE_PROFILE_QUESTION: "Agora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?",
+
+  FLOW_REFINEMENTS_SHORT: "*Refinamentos*\n\nAgora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?\n* Para refinar: responda com o que você quer mudar (ex.: \"deixa mais curto\", \"mais emocional\", \"com mais emoji\", etc...).",
 // Vars: maxRefinements
 FLOW_AFTER_SAVE_PROFILE_REFINE_HINT: "• Para refinar: responda com o que você quer mudar (ex.: “deixa mais curto”, “inclua delivery”, “mude o preço”).\n\n(Lembrete: até {{maxRefinements}} refinamento(s) por descrição. No próximo, conta como uma nova descrição.)",
 FLOW_AFTER_SAVE_PROFILE_OK_HINT: "• Para criar outro: digite *OK*.",
+  FLOW_REFINE_PROMPT_SHORT: "*Refinamentos*\n\nAgora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?\n* Para refinar: responda com o que você quer mudar (ex.: \"deixa mais curto\", \"mais emocional\", \"com mais emoji\", etc...).",
 
 FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como você quer que eu salve).",
   FLOW_MENU_ASK_NEW_DOC: "Certo! ✅\n\nMe envie seu *CPF ou CNPJ* (somente números) para atualizar.",
