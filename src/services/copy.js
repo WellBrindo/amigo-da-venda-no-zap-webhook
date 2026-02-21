@@ -154,11 +154,7 @@ Responda com *1*, *2* ou *3*.`,
     "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
   
 
-  FLOW_ACTIVE_NO_PLAN_ERROR: "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).
-
-Por favor, acesse nosso site para regularizar ou fale com nosso suporte.
-
-Instagram: https://www.instagram.com/amigo.das.vendas/",
+  FLOW_ACTIVE_NO_PLAN_ERROR: "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).\n\nPor favor, acesse nosso site para regularizar ou fale com nosso suporte.\n\nInstagram: https://www.instagram.com/amigo.das.vendas/",
 
 FLOW_MENU_NAME_UPDATED: "✅ Nome atualizado!",
 FLOW_MENU_DOC_UPDATED: "✅ CPF/CNPJ atualizado!",
