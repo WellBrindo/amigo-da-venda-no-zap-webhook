@@ -430,8 +430,7 @@ function enforceAdFormatting(adText) {
     }
   }
 
-  return arr.join("
-").trim().replace(/\*{2,}/g, "*");
+  return arr.join("\n").trim().replace(/\*{2,}/g, "*");
 }
 
 function extractBizProfileFromText(text) {
@@ -612,8 +611,7 @@ async function msgAskSaveProfile(waId, profile) {
   lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_NO", { waId }));
   lines.push("");
   lines.push(await getCopyText("FLOW_SAVE_PROFILE_BENEFIT", { waId }));
-  return lines.join("
-");
+  return lines.join("\n");
 }
 
 async function msgAfterSaveProfile(waId, saved, maxRefinements) {
@@ -627,8 +625,7 @@ async function msgAfterSaveProfile(waId, saved, maxRefinements) {
   lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_QUESTION", { waId }));
   lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_REFINE_HINT", { waId, vars: { maxRefinements } }));
   lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_OK_HINT", { waId }));
-  return lines.join("
-");
+  return lines.join("\n");
 }
 
 async function msgMenuMain(waId) {
