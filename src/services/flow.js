@@ -222,6 +222,17 @@ function normalizeNewlines(s) {
   return String(s || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+function stripOuterStars(s) {
+  return String(s || "").replace(/^\*+/, "").replace(/\*+$/, "").trim();
+}
+
+function boldWrapSafe(s) {
+  const core = stripOuterStars(s);
+  if (!core) return "";
+  return `*${core.replace(/\*/g, "").trim()}*`;
+}
+
+
 function enforceAdFormatting(adText) {
   const raw = normalizeNewlines(adText);
   const lines0 = raw.split("\n").map((l) => String(l || "").trimRight());
@@ -270,9 +281,9 @@ function enforceAdFormatting(adText) {
     }
 
     if (core) {
-      lines[0] = `${lead}*${core}*`;
+      lines[0] = `${lead}${boldWrapSafe(core)}`;
     } else {
-      lines[0] = `${lead}*${titleLine.replace(/\*/g, "").trim()}*`;
+      lines[0] = `${lead}${boldWrapSafe(titleLine)}`;
     }
 
     // linha em branco após o título
@@ -306,7 +317,7 @@ function enforceAdFormatting(adText) {
     if (m1 && m1[2]) {
       const nm = String(m1[2]).trim();
       if (nm && !nm.includes("*")) {
-        replaced = line.replace(companyPattern1, (all, art, name) => `${art} *${String(name).trim()}* é`);
+        replaced = line.replace(companyPattern1, (all, art, name) => `${art} ${boldWrapSafe(String(name).trim())} é`);
       }
     }
 
@@ -315,7 +326,7 @@ function enforceAdFormatting(adText) {
       if (m2 && m2[1]) {
         const nm = String(m2[1]).trim();
         if (nm && !nm.includes("*")) {
-          replaced = line.replace(companyPattern2, (all, name, verb) => `*${String(name).trim()}* ${verb}`);
+          replaced = line.replace(companyPattern2, (all, name, verb) => `${boldWrapSafe(String(name).trim())} ${verb}`);
         }
       }
     }
@@ -334,7 +345,7 @@ function enforceAdFormatting(adText) {
     const cleaned = m.replace(/\s+/g, " ").trim();
     if (!cleaned) return m;
     if (cleaned.includes("*")) return cleaned;
-    return `*${cleaned}*`;
+    return boldWrapSafe(cleaned);
   });
 
   // --------------------------
@@ -359,7 +370,7 @@ function enforceAdFormatting(adText) {
     const rest = line.replace(infoEmojiRe, "").trim();
     if (!rest) continue;
 
-    arr[i] = `${emoji} *${rest}*`;
+    arr[i] = `${emoji} ${boldWrapSafe(rest)}`;
     applied += 1;
   }
 
@@ -491,6 +502,7 @@ function extractBizProfileFromText(text) {
   for (const k of Object.keys(profile)) {
     if (!String(profile[k] || "").trim()) delete profile[k];
   }
+  if (Object.keys(profile).length === 0) return null;
   return profile;
 }
 
@@ -599,7 +611,7 @@ E a qualquer momento você pode digitar *MENU* para ajustar.`;
 
 function renderProfileForConfirmation(profile) {
   const lines = [];
-  if (profile.companyName) lines.push(`• Empresa: *${profile.companyName}*`);
+  if (profile.companyName) lines.push(`• Empresa: ${boldWrapSafe(profile.companyName)}`);
   if (profile.serviceArea) lines.push(`• ${profile.serviceArea}`);
   if (profile.hours) lines.push(`• Horário: ${profile.hours}`);
   if (profile.location) lines.push(`• Local: ${profile.location}`);
@@ -743,6 +755,15 @@ export async function handleInboundText({ waId, text }) {
   if (!id || !inbound) return noReply();
 
   await ensureUserExists(id);
+
+  // ✅ Regra de consistência: usuário só pode estar ACTIVE com plano pago associado.
+  // Se por qualquer motivo estiver ACTIVE sem plano, rebaixamos para TRIAL automaticamente.
+  const _st0 = await getUserStatus(id);
+  const _pl0 = await getUserPlan(id);
+  if (_st0 === ST.ACTIVE && !_pl0) {
+    await setUserStatus(id, ST.TRIAL);
+  }
+
 
   // Comandos globais de preferência de template
   if (wantsTemplateCommand(inbound)) {
