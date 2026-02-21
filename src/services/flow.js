@@ -304,7 +304,7 @@ function enforceAdFormatting(adText) {
     if (!line.trim()) continue;
 
     // evita duplo negrito (ex.: já veio com *Nome*)
-    if (line.includes(\"*\")) continue;
+    if (line.includes("*")) continue;
 
     // não mexer em bullets (normalmente começam com emoji)
     if (/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(line.trim())) continue;
