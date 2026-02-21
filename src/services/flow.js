@@ -228,113 +228,211 @@ function enforceAdFormatting(adText) {
   while (lines0.length && !String(lines0[0] || "").trim()) lines0.shift();
   while (lines0.length && !String(lines0[lines0.length - 1] || "").trim()) lines0.pop();
 
-  const lines = [...lines0];
+  let lines = [...lines0];
 
-  // Título: primeira linha não vazia
+  // --------------------------
+  // 1) Título (primeira linha)
+  // - Evita duplicar asteriscos quando o GPT já colocou *...*
+  // - Se houver emoji no começo, deixa o emoji fora do negrito
+  // - Sempre insere uma linha em branco após o título
+  // --------------------------
   if (lines.length > 0) {
-    const title = String(lines[0] || "").trim();
-    const isBold = title.startsWith("*") && title.endsWith("*") && title.length > 2;
-    if (!isBold && title.length > 0 && title.length <= 80) {
-      lines[0] = `*${title}*`;
+    let titleLine = String(lines[0] || "").trim();
+
+    // Se veio com "duplo wrap" (ex.: *🏢 *Título**), remove o wrap externo
+    const starCount = (titleLine.match(/\*/g) || []).length;
+    if (titleLine.startsWith("*") && titleLine.endsWith("*") && starCount > 2) {
+      titleLine = titleLine.slice(1, -1).trim();
     }
-    // 1) Pular uma linha após o título
+
+    // Se o título já tem *...* dentro, mantemos — só limpamos asteriscos soltos no começo/fim
+    titleLine = titleLine.replace(/^\*+/, "").replace(/\*+$/, "").trim();
+
+    // Se o emoji estiver dentro do título, tenta separar
+    let lead = "";
+    let core = titleLine;
+
+    const mEmoji = core.match(/^([\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\uFE0F?\s+)(.+)$/u);
+    if (mEmoji) {
+      lead = mEmoji[1];
+      core = String(mEmoji[2] || "").trim();
+    }
+
+    // Se o core já estiver em negrito *...*, apenas garante que não há asteriscos "sobrando"
+    const mBold = core.match(/^\*([^*]{1,120})\*$/);
+    if (mBold) {
+      core = mBold[1].trim();
+    } else {
+      // remove asteriscos internos soltos, para não quebrar
+      core = core.replace(/\*/g, "").trim();
+    }
+
+    if (core) {
+      lines[0] = `${lead}*${core}*`;
+    } else {
+      lines[0] = `${lead}*${titleLine.replace(/\*/g, "").trim()}*`;
+    }
+
+    // linha em branco após o título
     if (lines.length > 1 && String(lines[1] || "").trim() !== "") {
       lines.splice(1, 0, "");
     }
   }
 
-  // 2) Empresa em negrito (forçar com heurísticas robustas)
-  // Preferência: padrão "A/O <Empresa> é"
+  // --------------------------
+  // 2) Empresa em negrito (se houver) — sem bloquear por causa do título
+  // --------------------------
   const companyPattern1 = /\b([AaOo])\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,80}?)\s+é\b/;
-
-  // Alternativas: "<Empresa> é", "<Empresa> oferece/atua/ajuda"
   const companyPattern2 = /\b([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,80}?)\s+(é|oferece|atua|ajuda|entrega|faz)\b/;
 
-  let text = lines.join("\n");
+  // aplica em linhas do corpo (ignora título e linhas vazias)
+  for (let i = 1; i < lines.length; i++) {
+    const line = String(lines[i] || "");
+    if (!line.trim()) continue;
 
-  const applyCompanyBold = (t) => {
-    // evita duplicar negrito no nome
-    if (t.includes("*") && /\*\s*[A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ]/.test(t)) return t;
+    // não mexer em bullets (normalmente começam com emoji)
+    if (/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(line.trim())) continue;
 
-    let out = t;
-    const m1 = out.match(companyPattern1);
+    // se já tem um *Nome* no começo, considera ok
+    if (/^\*\s*[A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ]/.test(line.trim())) continue;
+
+    let replaced = "";
+    const m1 = line.match(companyPattern1);
     if (m1 && m1[2]) {
-      const name = String(m1[2]).trim();
-      if (name && !name.includes("*")) {
-        out = out.replace(companyPattern1, (all, art, nm) => `${art} *${String(nm).trim()}* é`);
-        return out;
+      const nm = String(m1[2]).trim();
+      if (nm && !nm.includes("*")) {
+        replaced = line.replace(companyPattern1, (all, art, name) => `${art} *${String(name).trim()}* é`);
       }
     }
 
-    // tenta achar em uma linha específica (evita mexer no título)
-    const arr = out.split("\n");
-    for (let i = 0; i < arr.length; i++) {
-      const line = String(arr[i] || "");
-      if (i === 0) continue;
-      if (!line.trim()) continue;
-      if (line.includes("*")) continue;
-
-      const mm = line.match(companyPattern2);
-      if (mm && mm[1]) {
-        const nm = String(mm[1]).trim();
-        // não negritar linhas com emoji no começo (geralmente bullets)
-        if (/^[\u{1F300}-\u{1FAFF}]/u.test(line.trim())) continue;
-        arr[i] = line.replace(companyPattern2, (all, n, verb) => `*${String(n).trim()}* ${verb}`);
-        return arr.join("\n");
+    if (!replaced) {
+      const m2 = line.match(companyPattern2);
+      if (m2 && m2[1]) {
+        const nm = String(m2[1]).trim();
+        if (nm && !nm.includes("*")) {
+          replaced = line.replace(companyPattern2, (all, name, verb) => `*${String(name).trim()}* ${verb}`);
+        }
       }
     }
-    return out;
-  };
 
-  text = applyCompanyBold(text);
+    if (replaced && replaced !== line) {
+      lines[i] = replaced;
+      break; // aplica uma vez
+    }
+  }
 
-  // 3) Preço em negrito (somente o preço, como solicitado)
-  // Ex.: "R$30", "R$ 30,00", "R$ 1.200,50"
+  // --------------------------
+  // 3) Preço em negrito (somente o preço)
+  // --------------------------
+  let text = lines.join("\n");
   text = text.replace(/R\$\s*\d[\d\.\s]*([,]\d{2})?/g, (m) => {
     const cleaned = m.replace(/\s+/g, " ").trim();
+    if (!cleaned) return m;
     if (cleaned.includes("*")) return cleaned;
     return `*${cleaned}*`;
   });
 
-  // 4) Mais 2 destaques em negrito (sem exagero): prioriza linhas com emojis informativos
-  const arr2 = text.split("\n").map((l) => String(l || "").trimRight());
+  // --------------------------
+  // 4) Mais 2 destaques (sem exagero): bullets informativos
+  // --------------------------
+  let arr = text.split("\n").map((l) => String(l || "").trimRight());
   const infoEmojiRe = /^(🇧🇷|🕒|📍|🚚|📞|🌐|💬|✅)\s+/;
   let applied = 0;
 
-  for (let i = 0; i < arr2.length; i++) {
+  for (let i = 0; i < arr.length; i++) {
     if (applied >= 2) break;
-    const line = String(arr2[i] || "");
+    const line = String(arr[i] || "");
     if (!line.trim()) continue;
 
     const m = line.match(infoEmojiRe);
     if (!m) continue;
 
-    // evita bold se já tiver algum bold na linha
+    // evita se já tiver negrito na linha
     if (line.includes("*")) continue;
 
     const emoji = m[1];
     const rest = line.replace(infoEmojiRe, "").trim();
     if (!rest) continue;
 
-    arr2[i] = `${emoji} *${rest}*`;
+    arr[i] = `${emoji} *${rest}*`;
     applied += 1;
   }
 
-  // 5) Sempre pular uma linha entre os dois CTAs finais (heurística: últimas 2 linhas não vazias)
+  // --------------------------
+  // 5) Ordenação: CTA de avanço ("Envie...") antes de informações (🇧🇷/🕒/📍...)
+  // --------------------------
+  const isInfoLine = (l) => infoEmojiRe.test(String(l || "").trim());
+  const isAdvanceCTA = (l) => {
+    const s = String(l || "").trim().toLowerCase();
+    return s.startsWith("envie ") || s.startsWith("mande ") || s.startsWith("me envie ") || s.startsWith("me mande ");
+  };
+
+  const infoBefore = [];
+  let advanceIdx = -1;
+
+  for (let i = 0; i < arr.length; i++) {
+    const line = String(arr[i] || "");
+    if (advanceIdx < 0 && isAdvanceCTA(line)) advanceIdx = i;
+  }
+
+  if (advanceIdx >= 0) {
+    // coleta info lines que aparecem antes do CTA de avanço
+    const kept = [];
+    for (let i = 0; i < arr.length; i++) {
+      const line = String(arr[i] || "");
+      if (i < advanceIdx && isInfoLine(line)) {
+        infoBefore.push(line);
+        continue;
+      }
+      kept.push(line);
+    }
+    arr = kept;
+
+    // recalcula advanceIdx após remoção
+    advanceIdx = -1;
+    for (let i = 0; i < arr.length; i++) {
+      if (advanceIdx < 0 && isAdvanceCTA(arr[i])) advanceIdx = i;
+    }
+
+    if (infoBefore.length && advanceIdx >= 0) {
+      // garante uma linha em branco após o CTA
+      const insertAt = advanceIdx + 1;
+      if (arr[insertAt] !== "") arr.splice(insertAt, 0, "");
+
+      // insere infos logo abaixo do CTA
+      arr.splice(insertAt + 1, 0, ...infoBefore);
+
+      // garante uma linha em branco antes do CTA final (se houver)
+      // (CTA final normalmente começa com "Converse", "Chame", "Fale")
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const s = String(arr[i] || "").trim().toLowerCase();
+        if (!s) continue;
+        if (s.startsWith("converse") || s.startsWith("chame") || s.startsWith("fale") || s.startsWith("me chame")) {
+          if (i - 1 >= 0 && arr[i - 1] !== "") arr.splice(i, 0, "");
+          break;
+        }
+      }
+    }
+  }
+
+  // --------------------------
+  // 6) Sempre pular uma linha entre os dois CTAs finais (se estiverem colados)
+  // --------------------------
   const nonEmptyIdx = [];
-  for (let i = 0; i < arr2.length; i++) {
-    if (String(arr2[i] || "").trim()) nonEmptyIdx.push(i);
+  for (let i = 0; i < arr.length; i++) {
+    if (String(arr[i] || "").trim()) nonEmptyIdx.push(i);
   }
   if (nonEmptyIdx.length >= 2) {
     const a = nonEmptyIdx[nonEmptyIdx.length - 2];
     const b = nonEmptyIdx[nonEmptyIdx.length - 1];
     if (b === a + 1) {
-      arr2.splice(b, 0, "");
+      arr.splice(b, 0, "");
     }
   }
 
-  return arr2.join("\n").trim();
+  return arr.join("\n").trim();
 }
+
 function extractBizProfileFromText(text) {
   const raw = normalizeNewlines(text);
   const profile = {};
@@ -567,6 +665,12 @@ async function msgMenuMySubscription(waId) {
   }
 
   const planCode = await getUserPlan(waId);
+
+  // ✅ ACTIVE sem plano: instruir usuário a regularizar
+  if (status === ST.ACTIVE && !planCode) {
+    return await getCopyText("FLOW_ACTIVE_NO_PLAN_ERROR", { waId });
+  }
+
   const plans = await getMenuPlans();
   const plan = (plans || []).find((p) => p.code === planCode) || null;
 
@@ -621,6 +725,15 @@ export async function handleInboundText({ waId, text }) {
 
 
   const status = await getUserStatus(id);
+
+  // ✅ Segurança: ACTIVE sem plano nunca pode continuar
+  if (status === ST.ACTIVE) {
+    const planCode = await getUserPlan(id);
+    if (!planCode) {
+      return reply(await getCopyText("FLOW_ACTIVE_NO_PLAN_ERROR", { waId: id }));
+    }
+  }
+
 
   // ✅ Primeiro contato (ou usuário sem nome): sempre pedir nome antes de seguir no fluxo.
   // Mantém comandos globais (TEMPLATE/LIVRE/MENU) funcionando acima.
