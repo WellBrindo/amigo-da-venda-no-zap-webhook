@@ -430,38 +430,57 @@ function enforceAdFormatting(adText) {
     }
   }
 
-  return arr.join("\n").trim();
+  return arr.join("
+").trim().replace(/\*{2,}/g, "*");
 }
 
 function extractBizProfileFromText(text) {
   const raw = normalizeNewlines(text);
+  // Para detectar dados, usamos uma versão "plain" (sem *), porque o formatter aplica negrito.
+  const plain = raw.replace(/\*/g, "");
   const profile = {};
 
-  // Nome da empresa (heurística)
-  const companyRe = /\b([AaOo])\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,60}?)\s+é\b/;
-  const m = raw.match(companyRe);
-  if (m && m[2]) profile.companyName = String(m[2]).trim();
+  // Nome da empresa (heurística robusta)
+  // Ex.: "A Simetria Group é ..." | "O X é ..." | "*Simetria Group* é ..."
+  const companyRe = /\b([AaOo])\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,80}?)\s+é\b/;
+  const m1 = plain.match(companyRe);
+  if (m1 && m1[2]) profile.companyName = String(m1[2]).trim();
+
+  // Alternativa: "Somos a X" / "Aqui é a X"
+  if (!profile.companyName) {
+    const altRe = /\b(somos|aqui\s+é|eu\s+sou)\s+(a|o)\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,80}?)(\b|\.|,)/i;
+    const m2 = plain.match(altRe);
+    if (m2 && m2[3]) profile.companyName = String(m2[3]).trim();
+  }
 
   // Atendimento (linha com "Atendimento")
-  const att = raw.split("\n").map((l) => l.trim()).find((l) => /atendimento/i.test(l));
-  if (att) profile.serviceArea = att;
+  const attLine = plain
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => /atendimento/i.test(l));
+  if (attLine) profile.serviceArea = attLine;
 
   // Horário (heurística)
-  const hoursRe = /(\bSeg\b.*\bSex\b.*\d{1,2}h\s*[–\-]\s*\d{1,2}h)|(\d{1,2}:\d{2}\s*[–\-]\s*\d{1,2}:\d{2})/i;
-  const hm = raw.match(hoursRe);
+  const hoursRe =
+    /(\bSeg\b.*\bSex\b.*\d{1,2}h\s*[–\-]\s*\d{1,2}h)|(\d{1,2}:\d{2}\s*[–\-]\s*\d{1,2}:\d{2})/i;
+  const hm = plain.match(hoursRe);
   if (hm) profile.hours = String(hm[0]).trim();
 
   // Local (linha com 📍)
-  const loc = raw.split("\n").map((l) => l.trim()).find((l) => l.startsWith("📍"));
+  const loc = plain
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.startsWith("📍"));
   if (loc) profile.location = loc.replace(/^📍\s*/, "").trim();
 
   // WhatsApp (se houver)
-  const wa = raw.match(/\+?55\s*\(?\d{2}\)?\s*\d{4,5}[\-\s]?\d{4}/);
-  if (wa) profile.whatsapp = String(wa[0]).trim();
+  const wa = plain.match(/\+?55\s*\(?\d{2}\)?\s*\d{4,5}[\-\s]?\d{4}/);
+  if (wa) profile.whatsapp = String(wa[0]).replace(/\s+/g, " ").trim();
 
-  // Se não achou nada relevante, retorna null
-  const keys = Object.keys(profile);
-  if (keys.length === 0) return null;
+  // remove vazios
+  for (const k of Object.keys(profile)) {
+    if (!String(profile[k] || "").trim()) delete profile[k];
+  }
   return profile;
 }
 
@@ -580,35 +599,36 @@ function renderProfileForConfirmation(profile) {
 
 async function msgAskSaveProfile(waId, profile) {
   const lines = [];
-  lines.push("Notei que você incluiu alguns dados da sua empresa no anúncio.");
-  lines.push("Quer que eu *salve isso* para usar automaticamente nos próximos anúncios? 🙂");
+  lines.push(await getCopyText("FLOW_SAVE_PROFILE_INTRO", { waId }));
+  lines.push(await getCopyText("FLOW_SAVE_PROFILE_ASK", { waId }));
   lines.push("");
   const items = renderProfileForConfirmation(profile);
   if (items.length) {
-    lines.push("Vou salvar:");
+    lines.push(await getCopyText("FLOW_SAVE_PROFILE_WILL_SAVE", { waId }));
     lines.push(...items);
     lines.push("");
   }
-  lines.push("1) Sim, salvar");
-  lines.push("2) Não salvar");
+  lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_YES", { waId }));
+  lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_NO", { waId }));
   lines.push("");
-  lines.push("Assim você não precisa repetir essas informações toda vez. ✅");
-  return lines.join("\n");
+  lines.push(await getCopyText("FLOW_SAVE_PROFILE_BENEFIT", { waId }));
+  return lines.join("
+");
 }
 
 async function msgAfterSaveProfile(waId, saved, maxRefinements) {
   const lines = [];
-  lines.push(saved ? "Boa! ✅ Dados salvos como padrão para os próximos anúncios." : "Perfeito! ✅ Não vou salvar esses dados.");
+  lines.push(
+    saved
+      ? await getCopyText("FLOW_SAVE_PROFILE_SAVED_CONFIRM", { waId })
+      : await getCopyText("FLOW_SAVE_PROFILE_NOT_SAVED_CONFIRM", { waId })
+  );
   lines.push("");
-  lines.push("Agora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?");
-  lines.push("• Para refinar: responda com o que você quer mudar (ex.: “coloque mais informal”, “inclua delivery”, “mude o preço”).");
-  lines.push("• Para criar outro: digite *OK*.");
-  lines.push("");
-  const mr = Number(maxRefinements);
-  if (Number.isFinite(mr)) {
-    lines.push(`🧩 Refinamentos: até *${mr}* refinamento(s) por descrição não gastam nova descrição. A partir do *${mr + 1}º*, conta como *nova descrição*.`);
-  }
-  return lines.join("\n");
+  lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_QUESTION", { waId }));
+  lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_REFINE_HINT", { waId, vars: { maxRefinements } }));
+  lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_OK_HINT", { waId }));
+  return lines.join("
+");
 }
 
 async function msgMenuMain(waId) {
@@ -849,7 +869,7 @@ export async function handleInboundText({ waId, text }) {
 
     // volta ao menu
     await setUserStatus(id, ST.WAIT_MENU);
-    return reply(`✅ Nome atualizado!\n\n${await msgMenuMain(id)}`);
+    return reply(`${await getCopyText("FLOW_MENU_NAME_UPDATED", { waId: id })}\n\n${await msgMenuMain(id)}`);
   }
 
   // 0.2) MENU — alteração de CPF/CNPJ
@@ -861,7 +881,7 @@ export async function handleInboundText({ waId, text }) {
 
     // volta ao menu
     await setUserStatus(id, ST.WAIT_MENU);
-    return reply(`✅ CPF/CNPJ atualizado!\n\n${await msgMenuMain(id)}`);
+    return reply(`${await getCopyText("FLOW_MENU_DOC_UPDATED", { waId: id })}\n\n${await msgMenuMain(id)}`);
   }
 
 
@@ -939,7 +959,7 @@ export async function handleInboundText({ waId, text }) {
 
     const isTrialNow = prev !== ST.ACTIVE;
     const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
-    return replyMulti([saved ? "✅ Combinado! Vou usar esses dados automaticamente nos próximos anúncios." : "✅ Tudo bem! Não vou salvar esses dados.", await msgAfterSaveProfile(id, saved, maxRef)]);
+    return replyMulti([await msgAfterSaveProfile(id, saved, maxRef)]);
   }
 
 // ✅ Se o usuário manda "oi" e ainda não tem nome, inicia onboarding
@@ -954,7 +974,7 @@ export async function handleInboundText({ waId, text }) {
   // 1) Onboarding: nome
   if (status === ST.WAIT_NAME) {
     const name = inbound;
-    if (name.length < 3) return reply("Me envia seu *nome completo* por favor 🙂");
+    if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
     await setUserFullName(id, name);
     await setUserStatus(id, ST.WAIT_PRODUCT);
     return reply(await msgAskProduct(id));
@@ -987,7 +1007,7 @@ export async function handleInboundText({ waId, text }) {
   // 5) Forma de pagamento
   if (status === ST.WAIT_PAYMENT_METHOD) {
     const c = normalizeChoice(inbound);
-    if (c !== "1" && c !== "2") return reply("Me diga *1* (Cartão) ou *2* (PIX), por favor 🙂");
+    if (c !== "1" && c !== "2") return reply(await getCopyText("FLOW_INVALID_PAYMENT_METHOD", { waId: id }));
 
     const pm = c === "1" ? "CARD" : "PIX";
     await setPaymentMethod(id, pm);
@@ -1062,7 +1082,7 @@ export async function handleInboundText({ waId, text }) {
     const planCode = await getUserPlan(id);
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     const planTxt = plan ? `Plano: *${plan.name}*.` : "";
-    return reply(`Seu pagamento ainda está *pendente* no Asaas. ${planTxt}\n\nAssim que confirmar, eu libero automaticamente. 🚀`);
+    return reply(await getCopyText("FLOW_PAYMENT_PENDING", { waId: id, vars: { planTxt } }));
   }
 
   // 8) ACTIVE
@@ -1071,14 +1091,14 @@ export async function handleInboundText({ waId, text }) {
       await clearLastAd(id);
       await clearRefineCount(id);
       await clearLastPrompt(id);
-      return reply("Show! ✅\n\nMe manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.");
+      return reply(await getCopyText("FLOW_OK_NEXT_DESCRIPTION", { waId: id }));
     }
     if (isGreeting(inbound)) return reply(await msgAskProduct(id));
     return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false, currentStatus: status });
   }
 
   // fallback seguro
-  return reply("Não entendi 😅\n\nMe diga o que você vende ou qual serviço você presta, e eu monto o anúncio.");
+  return reply(await getCopyText("FLOW_FALLBACK_UNKNOWN", { waId: id }));
 }
 
 async function resolveMaxRefinementsForUser(waId, isTrial) {
@@ -1148,7 +1168,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     const used = await getUserQuotaUsed(id);
     if (used >= Number(plan.monthlyQuota || 0)) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply("Você atingiu seu limite mensal 😅\n\n" + (await msgPlansOnly()));
+      return reply(`${await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id })}\n\n${await msgPlansOnly()}`);
     }
   }
 
@@ -1180,7 +1200,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     const r = await generateAdText({ userText: promptToSend, mode });
     ad = r.text;
   } catch {
-    return reply("Tive um probleminha técnico para gerar sua descrição agora 😕\n\nPode tentar novamente em alguns instantes?");
+    return reply(await getCopyText("FLOW_OPENAI_ERROR", { waId: id }));
   }
 
   // salva prompt (último texto do usuário)
