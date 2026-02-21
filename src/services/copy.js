@@ -7,6 +7,7 @@
 // - Index de chaves conhecidas: copy:index (SET) — evita scan e mantém compatibilidade
 
 import { redisGet, redisSet, redisDel, redisSAdd, redisSMembers } from "./redis.js";
+import { getUserFullName } from "./state.js";
 
 const KEY_INDEX = "copy:index";
 const K_GLOBAL = (key) => `copy:global:${key}`;
@@ -26,6 +27,26 @@ function applyVars(text, vars = {}) {
   return out;
 }
 
+
+async function resolveVars({ waId = null, vars = null } = {}) {
+  const base = vars && typeof vars === "object" ? { ...vars } : {};
+  if (!waId) return base;
+
+  // Auto vars (não dependem do fluxo passar "vars")
+  try {
+    const fullName = String((await getUserFullName(String(waId))) || "").trim();
+    const firstName = fullName ? fullName.split(/\s+/)[0] : "";
+    base.fullName = base.fullName ?? fullName;
+    base.firstName = base.firstName ?? firstName;
+    base.firstNameComma =
+      base.firstNameComma ??
+      (firstName ? `, *${firstName}*` : "");
+  } catch (_) {
+    // silencioso: não quebrar produção por erro de redis
+  }
+
+  return base;
+}
 // ==============================
 // DEFAULT COPY (FALLBACK)
 // ==============================
@@ -131,7 +152,15 @@ Responda com *1*, *2* ou *3*.`,
   // FLOW — MENU (comando "MENU")
   FLOW_MENU_MAIN:
     "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
-  FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como você quer que eu salve).",
+  
+
+  FLOW_ACTIVE_NO_PLAN_ERROR:
+    "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).
+
+Por favor, acesse nosso site para regularizar ou fale com nosso suporte.
+
+Instagram: https://www.instagram.com/amigo.das.vendas/",
+FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como você quer que eu salve).",
   FLOW_MENU_ASK_NEW_DOC: "Certo! ✅\n\nMe envie seu *CPF ou CNPJ* (somente números) para atualizar.",
   FLOW_MENU_URL_HELP: "Aqui está nosso site: https://www.amigodasvendas.com.br",
   FLOW_MENU_URL_FEEDBACK: "Pode enviar por aqui: https://www.amigodasvendas.com.br/formulario",
@@ -169,14 +198,17 @@ Responda com *1*, *2* ou *3*.`,
     "- Não escreva explicações — apenas o anúncio final.",
     "",
     "TEMPLATE FIXO — SERVIÇO (EMPRESARIAL/B2B):",
-    "A) 🏢 *Título com resultado/benefício claro* (curto e forte)",
-    "B) 2–3 linhas: *Empresa/Marca* + o que faz + qual melhoria entrega (ex.: organização, controle, rotina, clareza, padronização).",
-    "C) 3–5 bullets com informações e diferenciais (use SOMENTE o que o cliente informou; inclua atendimento/horário/local se existirem):",
-    "   - Exemplo de formato: '🇧🇷 Atendimento em todo o Brasil' / '🕒 Seg a sex, 09h–17h' / '📍 Região: ...'",
-    "D) Linha de impulso (1 linha) antes do CTA: peça um dado simples para avançar (ex.: 'Envie cidade + nº de unidades para montarmos uma proposta sob medida.').",
-    "E) CTA sério e direto (1 linha): convide para conversar no WhatsApp e solicitar proposta/análise.",
-    "   - Se não houver telefone/e-mail, NÃO use 'Contato: Sob consulta'. Use CTA assumindo este WhatsApp como canal.",
-    "",
+    "A) 🏢 *Título com resultado/benefício claro* (curto e forte).",
+    "   - OBRIGATÓRIO: pular 1 linha após o título.",
+    "B) 2–3 linhas: *Empresa/Marca* (se informada) + o que faz + qual melhoria entrega (ex.: organização, controle, rotina, clareza, padronização).",
+    "   - Se a empresa/marca vier no texto, coloque o nome em negrito (sem exagero).",
+    "C) CTA de avanço (1 linha): peça um dado simples para avançar (ex.: 'Envie cidade + nome do condomínio para montarmos uma proposta sob medida.').",
+    "   - OBRIGATÓRIO: pular 1 linha após este CTA.",
+    "D) 3–5 bullets com informações e diferenciais (use SOMENTE o que o cliente informou; inclua atendimento/horário/local se existirem):",
+    "   - Ex.: '🇧🇷 Atendimento em todo o Brasil' / '🕒 Seg a sex, 09h–17h' / '📍 Região: ...'",
+    "E) CTA final (1 linha) direto e convidativo: convide para conversar no WhatsApp e solicitar proposta/análise.",
+    "   - OBRIGATÓRIO: pular 1 linha entre os dois CTAs finais (C e E).",
+    
     "TEMPLATE FIXO — SERVIÇO (CUIDADO PESSOAL):",
     "A) ✨ *Título com benefício + serviço*",
     "B) 1–2 linhas com o que faz + para quem é (conforto, beleza, praticidade).",
@@ -300,19 +332,22 @@ export async function getCopyResolved(key, { waId = null, vars = null } = {}) {
   if (waId) {
     const userVal = await redisGet(K_USER(String(waId), k));
     if (userVal !== null && userVal !== undefined && String(userVal) !== "") {
-      return { key: k, text: applyVars(userVal, vars), source: "USER" };
+      const varsEff = await resolveVars({ waId, vars });
+      return { key: k, text: applyVars(userVal, varsEff), source: "USER" };
     }
   }
 
   // 2) global override
   const globalVal = await redisGet(K_GLOBAL(k));
   if (globalVal !== null && globalVal !== undefined && String(globalVal) !== "") {
-    return { key: k, text: applyVars(globalVal, vars), source: "GLOBAL" };
+    const varsEff = await resolveVars({ waId, vars });
+    return { key: k, text: applyVars(globalVal, varsEff), source: "GLOBAL" };
   }
 
   // 3) default
   const def = defaultFor(k);
-  if (def !== undefined) return { key: k, text: applyVars(def, vars), source: "DEFAULT" };
+  if (def !== undefined) const varsEff = await resolveVars({ waId, vars });
+  return { key: k, text: applyVars(def, varsEff), source: "DEFAULT" };
 
   return { key: k, text: "", source: "MISSING" };
 }
