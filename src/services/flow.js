@@ -55,6 +55,15 @@ import {
   setMenuPrevStatus,
   getMenuPrevStatus,
   clearMenuPrevStatus,
+  setPrevStatus,
+  getPrevStatus,
+  clearPrevStatus,
+  getBizProfile,
+  setBizProfile,
+  clearBizProfile,
+  getPendingBizProfile,
+  setPendingBizProfile,
+  clearPendingBizProfile,
   setCardValidUntil,
   getCardValidUntil,
   setCardCanceledAt,
@@ -92,6 +101,11 @@ const ST = Object.freeze({
   WAIT_MENU: "WAIT_MENU",
   WAIT_MENU_NEW_NAME: "WAIT_MENU_NEW_NAME",
   WAIT_MENU_NEW_DOC: "WAIT_MENU_NEW_DOC",
+
+
+  // Pós-anúncio
+  WAIT_TEMPLATE_MODE: "WAIT_TEMPLATE_MODE",
+  WAIT_SAVE_PROFILE: "WAIT_SAVE_PROFILE",
 });
 
 // -------------------- Helpers --------------------
@@ -196,6 +210,100 @@ function noReply() {
   return { shouldReply: false, replyText: "" };
 }
 
+function replyMulti(texts) {
+  const arr = Array.isArray(texts) ? texts : [texts];
+  const replies = arr.map((t) => String(t || "").trim()).filter(Boolean);
+  return { shouldReply: true, replies, replyText: replies[0] || "" };
+}
+
+function normalizeNewlines(s) {
+  return String(s || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function enforceAdFormatting(adText) {
+  const raw = normalizeNewlines(adText);
+  const lines0 = raw.split("\n").map((l) => String(l || "").trimRight());
+  // remove leading/trailing empty
+  while (lines0.length && !String(lines0[0] || "").trim()) lines0.shift();
+  while (lines0.length && !String(lines0[lines0.length - 1] || "").trim()) lines0.pop();
+
+  const lines = [...lines0];
+
+  // Título: primeira linha não vazia
+  if (lines.length > 0) {
+    const title = String(lines[0] || "").trim();
+    const isBold = title.startsWith("*") && title.endsWith("*") && title.length > 2;
+    if (!isBold && title.length > 0 && title.length <= 80) {
+      lines[0] = `*${title}*`;
+    }
+    // 1) Pular uma linha após o título
+    if (lines.length > 1 && String(lines[1] || "").trim() !== "") {
+      lines.splice(1, 0, "");
+    }
+  }
+
+  // 2) Empresa em negrito (heurística: "A X é" / "O X é")
+  const joined = lines.join("\n");
+  const companyRe = /\b([AaOo])\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,60}?)\s+é\b/;
+  const m = joined.match(companyRe);
+  let out = joined;
+  if (m && m[2]) {
+    const name = String(m[2]).trim();
+    if (name && !name.includes("*")) {
+      out = out.replace(companyRe, (all, art, nm) => `${art} *${String(nm).trim()}* é`);
+    }
+  }
+
+  // 3) Sempre pular uma linha entre os dois CTAs finais (heurística: últimas 2 linhas não vazias)
+  const lines2 = out.split("\n").map((l) => String(l || "").trimRight());
+  const nonEmptyIdx = [];
+  for (let i = 0; i < lines2.length; i++) {
+    if (String(lines2[i] || "").trim()) nonEmptyIdx.push(i);
+  }
+  if (nonEmptyIdx.length >= 2) {
+    const a = nonEmptyIdx[nonEmptyIdx.length - 2];
+    const b = nonEmptyIdx[nonEmptyIdx.length - 1];
+    if (b === a + 1) {
+      lines2.splice(b, 0, "");
+    }
+  }
+
+  return lines2.join("\n").trim();
+}
+
+function extractBizProfileFromText(text) {
+  const raw = normalizeNewlines(text);
+  const profile = {};
+
+  // Nome da empresa (heurística)
+  const companyRe = /\b([AaOo])\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,60}?)\s+é\b/;
+  const m = raw.match(companyRe);
+  if (m && m[2]) profile.companyName = String(m[2]).trim();
+
+  // Atendimento (linha com "Atendimento")
+  const att = raw.split("\n").map((l) => l.trim()).find((l) => /atendimento/i.test(l));
+  if (att) profile.serviceArea = att;
+
+  // Horário (heurística)
+  const hoursRe = /(\bSeg\b.*\bSex\b.*\d{1,2}h\s*[–\-]\s*\d{1,2}h)|(\d{1,2}:\d{2}\s*[–\-]\s*\d{1,2}:\d{2})/i;
+  const hm = raw.match(hoursRe);
+  if (hm) profile.hours = String(hm[0]).trim();
+
+  // Local (linha com 📍)
+  const loc = raw.split("\n").map((l) => l.trim()).find((l) => l.startsWith("📍"));
+  if (loc) profile.location = loc.replace(/^📍\s*/, "").trim();
+
+  // WhatsApp (se houver)
+  const wa = raw.match(/\+?55\s*\(?\d{2}\)?\s*\d{4,5}[\-\s]?\d{4}/);
+  if (wa) profile.whatsapp = String(wa[0]).trim();
+
+  // Se não achou nada relevante, retorna null
+  const keys = Object.keys(profile);
+  if (keys.length === 0) return null;
+  return profile;
+}
+
+
 // -------------------- Copy / Mensagens --------------------
 async function msgAskName(waId){
   return await getCopyText("FLOW_ASK_NAME", { waId });
@@ -257,16 +365,78 @@ async function msgInvalidDoc(waId){
 }
 
 async function msgAfterAdAskTemplateChoice(waId, currentMode){
-  const hintKey = currentMode === "FIXED" ? "FLOW_HINT_TEMPLATE_FIXED" : "FLOW_HINT_TEMPLATE_FREE";
-  const hint = await getCopyText(hintKey, { waId });
-  return await getCopyText("FLOW_AFTER_AD_TEMPLATE_CHOICE", { waId, vars: { hint } });
+  const modeLabel = currentMode === "FIXED" ? "FIXO (Template)" : "LIVRE (Formatação)";
+  const lines = [];
+  lines.push("Quer manter a estrutura do anúncio como *FIXO* (Template) ou prefere *LIVRE* (formatação por pedido)?");
+  lines.push("");
+  lines.push("📌 *Por que isso importa?*");
+  lines.push("A gente atualiza nossos templates com frequência para acompanhar tendências de mercado e melhorar a conversão.");
+  lines.push("");
+  lines.push(`✅ Sua escolha atual: *${modeLabel}*`);
+  lines.push("");
+  lines.push("1) *FIXO* — eu mantenho a estrutura padrão (o que costuma converter mais)");
+  lines.push("2) *LIVRE* — você me diz como quer a estrutura em cada refinamento");
+  lines.push("");
+  lines.push("Responda com *1* ou *2* (ou digite *TEMPLATE* / *LIVRE* a qualquer momento).");
+  return lines.join("\n");
 }
 
 async function msgTemplateSet(waId, mode){
-  if (mode === "FREE") return await getCopyText("FLOW_TEMPLATE_SWITCH_TO_FREE", { waId });
-  return await getCopyText("FLOW_TEMPLATE_KEEP_FIXED", { waId });
+  if (mode === "FREE") {
+    return "Perfeito! ✅ Vou deixar como padrão a formatação *LIVRE*.
+
+Quando quiser voltar para o modelo FIXO, digite *TEMPLATE*.
+E a qualquer momento você pode digitar *MENU* para ajustar.";
+  }
+  return "Perfeito! ✅ Vou deixar como padrão o modelo *FIXO (Template)*.
+
+Quando quiser mudar para livre, digite *LIVRE*.
+E a qualquer momento você pode digitar *MENU* para ajustar.";
 }
 
+
+function renderProfileForConfirmation(profile) {
+  const lines = [];
+  if (profile.companyName) lines.push(`• Empresa: *${profile.companyName}*`);
+  if (profile.serviceArea) lines.push(`• ${profile.serviceArea}`);
+  if (profile.hours) lines.push(`• Horário: ${profile.hours}`);
+  if (profile.location) lines.push(`• Local: ${profile.location}`);
+  if (profile.whatsapp) lines.push(`• WhatsApp: ${profile.whatsapp}`);
+  return lines;
+}
+
+async function msgAskSaveProfile(waId, profile) {
+  const lines = [];
+  lines.push("Notei que você incluiu alguns dados da sua empresa no anúncio.");
+  lines.push("Quer que eu *salve isso* para usar automaticamente nos próximos anúncios? 🙂");
+  lines.push("");
+  const items = renderProfileForConfirmation(profile);
+  if (items.length) {
+    lines.push("Vou salvar:");
+    lines.push(...items);
+    lines.push("");
+  }
+  lines.push("1) Sim, salvar");
+  lines.push("2) Não salvar");
+  lines.push("");
+  lines.push("Assim você não precisa repetir essas informações toda vez. ✅");
+  return lines.join("\n");
+}
+
+async function msgAfterSaveProfile(waId, saved, maxRefinements) {
+  const lines = [];
+  lines.push(saved ? "Boa! ✅ Dados salvos como padrão para os próximos anúncios." : "Perfeito! ✅ Não vou salvar esses dados.");
+  lines.push("");
+  lines.push("Agora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?");
+  lines.push("• Para refinar: responda com o que você quer mudar (ex.: “coloque mais informal”, “inclua delivery”, “mude o preço”).");
+  lines.push("• Para criar outro: digite *OK*.");
+  lines.push("");
+  const mr = Number(maxRefinements);
+  if (Number.isFinite(mr)) {
+    lines.push(`🧩 Refinamentos: até *${mr}* refinamento(s) por descrição não gastam nova descrição. A partir do *${mr + 1}º*, conta como *nova descrição*.`);
+  }
+  return lines.join("\n");
+}
 
 async function msgMenuMain(waId) {
   return await getCopyText("FLOW_MENU_MAIN", { waId });
@@ -507,7 +677,84 @@ export async function handleInboundText({ waId, text }) {
   }
 
 
-  // ✅ Se o usuário manda "oi" e ainda não tem nome, inicia onboarding
+  
+  // 0.3) Pós-anúncio — escolha de template (1/2)
+  if (status === ST.WAIT_TEMPLATE_MODE) {
+    const c = normalizeChoice(inbound);
+
+    // se não for escolha válida, volta ao status anterior e reprocessa (pode ser um refinamento direto)
+    if (c !== "1" && c !== "2") {
+      const prev = await getPrevStatus(id);
+      await clearPrevStatus(id);
+      if (prev && prev !== ST.WAIT_TEMPLATE_MODE) {
+        await setUserStatus(id, prev);
+      } else {
+        await setUserStatus(id, ST.WAIT_PRODUCT);
+      }
+      return await handleInboundText({ waId: id, text: inbound });
+    }
+
+    const mode = c === "2" ? "FREE" : "FIXED";
+    await setTemplateMode(id, mode);
+
+    // prepara sugestão de perfil (se houver dados)
+    const ad = await getLastAd(id);
+    const suggestion = extractBizProfileFromText(ad);
+    if (suggestion) {
+      await setPendingBizProfile(id, suggestion);
+      await setUserStatus(id, ST.WAIT_SAVE_PROFILE);
+      return replyMulti([await msgTemplateSet(id, mode), await msgAskSaveProfile(id, suggestion)]);
+    }
+
+    // sem dados detectados: volta ao status anterior e encerra
+    const prev = await getPrevStatus(id);
+    await clearPrevStatus(id);
+    if (prev && prev !== ST.WAIT_TEMPLATE_MODE) await setUserStatus(id, prev);
+    else await setUserStatus(id, ST.WAIT_PRODUCT);
+
+    const maxRef = await resolveMaxRefinementsForUser(id, prev === ST.ACTIVE ? false : true);
+    return replyMulti([await msgTemplateSet(id, mode), await msgAfterSaveProfile(id, false, maxRef)]);
+  }
+
+  // 0.4) Pós-anúncio — salvar perfil (1/2)
+  if (status === ST.WAIT_SAVE_PROFILE) {
+    const c = normalizeChoice(inbound);
+
+    // se não for escolha, volta ao status anterior e reprocessa (pode ser refinamento)
+    if (c !== "1" && c !== "2") {
+      const prev = await getPrevStatus(id);
+      await clearPrevStatus(id);
+      await clearPendingBizProfile(id);
+      if (prev && prev !== ST.WAIT_SAVE_PROFILE) {
+        await setUserStatus(id, prev);
+      } else {
+        await setUserStatus(id, ST.WAIT_PRODUCT);
+      }
+      return await handleInboundText({ waId: id, text: inbound });
+    }
+
+    let saved = false;
+    if (c === "1") {
+      const pending = await getPendingBizProfile(id);
+      if (pending) {
+        await setBizProfile(id, pending);
+        saved = true;
+      }
+    }
+
+    await clearPendingBizProfile(id);
+
+    const prev = await getPrevStatus(id);
+    await clearPrevStatus(id);
+    if (prev && prev !== ST.WAIT_SAVE_PROFILE) await setUserStatus(id, prev);
+    else await setUserStatus(id, ST.WAIT_PRODUCT);
+
+    const isTrialNow = prev !== ST.ACTIVE;
+    const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
+    return replyMulti([saved ? "✅ Combinado! Vou usar esses dados automaticamente nos próximos anúncios." : "✅ Tudo bem! Não vou salvar esses dados.", await msgAfterSaveProfile(id, saved, maxRef)]);
+  }
+
+// ✅ Se o usuário manda "oi" e ainda não tem nome, inicia onboarding
   if (isGreeting(inbound)) {
     const name = await getUserFullName(id);
     if (!name) {
@@ -528,13 +775,13 @@ export async function handleInboundText({ waId, text }) {
   // 2) Onboarding: produto/serviço
   if (status === ST.WAIT_PRODUCT) {
     if (isGreeting(inbound)) return reply(await msgAskProduct(id));
-    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true });
+    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true, currentStatus: status });
   }
 
   // 3) Trial
   if (status === ST.TRIAL) {
     if (isGreeting(inbound)) return reply(await msgAskProduct(id));
-    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true });
+    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true, currentStatus: status });
   }
 
   // 4) Escolha de plano
@@ -638,22 +885,28 @@ export async function handleInboundText({ waId, text }) {
       await clearLastPrompt(id);
       return reply("Show! ✅\n\nMe manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.");
     }
-    if (wantsOkCommand(inbound)) {
-      await clearLastAd(id);
-      await clearRefineCount(id);
-      await clearLastPrompt(id);
-      return reply("Show! ✅\\n\\nMe manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.");
-    }
     if (isGreeting(inbound)) return reply(await msgAskProduct(id));
-    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false });
+    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false, currentStatus: status });
   }
 
   // fallback seguro
   return reply("Não entendi 😅\n\nMe diga o que você vende ou qual serviço você presta, e eu monto o anúncio.");
 }
 
+async function resolveMaxRefinementsForUser(waId, isTrial) {
+  const DEFAULT_MAX_REFINEMENTS = 2;
+  if (isTrial) return DEFAULT_MAX_REFINEMENTS;
+
+  let maxRefinements = DEFAULT_MAX_REFINEMENTS;
+  const planCode = await getUserPlan(waId);
+  const plan = (await getMenuPlans()).find((p) => p.code === planCode);
+  const fromPlan = Number(plan?.maxRefinements);
+  if (Number.isFinite(fromPlan) && fromPlan >= 0) maxRefinements = Math.trunc(fromPlan);
+  return maxRefinements;
+}
+
 // -------------------- Generate Ad --------------------
-async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
+async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, currentStatus }) {
   const id = waId;
   const userText = inboundText;
 
@@ -666,15 +919,8 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
   // - Ao ultrapassar o limite, consome +1 crédito e reinicia o ciclo (refineCount volta para 1)
   //   Ex.: maxRefinements=2 => consome no refinamento 3,5,7...
 
-  const DEFAULT_MAX_REFINEMENTS = 2;
+  const maxRefinements = await resolveMaxRefinementsForUser(id, isTrial);
 
-  let maxRefinements = DEFAULT_MAX_REFINEMENTS;
-  if (!isTrial) {
-    const planCode = await getUserPlan(id);
-    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
-    const fromPlan = Number(plan?.maxRefinements);
-    if (Number.isFinite(fromPlan) && fromPlan >= 0) maxRefinements = Math.trunc(fromPlan);
-  }
 
   const currentRefines = isRefinement ? await getRefineCount(id) : 0; // refinamentos na "rodada" atual
   const attemptedNext = isRefinement ? (currentRefines + 1) : 0;
@@ -723,9 +969,25 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
   // OpenAI
   let ad = "";
   try {
-    const promptToSend = isRefinement
+    let promptToSend = isRefinement
       ? `ANUNCIO_ATUAL:\n${lastAd}\n\nAJUSTES_SOLICITADOS:\n${userText}`
       : userText;
+
+    // Se já temos um perfil salvo da empresa, envia como contexto (sem obrigar o usuário a repetir)
+    if (!isRefinement) {
+      const prof = await getBizProfile(id);
+      if (prof && typeof prof === "object") {
+        const parts = [];
+        if (prof.companyName) parts.push(`Empresa: ${prof.companyName}`);
+        if (prof.serviceArea) parts.push(`Atendimento: ${prof.serviceArea}`);
+        if (prof.location) parts.push(`Local: ${prof.location}`);
+        if (prof.hours) parts.push(`Horário: ${prof.hours}`);
+        if (prof.whatsapp) parts.push(`WhatsApp: ${prof.whatsapp}`);
+        if (parts.length) {
+          promptToSend = `DADOS_DA_EMPRESA:\n${parts.join("\n")}\n\nDESCRIÇÃO_DO_USUÁRIO:\n${userText}`;
+        }
+      }
+    }
 
     const r = await generateAdText({ userText: promptToSend, mode });
     ad = r.text;
@@ -767,7 +1029,13 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial }) {
     }
   }
 
-  return reply(ad + (await msgAfterAdAskTemplateChoice(id, mode)));
+  const formattedAd = enforceAdFormatting(ad);
+
+  // Depois de cada anúncio, pedimos a preferência de template em uma mensagem separada
+  await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
+  await setUserStatus(id, ST.WAIT_TEMPLATE_MODE);
+
+  return replyMulti([formattedAd, await msgAfterAdAskTemplateChoice(id, mode)]);
 }
 
 // -------------------- Asaas helpers --------------------
