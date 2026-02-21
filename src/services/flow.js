@@ -223,6 +223,7 @@ function normalizeNewlines(s) {
 function enforceAdFormatting(adText) {
   const raw = normalizeNewlines(adText);
   const lines0 = raw.split("\n").map((l) => String(l || "").trimRight());
+
   // remove leading/trailing empty
   while (lines0.length && !String(lines0[0] || "").trim()) lines0.shift();
   while (lines0.length && !String(lines0[lines0.length - 1] || "").trim()) lines0.pop();
@@ -242,35 +243,98 @@ function enforceAdFormatting(adText) {
     }
   }
 
-  // 2) Empresa em negrito (heurística: "A X é" / "O X é")
-  const joined = lines.join("\n");
-  const companyRe = /\b([AaOo])\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,60}?)\s+é\b/;
-  const m = joined.match(companyRe);
-  let out = joined;
-  if (m && m[2]) {
-    const name = String(m[2]).trim();
-    if (name && !name.includes("*")) {
-      out = out.replace(companyRe, (all, art, nm) => `${art} *${String(nm).trim()}* é`);
+  // 2) Empresa em negrito (forçar com heurísticas robustas)
+  // Preferência: padrão "A/O <Empresa> é"
+  const companyPattern1 = /\b([AaOo])\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,80}?)\s+é\b/;
+
+  // Alternativas: "<Empresa> é", "<Empresa> oferece/atua/ajuda"
+  const companyPattern2 = /\b([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,80}?)\s+(é|oferece|atua|ajuda|entrega|faz)\b/;
+
+  let text = lines.join("\n");
+
+  const applyCompanyBold = (t) => {
+    // evita duplicar negrito no nome
+    if (t.includes("*") && /\*\s*[A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ]/.test(t)) return t;
+
+    let out = t;
+    const m1 = out.match(companyPattern1);
+    if (m1 && m1[2]) {
+      const name = String(m1[2]).trim();
+      if (name && !name.includes("*")) {
+        out = out.replace(companyPattern1, (all, art, nm) => `${art} *${String(nm).trim()}* é`);
+        return out;
+      }
     }
+
+    // tenta achar em uma linha específica (evita mexer no título)
+    const arr = out.split("\n");
+    for (let i = 0; i < arr.length; i++) {
+      const line = String(arr[i] || "");
+      if (i === 0) continue;
+      if (!line.trim()) continue;
+      if (line.includes("*")) continue;
+
+      const mm = line.match(companyPattern2);
+      if (mm && mm[1]) {
+        const nm = String(mm[1]).trim();
+        // não negritar linhas com emoji no começo (geralmente bullets)
+        if (/^[\u{1F300}-\u{1FAFF}]/u.test(line.trim())) continue;
+        arr[i] = line.replace(companyPattern2, (all, n, verb) => `*${String(n).trim()}* ${verb}`);
+        return arr.join("\n");
+      }
+    }
+    return out;
+  };
+
+  text = applyCompanyBold(text);
+
+  // 3) Preço em negrito (somente o preço, como solicitado)
+  // Ex.: "R$30", "R$ 30,00", "R$ 1.200,50"
+  text = text.replace(/R\$\s*\d[\d\.\s]*([,]\d{2})?/g, (m) => {
+    const cleaned = m.replace(/\s+/g, " ").trim();
+    if (cleaned.includes("*")) return cleaned;
+    return `*${cleaned}*`;
+  });
+
+  // 4) Mais 2 destaques em negrito (sem exagero): prioriza linhas com emojis informativos
+  const arr2 = text.split("\n").map((l) => String(l || "").trimRight());
+  const infoEmojiRe = /^(🇧🇷|🕒|📍|🚚|📞|🌐|💬|✅)\s+/;
+  let applied = 0;
+
+  for (let i = 0; i < arr2.length; i++) {
+    if (applied >= 2) break;
+    const line = String(arr2[i] || "");
+    if (!line.trim()) continue;
+
+    const m = line.match(infoEmojiRe);
+    if (!m) continue;
+
+    // evita bold se já tiver algum bold na linha
+    if (line.includes("*")) continue;
+
+    const emoji = m[1];
+    const rest = line.replace(infoEmojiRe, "").trim();
+    if (!rest) continue;
+
+    arr2[i] = `${emoji} *${rest}*`;
+    applied += 1;
   }
 
-  // 3) Sempre pular uma linha entre os dois CTAs finais (heurística: últimas 2 linhas não vazias)
-  const lines2 = out.split("\n").map((l) => String(l || "").trimRight());
+  // 5) Sempre pular uma linha entre os dois CTAs finais (heurística: últimas 2 linhas não vazias)
   const nonEmptyIdx = [];
-  for (let i = 0; i < lines2.length; i++) {
-    if (String(lines2[i] || "").trim()) nonEmptyIdx.push(i);
+  for (let i = 0; i < arr2.length; i++) {
+    if (String(arr2[i] || "").trim()) nonEmptyIdx.push(i);
   }
   if (nonEmptyIdx.length >= 2) {
     const a = nonEmptyIdx[nonEmptyIdx.length - 2];
     const b = nonEmptyIdx[nonEmptyIdx.length - 1];
     if (b === a + 1) {
-      lines2.splice(b, 0, "");
+      arr2.splice(b, 0, "");
     }
   }
 
-  return lines2.join("\n").trim();
+  return arr2.join("\n").trim();
 }
-
 function extractBizProfileFromText(text) {
   const raw = normalizeNewlines(text);
   const profile = {};
@@ -304,13 +368,24 @@ function extractBizProfileFromText(text) {
 }
 
 
+
+
+function firstNameFromFullName(fullName) {
+  const s = cleanText(fullName);
+  if (!s) return "";
+  const parts = s.split(/\s+/).filter(Boolean);
+  return parts.length ? parts[0] : "";
+}
+
 // -------------------- Copy / Mensagens --------------------
 async function msgAskName(waId){
   return await getCopyText("FLOW_ASK_NAME", { waId });
 }
 
 async function msgAskProduct(waId){
-  return await getCopyText("FLOW_ASK_PRODUCT", { waId });
+  const fullName = await getUserFullName(waId);
+  const firstName = firstNameFromFullName(fullName);
+  return await getCopyText("FLOW_ASK_PRODUCT", { waId, vars: { firstName } });
 }
 
 async function msgTrialOverAndPlans() {
