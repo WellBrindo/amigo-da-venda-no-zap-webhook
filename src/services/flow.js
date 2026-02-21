@@ -383,15 +383,15 @@ async function msgAfterAdAskTemplateChoice(waId, currentMode){
 
 async function msgTemplateSet(waId, mode){
   if (mode === "FREE") {
-    return "Perfeito! ✅ Vou deixar como padrão a formatação *LIVRE*.
+    return `Perfeito! ✅ Vou deixar como padrão a formatação *LIVRE*.
 
 Quando quiser voltar para o modelo FIXO, digite *TEMPLATE*.
-E a qualquer momento você pode digitar *MENU* para ajustar.";
+E a qualquer momento você pode digitar *MENU* para ajustar.`;
   }
-  return "Perfeito! ✅ Vou deixar como padrão o modelo *FIXO (Template)*.
+  return `Perfeito! ✅ Vou deixar como padrão o modelo *FIXO (Template)*.
 
 Quando quiser mudar para livre, digite *LIVRE*.
-E a qualquer momento você pode digitar *MENU* para ajustar.";
+E a qualquer momento você pode digitar *MENU* para ajustar.`;
 }
 
 
