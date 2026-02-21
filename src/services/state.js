@@ -732,7 +732,7 @@ export async function resetUserToTrial(waId) {
 // - Não mexe em métricas/copy/window24h (isso é feito por módulos específicos)
 export async function resetUserAsNew(waId) {
   const id = safeStr(waId);
-  if (!id) throw new Error('waId required');
+  if (!id) throw new Error("waId required");
 
   const keys = [
     keyStatus(id),
@@ -760,10 +760,15 @@ export async function resetUserAsNew(waId) {
   // best-effort: apaga todas as chaves conhecidas
   await Promise.allSettled(keys.map((k) => redisDel(k)));
 
-  // remove do índice
-  await Promise.allSettled([redisSRem(USERS_INDEX_KEY, id)]);
+  // ✅ Garante defaults mínimos IMEDIATAMENTE (evita "Sem plano" após reset)
+  await indexUser(id);
+  await redisSet(keyStatus(id), "TRIAL");
+  await redisSet(keyTemplateMode(id), "FIXED");
+  await redisSet(keyTemplatePrompted(id), "0");
+  await redisSet(keyTrialUsed(id), "0");
+  await redisSet(keyQuotaUsed(id), "0");
 
-  return { ok: true, waId: id, deletedKeys: keys.length, removedFromIndex: true };
+  return { ok: true, waId: id, deletedKeys: keys.length };
 }
 
 // ===================== SNAPSHOT =====================
