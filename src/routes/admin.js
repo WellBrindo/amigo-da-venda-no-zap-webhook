@@ -1,5 +1,5 @@
 // src/routes/admin.js
-import express, { Router } from "express";
+import { Router } from "express";
 
 import {
   setUserStatus,
@@ -262,10 +262,6 @@ function requireWaId(req) {
 
 export function adminRouter() {
   const router = Router();
-
-  // Parse x-www-form-urlencoded bodies (HTML <form> POST)
-  // Fixes Copy UI "key required" when using native form submits.
-  router.use(express.urlencoded({ extended: false }));
 
   // ===================== Dashboard (Métricas consolidadas) =====================
   // ✅ V16.4.9 — Dashboard consolidado (global + por usuário)
@@ -1047,10 +1043,10 @@ router.get("/", async (req, res) => {
         const name = escapeHtml(p.name);
         const price = escapeHtml(String((p.priceCents || 0) / 100).replace(".", ","));
         const quota = escapeHtml(String(p.monthlyQuota ?? ""));
-        const refin = escapeHtml(String(p.maxRefinements ?? 2));
+        const refin = escapeHtml(String(p.maxRefinements ?? ""));
         const desc = escapeHtml(String(p.description ?? ""));
         const active = p.active ? "✅" : "❌";
-        return `<tr>
+        return `<tr data-code="${code}" data-name="${name}" data-pricecents="${escapeHtml(String(p.priceCents || 0))}" data-monthlyquota="${quota}" data-maxrefinements="${refin}" data-description="${desc}">
           <td><code>${code}</code></td>
           <td>${name}</td>
           <td>R$ ${price}</td>
@@ -1059,6 +1055,7 @@ router.get("/", async (req, res) => {
           <td>${active}</td>
           <td style="max-width:420px;">${desc}</td>
           <td>
+            <button onclick="editRow(this)">Editar</button>
             <button onclick="toggle('${code}', ${p.active ? "false" : "true"})">
               ${p.active ? "Desativar" : "Ativar"}
             </button>
@@ -1094,7 +1091,7 @@ router.get("/", async (req, res) => {
         <table>
           <thead>
             <tr>
-              <th>Code</th><th>Nome</th><th>Preço</th><th>Cota</th><th>Refin.</th><th>Ativo</th><th>Descrição</th><th>Ação</th>
+              <th>Code</th><th>Nome</th><th>Preço</th><th>Cota</th><th>Ref.</th><th>Ativo</th><th>Descrição</th><th>Ação</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -1114,7 +1111,7 @@ router.get("/", async (req, res) => {
             name: (document.getElementById('name').value||'').trim(),
             priceCents: Number((document.getElementById('priceCents').value||'0').trim()),
             monthlyQuota: Number((document.getElementById('monthlyQuota').value||'0').trim()),
-            maxRefinements: Number((document.getElementById('maxRefinements').value||'2').trim()),
+            maxRefinements: Number((document.getElementById('maxRefinements').value||'0').trim()),
             description: (document.getElementById('description').value||'').trim(),
             active: true,
           };
@@ -1123,7 +1120,25 @@ router.get("/", async (req, res) => {
           document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
           if(j.ok) setTimeout(()=>location.reload(), 250);
         }
-        async function toggle(code, active){
+        
+        function editRow(btn){
+          try{
+            const tr = btn.closest('tr');
+            if(!tr) return;
+            document.getElementById('code').value = tr.getAttribute('data-code') || '';
+            document.getElementById('name').value = tr.getAttribute('data-name') || '';
+            document.getElementById('priceCents').value = tr.getAttribute('data-pricecents') || '';
+            document.getElementById('monthlyQuota').value = tr.getAttribute('data-monthlyquota') || '';
+            document.getElementById('maxRefinements').value = tr.getAttribute('data-maxrefinements') || '';
+            document.getElementById('description').value = tr.getAttribute('data-description') || '';
+            const msg = document.getElementById('msg');
+            if(msg) msg.textContent = 'Editando: ' + (tr.getAttribute('data-code')||'');
+          }catch(e){
+            console.error(e);
+          }
+        }
+
+async function toggle(code, active){
           const r = await fetch('/admin/plans/'+encodeURIComponent(code)+'/active', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({active}) });
           const j = await r.json().catch(()=>({}));
           document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
