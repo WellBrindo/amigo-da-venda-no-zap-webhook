@@ -51,6 +51,8 @@ const keyQuotaUsed = (waId) => `user:${waId}:quotaUsed`;
 const keyTrialUsed = (waId) => `user:${waId}:trialUsed`;
 const keyLastPrompt = (waId) => `user:${waId}:lastPrompt`;
 const keyTemplateMode = (waId) => `user:${waId}:templateMode`;
+// ✅ controle: pergunta de template (FIXO/LIVRE) só na 1ª descrição
+const keyTemplatePrompted = (waId) => `user:${waId}:templatePrompted`;
 
 const keyFullName = (waId) => `user:${waId}:fullName`;
 
@@ -203,6 +205,10 @@ export async function ensureUserExists(waId) {
   // template default
   const curT = await redisGet(keyTemplateMode(id));
   if (!curT) await redisSet(keyTemplateMode(id), "FIXED");
+
+  // template prompt default
+  const curTP = await redisGet(keyTemplatePrompted(id));
+  if (!curTP) await redisSet(keyTemplatePrompted(id), \"0\");
 
   // counters default
   const curTrial = await redisGet(keyTrialUsed(id));
@@ -417,6 +423,26 @@ export async function setTemplateMode(waId, mode) {
   const v = m === "FREE" ? "FREE" : "FIXED";
   await redisSet(keyTemplateMode(waId), v);
   return v;
+}
+
+// ===================== Template Prompted (only first time) =====================
+export async function getTemplatePrompted(waId) {
+  const v = await redisGet(keyTemplatePrompted(waId));
+  const n = toInt(v, 0);
+  return n > 0;
+}
+
+export async function setTemplatePrompted(waId, value) {
+  await indexUser(waId);
+  const v = value ? 1 : 0;
+  await redisSet(keyTemplatePrompted(waId), String(v));
+  return !!v;
+}
+
+export async function resetTemplatePrompted(waId) {
+  await indexUser(waId);
+  await redisSet(keyTemplatePrompted(waId), "0");
+  return false;
 }
 
 // ===================== Full Name =====================
@@ -715,6 +741,7 @@ export async function resetUserAsNew(waId) {
     keyTrialUsed(id),
     keyLastPrompt(id),
     keyTemplateMode(id),
+    keyTemplatePrompted(id),
     keyFullName(id),
     keyDocType(id),
     keyDocLast4(id),
