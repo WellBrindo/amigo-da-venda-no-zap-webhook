@@ -155,8 +155,33 @@ Responda com *1*, *2* ou *3*.`,
   
 
   FLOW_ACTIVE_NO_PLAN_ERROR:
-    "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).\n\nPor favor, acesse nosso site para regularizar ou fale com nosso suporte.\n\nInstagram: https://www.instagram.com/amigo.das.vendas/",
-  FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como você quer que eu salve).",
+    "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).
+
+Por favor, acesse nosso site para regularizar ou fale com nosso suporte.
+
+Instagram: https://www.instagram.com/amigo.das.vendas/",
+
+FLOW_MENU_NAME_UPDATED: "✅ Nome atualizado!",
+FLOW_MENU_DOC_UPDATED: "✅ CPF/CNPJ atualizado!",
+FLOW_OK_NEXT_DESCRIPTION: "Show! ✅\n\nMe manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.",
+// FLOW — Salvar dados da empresa (auto preenchimento)
+FLOW_SAVE_PROFILE_INTRO: "Notei que você incluiu alguns dados da sua empresa no anúncio.",
+FLOW_SAVE_PROFILE_ASK: "Quer que eu *salve isso* para usar automaticamente nos próximos anúncios? 🙂",
+FLOW_SAVE_PROFILE_WILL_SAVE: "Vou salvar:",
+FLOW_SAVE_PROFILE_OPT_YES: "1) Sim, salvar",
+FLOW_SAVE_PROFILE_OPT_NO: "2) Não salvar",
+FLOW_SAVE_PROFILE_BENEFIT: "Assim você não precisa repetir essas informações toda vez. ✅",
+FLOW_SAVE_PROFILE_SAVED_CONFIRM: "Perfeito! ✅ Vou salvar esses dados como padrão para seus próximos anúncios.",
+FLOW_SAVE_PROFILE_NOT_SAVED_CONFIRM: "Fechado! ✅ Não vou salvar esses dados por agora.",
+FLOW_SAVE_PROFILE_CHANGE_LATER:
+
+FLOW_AFTER_SAVE_PROFILE_QUESTION: "Agora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?",
+// Vars: maxRefinements
+FLOW_AFTER_SAVE_PROFILE_REFINE_HINT: "• Para refinar: responda com o que você quer mudar (ex.: “deixa mais curto”, “inclua delivery”, “mude o preço”).\n\n(Lembrete: até {{maxRefinements}} refinamento(s) por descrição. No próximo, conta como uma nova descrição.)",
+FLOW_AFTER_SAVE_PROFILE_OK_HINT: "• Para criar outro: digite *OK*.",
+ "Se quiser mudar isso depois, digite *MENU* e ajuste sua preferência.",
+
+FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como você quer que eu salve).",
   FLOW_MENU_ASK_NEW_DOC: "Certo! ✅\n\nMe envie seu *CPF ou CNPJ* (somente números) para atualizar.",
   FLOW_MENU_URL_HELP: "Aqui está nosso site: https://www.amigodasvendas.com.br",
   FLOW_MENU_URL_FEEDBACK: "Pode enviar por aqui: https://www.amigodasvendas.com.br/formulario",
@@ -342,10 +367,8 @@ export async function getCopyResolved(key, { waId = null, vars = null } = {}) {
 
   // 3) default
   const def = defaultFor(k);
-  if (def !== undefined) {
-    const varsEff = await resolveVars({ waId, vars });
-    return { key: k, text: applyVars(def, varsEff), source: "DEFAULT" };
-  }
+  if (def !== undefined) const varsEff = await resolveVars({ waId, vars });
+  return { key: k, text: applyVars(def, varsEff), source: "DEFAULT" };
 
   return { key: k, text: "", source: "MISSING" };
 }
