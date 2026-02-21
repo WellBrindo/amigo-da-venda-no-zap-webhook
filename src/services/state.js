@@ -208,7 +208,7 @@ export async function ensureUserExists(waId) {
 
   // template prompt default
   const curTP = await redisGet(keyTemplatePrompted(id));
-  if (!curTP) await redisSet(keyTemplatePrompted(id), \"0\");
+  if (!curTP) await redisSet(keyTemplatePrompted(id), "0");
 
   // counters default
   const curTrial = await redisGet(keyTrialUsed(id));
