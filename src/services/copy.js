@@ -136,8 +136,10 @@ Responda com *1*, *2* ou *3*.`,
     "Seu acesso está bloqueado no momento. Se isso for um engano, fale com o suporte.",
 
   FLOW_AFTER_AD_TEMPLATE_CHOICE:
-  FLOW_ASK_SAVE_PROFILE: "Notei que você incluiu alguns dados da sua empresa. Quer que eu salve isso para usar automaticamente nos próximos anúncios?\n\nVou salvar:\n{{profileLines}}\n\n1) Sim, pode salvar\n2) Não, obrigado",
     "\n\nQuer manter o *template*?\n\n1) Sim (manter template)\n2) Quero *formatação livre*\n\n{{hint}}\n\nVocê também pode digitar *TEMPLATE* ou *LIVRE* a qualquer momento.",
+
+  FLOW_ASK_SAVE_PROFILE:
+    "Notei que você incluiu alguns dados da sua empresa. Quer que eu salve isso para usar automaticamente nos próximos anúncios?\n\nVou salvar:\n{{profileLines}}\n\n1) Sim, pode salvar\n2) Não, obrigado",
 
   FLOW_HINT_TEMPLATE_FIXED: "(*Hoje você está no TEMPLATE, que costuma converter mais.*)",
   FLOW_HINT_TEMPLATE_FREE: "(*Hoje você está no modo LIVRE.*)",
