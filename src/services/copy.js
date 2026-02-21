@@ -154,8 +154,7 @@ Responda com *1*, *2* ou *3*.`,
     "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
   
 
-  FLOW_ACTIVE_NO_PLAN_ERROR:
-    "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).
+  FLOW_ACTIVE_NO_PLAN_ERROR: "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).
 
 Por favor, acesse nosso site para regularizar ou fale com nosso suporte.
 
@@ -173,13 +172,12 @@ FLOW_SAVE_PROFILE_OPT_NO: "2) Não salvar",
 FLOW_SAVE_PROFILE_BENEFIT: "Assim você não precisa repetir essas informações toda vez. ✅",
 FLOW_SAVE_PROFILE_SAVED_CONFIRM: "Perfeito! ✅ Vou salvar esses dados como padrão para seus próximos anúncios.",
 FLOW_SAVE_PROFILE_NOT_SAVED_CONFIRM: "Fechado! ✅ Não vou salvar esses dados por agora.",
-FLOW_SAVE_PROFILE_CHANGE_LATER:
+FLOW_SAVE_PROFILE_CHANGE_LATER: "Se quiser mudar isso depois, digite *MENU* e ajuste sua preferência.",
 
 FLOW_AFTER_SAVE_PROFILE_QUESTION: "Agora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?",
 // Vars: maxRefinements
 FLOW_AFTER_SAVE_PROFILE_REFINE_HINT: "• Para refinar: responda com o que você quer mudar (ex.: “deixa mais curto”, “inclua delivery”, “mude o preço”).\n\n(Lembrete: até {{maxRefinements}} refinamento(s) por descrição. No próximo, conta como uma nova descrição.)",
 FLOW_AFTER_SAVE_PROFILE_OK_HINT: "• Para criar outro: digite *OK*.",
- "Se quiser mudar isso depois, digite *MENU* e ajuste sua preferência.",
 
 FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como você quer que eu salve).",
   FLOW_MENU_ASK_NEW_DOC: "Certo! ✅\n\nMe envie seu *CPF ou CNPJ* (somente números) para atualizar.",
@@ -367,8 +365,10 @@ export async function getCopyResolved(key, { waId = null, vars = null } = {}) {
 
   // 3) default
   const def = defaultFor(k);
-  if (def !== undefined) const varsEff = await resolveVars({ waId, vars });
-  return { key: k, text: applyVars(def, varsEff), source: "DEFAULT" };
+  if (def !== undefined) {
+    const varsEff = await resolveVars({ waId, vars });
+    return { key: k, text: applyVars(def, varsEff), source: "DEFAULT" };
+  }
 
   return { key: k, text: "", source: "MISSING" };
 }
