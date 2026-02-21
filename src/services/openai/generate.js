@@ -25,7 +25,7 @@ export async function generateAdText({
   const clean = String(userText || "").trim();
   if (!clean) throw new Error("Missing userText");
 
-    const systemFixed = await getCopyText("OPENAI_SYSTEM_FIXED");
+  const systemFixed = await getCopyText("OPENAI_SYSTEM_FIXED");
 
   const systemFree = await getCopyText("OPENAI_SYSTEM_FREE");
 
