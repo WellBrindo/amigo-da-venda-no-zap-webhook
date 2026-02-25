@@ -207,6 +207,55 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
     "",
     "Saída: somente o anúncio final, sem comentários.",
   ].join("\n"),
+
+  FLOW_ASK_TEMPLATE_CHOICE: "Antes de eu gerar, me diz: você prefere um anúncio no *template* (mais direto) ou *livre* (mais humano)?
+
+1) Template
+2) Livre
+
+Responda *1* ou *2*.",
+  FLOW_SAVE_PROFILE_OPT_ADD: "3) Adicionar dados da empresa",
+  FLOW_PROFILE_WIZARD_INTRO: "Perfeito ✅ Vamos completar os dados da sua empresa.
+
+Você pode digitar *PULAR* em qualquer etapa para seguir.
+
+Vamos lá 👇",
+  FLOW_PROFILE_WIZARD_STEP1_COMPANY: "1/7 — Qual é o *nome da sua empresa*?
+
+(Responda com o nome ou digite *PULAR*)",
+  FLOW_PROFILE_WIZARD_STEP2_WHATSAPP: "2/7 — Qual é o *WhatsApp da empresa*?
+
+(Envie o número ou digite *PULAR*)",
+  FLOW_PROFILE_WIZARD_STEP3_ADDRESS: "3/7 — Qual é o *endereço / região de atendimento*?
+
+Se for só online, responda: *APENAS ATENDIMENTO ONLINE*
+
+(ou digite *PULAR*)",
+  FLOW_PROFILE_WIZARD_STEP4_HOURS: "4/7 — Qual é o *horário de atendimento*?
+
+(Ex.: Seg a sex, 09h–17h — ou digite *PULAR*)",
+  FLOW_PROFILE_WIZARD_STEP5_SOCIAL: "5/7 — Envie o link (ou @) de uma *rede social*.
+
+Você pode enviar *mais de uma*, uma por vez.
+Quando terminar, digite *FIM*.
+
+(ou digite *PULAR*)",
+  FLOW_PROFILE_WIZARD_SOCIAL_ADDED: "Boa! ✅ Rede social adicionada.
+
+Se quiser adicionar outra, envie mais uma.
+Quando terminar, digite *FIM*.",
+  FLOW_PROFILE_WIZARD_SOCIAL_INVALID: "Não consegui reconhecer esse link/usuário. 😅
+
+Envie um link (ex.: https://instagram.com/seuperfil) ou um @perfil.
+
+Quando terminar, digite *FIM* (ou *PULAR*).",
+  FLOW_PROFILE_WIZARD_STEP6_WEBSITE: "6/7 — Você tem *website*?
+
+Envie o link (ex.: https://seusite.com) ou digite *PULAR*.",
+  FLOW_PROFILE_WIZARD_STEP7_PRODUCTS: "7/7 — Você tem um link de *lista de produtos / catálogo*?
+
+Envie o link ou digite *PULAR*.",
+
 });
 
 // Catálogo para UI (ordem e categorias)
@@ -254,6 +303,19 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_AFTER_SAVE_PROFILE_REFINE_HINT", label: "Pós-salvar: dica refinamento" },
   { category: "Flow", key: "FLOW_AFTER_SAVE_PROFILE_OK_HINT", label: "Pós-salvar: dica OK" },
   { category: "Flow", key: "FLOW_REFINE_PROMPT_SHORT", label: "Refinar: prompt curto" },
+
+  { category: "Flow", key: "FLOW_ASK_TEMPLATE_CHOICE", label: "Escolha template (1/2)" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_OPT_ADD", label: "Salvar perfil: opção adicionar dados" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_INTRO", label: "Wizard perfil: introdução" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP1_COMPANY", label: "Wizard perfil: 1/7 nome empresa" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP2_WHATSAPP", label: "Wizard perfil: 2/7 WhatsApp" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP3_ADDRESS", label: "Wizard perfil: 3/7 Endereço / online" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP4_HOURS", label: "Wizard perfil: 4/7 Horário" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP5_SOCIAL", label: "Wizard perfil: 5/7 Redes sociais" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_ADDED", label: "Wizard perfil: social adicionada" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_INVALID", label: "Wizard perfil: social inválida" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP6_WEBSITE", label: "Wizard perfil: 6/7 Website" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP7_PRODUCTS", label: "Wizard perfil: 7/7 Catálogo" },
 
 ]);
 
