@@ -69,6 +69,10 @@ Qual é o seu NOME COMPLETO?`,
   FLOW_ASK_TEMPLATE_CHOICE:
     "Agora me diga como você prefere as próximas descrições:\n\n1) *Modelo FIXO* (padrão, sempre no mesmo formato)\n2) *Modelo LIVRE* (o Amigo escolhe o melhor formato)\n\nResponda com *1* ou *2* 🙂",
 
+
+  FLOW_ASK_TEMPLATE_CHOICE_LONG:
+    "Quer manter a estrutura do anúncio como *FIXO* (Template) ou prefere *LIVRE* (formatação por pedido)?\n\n📌 *Por que isso importa?*\nA gente atualiza nossos templates com frequência para acompanhar tendências de mercado e melhorar a conversão.\n\n✅ Sua escolha atual: *{{modeLabel}}*\n\n1) *FIXO* — eu mantenho a estrutura padrão (o que costuma converter mais)\n2) *LIVRE* — você me diz como quer a estrutura em cada refinamento\n\nResponda com *1* ou *2* (ou digite *TEMPLATE* / *LIVRE* a qualquer momento).",
+
   FLOW_TEMPLATE_SET_FIXED: "Fechado! ✅\n\nA partir de agora eu vou usar o *MODELO FIXO*.",
   FLOW_TEMPLATE_SET_FREE: "Fechado! ✅\n\nA partir de agora eu vou usar o *MODELO LIVRE*.",
 
@@ -92,6 +96,10 @@ Qual é o seu NOME COMPLETO?`,
    • 200 descrições/mês
 
 Responda com *1*, *2* ou *3*.`,
+
+
+  FLOW_PLANS_ONLY_HEADER: "Para continuar, escolha um plano:",
+  FLOW_PLANS_ONLY_FOOTER: "Responda com *1*, *2* ou *3*.",
 
   FLOW_QUOTA_BLOCKED:
     "Você atingiu o limite do seu plano neste mês 😕\n\nSe quiser, posso te ajudar a escolher um plano maior.\n\nResponda: *PLANOS*",
@@ -293,11 +301,14 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_ASK_PRODUCT", label: "Pedir o que vende" },
   { category: "Flow", key: "FLOW_ASK_REFINEMENT", label: "Pedir refinamento" },
   { category: "Flow", key: "FLOW_ASK_TEMPLATE_CHOICE", label: "Escolha FIXO/LIVRE" },
+  { category: "Flow", key: "FLOW_ASK_TEMPLATE_CHOICE_LONG", label: "Escolha FIXO/LIVRE (texto longo)" },
   { category: "Flow", key: "FLOW_TEMPLATE_SET_FIXED", label: "Confirma FIXO" },
   { category: "Flow", key: "FLOW_TEMPLATE_SET_FREE", label: "Confirma LIVRE" },
   { category: "Flow", key: "FLOW_TRIAL_BLOCKED", label: "Trial acabou / mostrar planos" },
   { category: "Flow", key: "FLOW_TRIAL_PREFIX", label: "Trial: prefixo (não entendi)" },
   { category: "Flow", key: "FLOW_PLANS_FALLBACK_STATIC", label: "Planos: fallback estático (sem planos no Redis)" },
+  { category: "Flow", key: "FLOW_PLANS_ONLY_HEADER", label: "Planos: cabeçalho (sem trial)" },
+  { category: "Flow", key: "FLOW_PLANS_ONLY_FOOTER", label: "Planos: rodapé (sem trial)" },
   { category: "Flow", key: "FLOW_QUOTA_BLOCKED", label: "Limite do plano" },
   { category: "Flow", key: "FLOW_UNKNOWN_COMMAND", label: "Comando não entendido" },
   { category: "Flow", key: "FLOW_ASK_PAYMENT_METHOD", label: "Escolher forma de pagamento" },
