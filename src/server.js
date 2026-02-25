@@ -6,6 +6,7 @@ import { asaasRouter } from "./routes/asaas.js";
 import { adminRouter } from "./routes/admin.js";
 
 import { redisPing } from "./services/redis.js";
+import { auditCopyCatalog } from "./services/copy.js";
 
 const APP_NAME = "amigo-das-vendas";
 const APP_VERSION = "16.0.9-modular-clean-server-bootstrap";
@@ -84,4 +85,33 @@ app.get("/asaas/test", basicAuth, (req, res) => {
 const PORT = Number(process.env.PORT || 10000);
 app.listen(PORT, () => {
   console.log(`[${APP_NAME}] ${APP_VERSION} listening on :${PORT}`);
+
+  try {
+    const a = auditCopyCatalog();
+    if ((a.missingInCatalog && a.missingInCatalog.length) || (a.extraInCatalog && a.extraInCatalog.length)) {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          tag: "copy_catalog_audit",
+          missingInCatalog: a.missingInCatalog || [],
+          extraInCatalog: a.extraInCatalog || [],
+        })
+      );
+    } else {
+      console.log(
+        JSON.stringify({
+          level: "info",
+          tag: "copy_catalog_audit_ok",
+        })
+      );
+    }
+  } catch (err) {
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        tag: "copy_catalog_audit_failed",
+        error: String(err?.message || err),
+      })
+    );
+  }
 });
