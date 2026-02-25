@@ -610,7 +610,7 @@ async function msgInvalidDoc(waId){
   return await getCopyText("FLOW_INVALID_DOC", { waId });
 }
 
-async async function msgAfterAdAskTemplateChoice(waId, currentMode){
+async function msgAfterAdAskTemplateChoice(waId, currentMode){
   return await getCopyText("FLOW_ASK_TEMPLATE_CHOICE", { waId });
 }
 
