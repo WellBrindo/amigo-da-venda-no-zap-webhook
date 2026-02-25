@@ -6,6 +6,7 @@ import { touch24hWindow } from "../services/window24h.js";
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { handleInboundText } from "../services/flow.js";
 import { processPendingForWaId } from "../services/broadcast.js";
+import { redisGet, redisSet, redisExpire } from "../services/redis.js";
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -52,6 +53,27 @@ export function webhookRouter() {
           for (const msg of messages) {
             const waId = msg?.from || value?.contacts?.[0]?.wa_id || "";
             if (!waId) continue;
+            // ✅ Deduplicação (Meta pode reenviar o mesmo message.id)
+            const messageId = String(msg?.id || "").trim();
+            if (messageId) {
+              const dedupeKey = `wa:msg:${messageId}`;
+              try {
+                const seen = await redisGet(dedupeKey);
+                if (seen) continue;
+                await redisSet(dedupeKey, "1");
+                await redisExpire(dedupeKey, 60 * 60 * 24 * 2); // 2 dias
+              } catch (err) {
+                console.warn(
+                  JSON.stringify({
+                    level: "warn",
+                    tag: "wa_dedupe_failed",
+                    waId: String(waId),
+                    messageId,
+                    error: String(err?.message || err),
+                  })
+                );
+              }
+            }
 
             // 1) marca janela 24h
             await touch24hWindow(String(waId));
