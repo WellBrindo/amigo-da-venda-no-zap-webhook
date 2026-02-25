@@ -108,6 +108,15 @@ const ST = Object.freeze({
   // Pós-anúncio
   WAIT_TEMPLATE_MODE: "WAIT_TEMPLATE_MODE",
   WAIT_SAVE_PROFILE: "WAIT_SAVE_PROFILE",
+
+  // Wizard: adicionar/ajustar dados da empresa (manual)
+  WAIT_PROFILE_ADD_COMPANY: "WAIT_PROFILE_ADD_COMPANY",
+  WAIT_PROFILE_ADD_WHATSAPP: "WAIT_PROFILE_ADD_WHATSAPP",
+  WAIT_PROFILE_ADD_ADDRESS: "WAIT_PROFILE_ADD_ADDRESS",
+  WAIT_PROFILE_ADD_HOURS: "WAIT_PROFILE_ADD_HOURS",
+  WAIT_PROFILE_ADD_SOCIAL: "WAIT_PROFILE_ADD_SOCIAL",
+  WAIT_PROFILE_ADD_WEBSITE: "WAIT_PROFILE_ADD_WEBSITE",
+  WAIT_PROFILE_ADD_PRODUCTS: "WAIT_PROFILE_ADD_PRODUCTS",
 });
 
 // -------------------- Helpers --------------------
@@ -152,6 +161,29 @@ function wantsOkCommand(t) {
   const s = upper(t);
   return s === "OK" || s === "PRONTO" || s === "PROXIMO" || s === "PRÓXIMO";
 }
+
+function wantsSkipCommand(t) {
+  const s = upper(t);
+  return s === "PULAR" || s === "PULA" || s === "SKIP" || s === "0" || s === "-" || s === "NAO" || s === "NÃO";
+}
+
+function wantsFinishCommand(t) {
+  const s = upper(t);
+  return s === "FIM" || s === "FINALIZAR" || s === "PRONTO" || s === "CONCLUIR";
+}
+
+function normalizeUrlLike(t) {
+  const s = cleanText(t);
+  if (!s) return "";
+  // aceita @instagram como atalho
+  if (s.startsWith("@")) return "https://instagram.com/" + s.slice(1);
+  return s;
+}
+
+function ensureArray(v) {
+  return Array.isArray(v) ? v : [];
+}
+
 
 function normalizeMenuChoice(t) {
   const s = cleanText(t);
@@ -632,6 +664,7 @@ async function msgAskSaveProfile(waId, profile) {
   }
   lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_YES", { waId }));
   lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_NO", { waId }));
+  lines.push("3) Adicionar dados da empresa");
   lines.push("");
   lines.push(await getCopyText("FLOW_SAVE_PROFILE_BENEFIT", { waId }));
   return lines.join("\n");
@@ -966,11 +999,26 @@ export async function handleInboundText({ waId, text }) {
     return replyMulti([await msgTemplateSet(id, mode), await msgAfterSaveProfile(id, false, maxRef)]);
   }
 
-  // 0.4) Pós-anúncio — salvar perfil (1/2)
+  // 0.4) Pós-anúncio — salvar perfil (1/2/3)
   if (status === ST.WAIT_SAVE_PROFILE) {
     const c = normalizeChoice(inbound);
 
-    // se não for escolha, volta ao status anterior e reprocessa (pode ser refinamento)
+    // Opção 3: wizard para complementar/cadastrar dados manualmente
+    if (c === "3") {
+      // usa a sugestão pendente como ponto de partida (se existir)
+      const pending = (await getPendingBizProfile(id)) || {};
+      await setPendingBizProfile(id, pending);
+      await setUserStatus(id, ST.WAIT_PROFILE_ADD_COMPANY);
+
+      const msg = [
+        "Perfeito! ✅ Vamos completar seus dados da empresa. Você pode responder *PULAR* em qualquer etapa.",
+        "",
+        "1/7) Qual é o *nome da empresa*? (ou digite PULAR)",
+      ].join("\n");
+      return reply(msg);
+    }
+
+    // se não for escolha válida, volta ao status anterior e reprocessa (pode ser refinamento)
     if (c !== "1" && c !== "2") {
       const prev = await getPrevStatus(id);
       await clearPrevStatus(id);
@@ -1002,6 +1050,140 @@ export async function handleInboundText({ waId, text }) {
     const isTrialNow = prev !== ST.ACTIVE;
     const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
     return replyMulti([await msgAfterSaveProfile(id, saved, maxRef)]);
+  }
+
+
+  // 0.5) Wizard — adicionar/ajustar dados da empresa (manual)
+  if (
+    status === ST.WAIT_PROFILE_ADD_COMPANY ||
+    status === ST.WAIT_PROFILE_ADD_WHATSAPP ||
+    status === ST.WAIT_PROFILE_ADD_ADDRESS ||
+    status === ST.WAIT_PROFILE_ADD_HOURS ||
+    status === ST.WAIT_PROFILE_ADD_SOCIAL ||
+    status === ST.WAIT_PROFILE_ADD_WEBSITE ||
+    status === ST.WAIT_PROFILE_ADD_PRODUCTS
+  ) {
+    const pending = (await getPendingBizProfile(id)) || {};
+    const profile = pending && typeof pending === "object" ? pending : {};
+
+    // Etapa 1: nome da empresa
+    if (status === ST.WAIT_PROFILE_ADD_COMPANY) {
+      if (!wantsSkipCommand(inbound)) {
+        const name = cleanText(inbound);
+        if (name.length >= 2) profile.companyName = name;
+      }
+      await setPendingBizProfile(id, profile);
+      await setUserStatus(id, ST.WAIT_PROFILE_ADD_WHATSAPP);
+      return reply(["2/7) Qual é o *WhatsApp* da empresa? (ex.: +55 11 99999-9999)\\n(ou digite PULAR)"].join("\\n"));
+    }
+
+    // Etapa 2: whatsapp
+    if (status === ST.WAIT_PROFILE_ADD_WHATSAPP) {
+      if (!wantsSkipCommand(inbound)) {
+        const wa = cleanText(inbound);
+        if (wa.length >= 8) profile.whatsapp = wa;
+      }
+      await setPendingBizProfile(id, profile);
+      await setUserStatus(id, ST.WAIT_PROFILE_ADD_ADDRESS);
+      return reply(
+        [
+          "3/7) Qual é o *endereço* da empresa?",
+          "Você pode responder *APENAS ATENDIMENTO ONLINE*.",
+          "(ou digite PULAR)",
+        ].join("\\n")
+      );
+    }
+
+    // Etapa 3: endereço/local
+    if (status === ST.WAIT_PROFILE_ADD_ADDRESS) {
+      if (!wantsSkipCommand(inbound)) {
+        const s = cleanText(inbound);
+        if (upper(s) === "APENAS ATENDIMENTO ONLINE") {
+          profile.location = "Apenas atendimento online";
+        } else if (s.length >= 2) {
+          profile.location = s;
+        }
+      }
+      await setPendingBizProfile(id, profile);
+      await setUserStatus(id, ST.WAIT_PROFILE_ADD_HOURS);
+      return reply(["4/7) Qual é o *horário de atendimento*? (ex.: Seg a sex, 09h–17h)\\n(ou digite PULAR)"].join("\\n"));
+    }
+
+    // Etapa 4: horário
+    if (status === ST.WAIT_PROFILE_ADD_HOURS) {
+      if (!wantsSkipCommand(inbound)) {
+        const s = cleanText(inbound);
+        if (s.length >= 2) profile.hours = s;
+      }
+      await setPendingBizProfile(id, profile);
+      await setUserStatus(id, ST.WAIT_PROFILE_ADD_SOCIAL);
+      return reply(
+        [
+          "5/7) Envie o link de uma *rede social* (Instagram, Facebook, TikTok, etc).",
+          "• Para adicionar mais redes, envie outro link em seguida.",
+          "• Quando terminar, digite *FIM*.",
+          "(ou digite PULAR para não informar nenhuma)",
+        ].join("\\n")
+      );
+    }
+
+    // Etapa 5: redes sociais (loop)
+    if (status === ST.WAIT_PROFILE_ADD_SOCIAL) {
+      if (wantsSkipCommand(inbound) || wantsFinishCommand(inbound)) {
+        await setPendingBizProfile(id, profile);
+        await setUserStatus(id, ST.WAIT_PROFILE_ADD_WEBSITE);
+        return reply(["6/7) Qual é o link do *site*? (ou digite PULAR)"].join("\\n"));
+      }
+
+      const url = normalizeUrlLike(inbound);
+      if (url) {
+        const arr = ensureArray(profile.socials);
+        arr.push(url);
+        // dedupe simples
+        profile.socials = Array.from(new Set(arr.map((x) => String(x).trim()).filter(Boolean)));
+        await setPendingBizProfile(id, profile);
+        return reply(
+          [
+            "✅ Rede social adicionada.",
+            "Envie outro link para adicionar mais, ou digite *FIM* para continuar.",
+          ].join("\\n")
+        );
+      }
+
+      return reply("Não entendi. Envie um link (ou digite PULAR / FIM).");
+    }
+
+    // Etapa 6: website
+    if (status === ST.WAIT_PROFILE_ADD_WEBSITE) {
+      if (!wantsSkipCommand(inbound)) {
+        const url = normalizeUrlLike(inbound);
+        if (url) profile.website = url;
+      }
+      await setPendingBizProfile(id, profile);
+      await setUserStatus(id, ST.WAIT_PROFILE_ADD_PRODUCTS);
+      return reply(["7/7) Link da sua *lista de produtos* / catálogo (ou digite PULAR)"].join("\\n"));
+    }
+
+    // Etapa 7: lista de produtos
+    if (status === ST.WAIT_PROFILE_ADD_PRODUCTS) {
+      if (!wantsSkipCommand(inbound)) {
+        const url = normalizeUrlLike(inbound);
+        if (url) profile.productList = url;
+      }
+
+      // salva direto (o usuário escolheu "Adicionar dados")
+      await setBizProfile(id, profile);
+      await clearPendingBizProfile(id);
+
+      const prev = await getPrevStatus(id);
+      await clearPrevStatus(id);
+      if (prev && prev !== ST.WAIT_SAVE_PROFILE) await setUserStatus(id, prev);
+      else await setUserStatus(id, ST.WAIT_PRODUCT);
+
+      const isTrialNow = prev !== ST.ACTIVE;
+      const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
+      return replyMulti([await msgAfterSaveProfile(id, true, maxRef)]);
+    }
   }
 
 // ✅ Se o usuário manda "oi" e ainda não tem nome, inicia onboarding
@@ -1233,6 +1415,9 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
         if (prof.location) parts.push(`Local: ${prof.location}`);
         if (prof.hours) parts.push(`Horário: ${prof.hours}`);
         if (prof.whatsapp) parts.push(`WhatsApp: ${prof.whatsapp}`);
+        if (prof.website) parts.push(`Site: ${prof.website}`);
+        if (prof.productList) parts.push(`Catálogo/Lista: ${prof.productList}`);
+        if (Array.isArray(prof.socials) && prof.socials.length) parts.push(`Redes: ${prof.socials.join(' | ')}`);
         if (parts.length) {
           promptToSend = `DADOS_DA_EMPRESA:\n${parts.join("\n")}\n\nDESCRIÇÃO_DO_USUÁRIO:\n${userText}`;
         }
