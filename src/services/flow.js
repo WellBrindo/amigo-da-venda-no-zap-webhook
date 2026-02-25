@@ -664,7 +664,7 @@ async function msgAskSaveProfile(waId, profile) {
   }
   lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_YES", { waId }));
   lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_NO", { waId }));
-  lines.push("3) Adicionar dados da empresa");
+  lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_ADD", { waId }));
   lines.push("");
   lines.push(await getCopyText("FLOW_SAVE_PROFILE_BENEFIT", { waId }));
   return lines.join("\n");
@@ -1011,9 +1011,9 @@ export async function handleInboundText({ waId, text }) {
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_COMPANY);
 
       const msg = [
-        "Perfeito! ✅ Vamos completar seus dados da empresa. Você pode responder *PULAR* em qualquer etapa.",
+        await getCopyText("FLOW_PROFILE_WIZARD_INTRO", { waId: id }),
         "",
-        "1/7) Qual é o *nome da empresa*? (ou digite PULAR)",
+        await getCopyText("FLOW_PROFILE_WIZARD_STEP1_COMPANY", { waId: id }),
       ].join("\n");
       return reply(msg);
     }
@@ -1074,7 +1074,7 @@ export async function handleInboundText({ waId, text }) {
       }
       await setPendingBizProfile(id, profile);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_WHATSAPP);
-      return reply(["2/7) Qual é o *WhatsApp* da empresa? (ex.: +55 11 99999-9999)\\n(ou digite PULAR)"].join("\\n"));
+      return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP2_WHATSAPP", { waId: id }));
     }
 
     // Etapa 2: whatsapp
@@ -1085,13 +1085,7 @@ export async function handleInboundText({ waId, text }) {
       }
       await setPendingBizProfile(id, profile);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_ADDRESS);
-      return reply(
-        [
-          "3/7) Qual é o *endereço* da empresa?",
-          "Você pode responder *APENAS ATENDIMENTO ONLINE*.",
-          "(ou digite PULAR)",
-        ].join("\\n")
-      );
+      return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP3_ADDRESS", { waId: id }));
     }
 
     // Etapa 3: endereço/local
@@ -1106,7 +1100,7 @@ export async function handleInboundText({ waId, text }) {
       }
       await setPendingBizProfile(id, profile);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_HOURS);
-      return reply(["4/7) Qual é o *horário de atendimento*? (ex.: Seg a sex, 09h–17h)\\n(ou digite PULAR)"].join("\\n"));
+      return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP4_HOURS", { waId: id }));
     }
 
     // Etapa 4: horário
@@ -1117,14 +1111,7 @@ export async function handleInboundText({ waId, text }) {
       }
       await setPendingBizProfile(id, profile);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_SOCIAL);
-      return reply(
-        [
-          "5/7) Envie o link de uma *rede social* (Instagram, Facebook, TikTok, etc).",
-          "• Para adicionar mais redes, envie outro link em seguida.",
-          "• Quando terminar, digite *FIM*.",
-          "(ou digite PULAR para não informar nenhuma)",
-        ].join("\\n")
-      );
+      return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP5_SOCIAL", { waId: id }));
     }
 
     // Etapa 5: redes sociais (loop)
@@ -1132,7 +1119,7 @@ export async function handleInboundText({ waId, text }) {
       if (wantsSkipCommand(inbound) || wantsFinishCommand(inbound)) {
         await setPendingBizProfile(id, profile);
         await setUserStatus(id, ST.WAIT_PROFILE_ADD_WEBSITE);
-        return reply(["6/7) Qual é o link do *site*? (ou digite PULAR)"].join("\\n"));
+        return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP6_WEBSITE", { waId: id }));
       }
 
       const url = normalizeUrlLike(inbound);
@@ -1142,15 +1129,10 @@ export async function handleInboundText({ waId, text }) {
         // dedupe simples
         profile.socials = Array.from(new Set(arr.map((x) => String(x).trim()).filter(Boolean)));
         await setPendingBizProfile(id, profile);
-        return reply(
-          [
-            "✅ Rede social adicionada.",
-            "Envie outro link para adicionar mais, ou digite *FIM* para continuar.",
-          ].join("\\n")
-        );
+        return reply(await getCopyText("FLOW_PROFILE_WIZARD_SOCIAL_ADDED", { waId: id }));
       }
 
-      return reply("Não entendi. Envie um link (ou digite PULAR / FIM).");
+      return reply(await getCopyText("FLOW_PROFILE_WIZARD_SOCIAL_INVALID", { waId: id }));
     }
 
     // Etapa 6: website
@@ -1161,7 +1143,7 @@ export async function handleInboundText({ waId, text }) {
       }
       await setPendingBizProfile(id, profile);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_PRODUCTS);
-      return reply(["7/7) Link da sua *lista de produtos* / catálogo (ou digite PULAR)"].join("\\n"));
+      return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP7_PRODUCTS", { waId: id }));
     }
 
     // Etapa 7: lista de produtos
