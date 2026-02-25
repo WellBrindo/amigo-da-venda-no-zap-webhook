@@ -320,6 +320,26 @@ export const COPY_CATALOG = Object.freeze([
 
   { category: "OpenAI", key: "OPENAI_SYSTEM_FIXED", label: "Prompt FIXO (system)" },
   { category: "OpenAI", key: "OPENAI_SYSTEM_FREE", label: "Prompt LIVRE (system)" },
+  { category: "Flow", key: "FLOW_ASK_SAVE_PROFILE", label: "Perguntar para salvar dados detectados" },
+  { category: "Flow", key: "FLOW_ACTIVE_NO_PLAN_ERROR", label: "Erro: conta ativa sem plano" },
+  { category: "Flow", key: "FLOW_MENU_NAME_UPDATED", label: "Menu: nome atualizado" },
+  { category: "Flow", key: "FLOW_MENU_DOC_UPDATED", label: "Menu: documento atualizado" },
+  { category: "Flow", key: "FLOW_OK_NEXT_DESCRIPTION", label: "OK: pronto para próxima descrição" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_INTRO", label: "Salvar dados: introdução" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_ASK", label: "Salvar dados: pergunta" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_WILL_SAVE", label: "Salvar dados: vou salvar" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_OPT_YES", label: "Salvar dados: opção Sim" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_OPT_NO", label: "Salvar dados: opção Não" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_BENEFIT", label: "Salvar dados: benefício" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_SAVED_CONFIRM", label: "Salvar dados: confirmação (salvo)" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_NOT_SAVED_CONFIRM", label: "Salvar dados: confirmação (não salvo)" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_CHANGE_LATER", label: "Salvar dados: pode mudar depois" },
+  { category: "Flow", key: "FLOW_AFTER_SAVE_PROFILE_QUESTION", label: "Pós-salvar: pergunta refinamento" },
+  { category: "Flow", key: "FLOW_REFINEMENTS_SHORT", label: "Refinamentos: instrução curta" },
+  { category: "Flow", key: "FLOW_AFTER_SAVE_PROFILE_REFINE_HINT", label: "Pós-salvar: dica refinamento" },
+  { category: "Flow", key: "FLOW_AFTER_SAVE_PROFILE_OK_HINT", label: "Pós-salvar: dica OK" },
+  { category: "Flow", key: "FLOW_REFINE_PROMPT_SHORT", label: "Refinar: prompt curto" },
+
 ]);
 
 function defaultFor(key) {
