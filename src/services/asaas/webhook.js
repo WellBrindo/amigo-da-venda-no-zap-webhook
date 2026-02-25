@@ -1,3 +1,5 @@
+import { redisGet, redisSet, redisExpire } from "../redis.js";
+import crypto from "crypto";
 // src/services/asaas/webhook.js
 
 import {
@@ -30,6 +32,41 @@ export async function handleAsaasWebhookEvent(body) {
       console.log("[ASAAS_WEBHOOK] Evento sem externalReference ignorado.");
       return { ok: false, reason: "no_external_reference" };
     }
+
+    // ==============================
+    // IDEMPOTÊNCIA (evita reprocessar retries do Asaas)
+    // ==============================
+    const entityIdRaw =
+      payment?.id ||
+      subscription?.id ||
+      body?.id ||
+      null;
+
+    const bodyHash = (() => {
+      try {
+        const s = JSON.stringify(body || {});
+        return crypto.createHash("sha1").update(s).digest("hex").slice(0, 16);
+      } catch {
+        return "nohash";
+      }
+    })();
+
+    const entityId = String(entityIdRaw || bodyHash).trim();
+    const idemKey = `asaas:evt:${String(event || "UNKNOWN")}:${entityId}`;
+
+    try {
+      const seen = await redisGet(idemKey);
+      if (seen) {
+        console.log("[ASAAS_WEBHOOK] Evento duplicado ignorado:", { waId, event, entityId });
+        return { ok: true, ignored: true, duplicate: true };
+      }
+      await redisSet(idemKey, "1");
+      await redisExpire(idemKey, 60 * 60 * 24 * 3); // 3 dias
+    } catch (err) {
+      // se Redis falhar, não bloquear o fluxo do webhook
+      console.warn("[ASAAS_WEBHOOK_WARN] Falha ao aplicar idempotência:", String(err?.message || err));
+    }
+
 
     await ensureUserExists(waId);
 
