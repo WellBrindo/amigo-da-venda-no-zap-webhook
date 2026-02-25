@@ -559,26 +559,28 @@ async function msgAskProduct(waId){
   return await getCopyText("FLOW_ASK_PRODUCT", { waId, vars: { firstName } });
 }
 
-async function msgTrialOverAndPlans() {
+async async function msgTrialOverAndPlans(waId) {
   // renderPlansMenu já vem com o cabeçalho do trial concluído
-  return "Não entendi 😅\n\n" + (await renderPlansMenu());
+  const prefix = await getCopyText("FLOW_TRIAL_PREFIX", { waId });
+  return `${prefix}
+
+` + (await renderPlansMenu());
 }
 
-async function msgPlansOnly() {
+async function msgPlansOnly(waId) {
   // Versão sem o "trial concluído"
   const menu = await getMenuPlans();
+
+  // fallback estático (mesma key já usada em outros pontos do fluxo)
   if (!menu || menu.length === 0) {
-    return (
-      "Para continuar, escolha um plano:\n\n" +
-      "1) De Vez em Quando — R$ 24.90\n   • 20 descrições/mês\n\n" +
-      "2) Sempre por Perto — R$ 34.90\n   • 60 descrições/mês\n\n" +
-      "3) Melhor Amigo — R$ 49.90\n   • 200 descrições/mês\n\n" +
-      "Responda com *1*, *2* ou *3*."
-    );
+    return await getCopyText("FLOW_PLANS_FALLBACK_STATIC", { waId });
   }
 
+  const header = await getCopyText("FLOW_PLANS_ONLY_HEADER", { waId });
+  const footer = await getCopyText("FLOW_PLANS_ONLY_FOOTER", { waId });
+
   const lines = [];
-  lines.push("Para continuar, escolha um plano:");
+  lines.push(header);
   lines.push("");
 
   menu.forEach((p, idx) => {
@@ -588,8 +590,9 @@ async function msgPlansOnly() {
     lines.push("");
   });
 
-  lines.push("Responda com *1*, *2* ou *3*.");
-  return lines.join("\n");
+  lines.push(footer);
+  return lines.join("
+");
 }
 
 async function msgAskPaymentMethod(waId, plan){
@@ -610,21 +613,12 @@ async function msgInvalidDoc(waId){
   return await getCopyText("FLOW_INVALID_DOC", { waId });
 }
 
-async function msgAfterAdAskTemplateChoice(waId, currentMode){
+async async function msgAfterAdAskTemplateChoice(waId, currentMode) {
   const modeLabel = currentMode === "FIXED" ? "FIXO (Template)" : "LIVRE (Formatação)";
-  const lines = [];
-  lines.push("Quer manter a estrutura do anúncio como *FIXO* (Template) ou prefere *LIVRE* (formatação por pedido)?");
-  lines.push("");
-  lines.push("📌 *Por que isso importa?*");
-  lines.push("A gente atualiza nossos templates com frequência para acompanhar tendências de mercado e melhorar a conversão.");
-  lines.push("");
-  lines.push(`✅ Sua escolha atual: *${modeLabel}*`);
-  lines.push("");
-  lines.push("1) *FIXO* — eu mantenho a estrutura padrão (o que costuma converter mais)");
-  lines.push("2) *LIVRE* — você me diz como quer a estrutura em cada refinamento");
-  lines.push("");
-  lines.push("Responda com *1* ou *2* (ou digite *TEMPLATE* / *LIVRE* a qualquer momento).");
-  return lines.join("\n");
+  return await getCopyText("FLOW_ASK_TEMPLATE_CHOICE_LONG", {
+    waId,
+    vars: { modeLabel },
+  });
 }
 
 async function msgTemplateSet(waId, mode){
@@ -878,7 +872,7 @@ export async function handleInboundText({ waId, text }) {
 
     // opção 4: Planos
     if (choice === "4") {
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     // opção 5: Cancelar plano (cartão)
@@ -1202,7 +1196,7 @@ export async function handleInboundText({ waId, text }) {
   if (status === ST.WAIT_PLAN) {
     const choice = normalizeChoice(inbound);
     const plan = await getPlanByChoice(choice);
-    if (!plan) return reply(await msgPlansOnly());
+    if (!plan) return reply(await msgPlansOnly(id));
 
     await setUserPlan(id, plan.code);
     await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
@@ -1234,7 +1228,7 @@ export async function handleInboundText({ waId, text }) {
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     if (!plan) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     const pm = await getPaymentMethod(id);
@@ -1350,7 +1344,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     const used = await getUserTrialUsed(id);
     if (creditsNeeded > 0 && used >= TRIAL_LIMIT) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgTrialOverAndPlans());
+      return reply(await msgTrialOverAndPlans(id));
     }
   } else {
     // ACTIVE: checa validade do cartão (quando recorrência foi cancelada)
@@ -1359,7 +1353,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
       const pm = await getPaymentMethod(id);
       if (pm === "CARD") {
         await setUserStatus(id, ST.WAIT_PLAN);
-        return reply((await getCopyText("FLOW_QUOTA_BLOCKED", { waId: id })) + "\n\n" + (await msgPlansOnly()));
+        return reply((await getCopyText("FLOW_QUOTA_BLOCKED", { waId: id })) + "\n\n" + (await msgPlansOnly(id)));
       }
     }
 
@@ -1368,13 +1362,13 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     if (!plan) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     const used = await getUserQuotaUsed(id);
     if (used >= Number(plan.monthlyQuota || 0)) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(`${await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id })}\n\n${await msgPlansOnly()}`);
+      return reply(`${await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id })}\n\n${await msgPlansOnly(id)}`);
     }
   }
 
