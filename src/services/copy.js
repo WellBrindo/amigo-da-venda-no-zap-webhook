@@ -96,7 +96,13 @@ Qual é o seu NOME COMPLETO?`,
 
   // FLOW — MENU (comando "MENU")
   FLOW_MENU_MAIN:
-    "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
+  FLOW_MENU_PROFILE_VIEW_TITLE: "📇 *Dados da empresa*",
+  FLOW_MENU_PROFILE_EMPTY: "Ainda não tenho dados salvos da sua empresa por aqui 🙂",
+  FLOW_MENU_PROFILE_ACTIONS: "1) Atualizar/Completar\n2) Limpar dados salvos\n3) Voltar ao menu",
+  FLOW_MENU_PROFILE_INVALID_CHOICE: "Responda com *1*, *2* ou *3*, por favor 🙂",
+  FLOW_MENU_PROFILE_CLEARED: "✅ Dados da empresa removidos.",
+    "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram
+11) Dados da empresa (ver/atualizar)\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
   
 
   FLOW_ACTIVE_NO_PLAN_ERROR: "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).\n\nPor favor, acesse nosso site para regularizar ou fale com nosso suporte.\n\nInstagram: https://www.instagram.com/amigo.das.vendas/",
@@ -317,6 +323,12 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP6_WEBSITE", label: "Wizard perfil: 6/7 Website" },
   { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP7_PRODUCTS", label: "Wizard perfil: 7/7 Catálogo" },
 
+
+  { category: "Flow", key: "FLOW_MENU_PROFILE_VIEW_TITLE", label: "Menu: dados empresa (título)" },
+  { category: "Flow", key: "FLOW_MENU_PROFILE_EMPTY", label: "Menu: dados empresa (vazio)" },
+  { category: "Flow", key: "FLOW_MENU_PROFILE_ACTIONS", label: "Menu: dados empresa (ações)" },
+  { category: "Flow", key: "FLOW_MENU_PROFILE_INVALID_CHOICE", label: "Menu: dados empresa (opção inválida)" },
+  { category: "Flow", key: "FLOW_MENU_PROFILE_CLEARED", label: "Menu: dados empresa (limpo)" },
 ]);
 
 function defaultFor(key) {
