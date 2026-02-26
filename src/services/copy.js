@@ -27,6 +27,7 @@ function applyVars(text, vars = {}) {
   return out;
 }
 
+
 async function resolveVars({ waId = null, vars = null } = {}) {
   const base = vars && typeof vars === "object" ? { ...vars } : {};
   if (!waId) return base;
@@ -52,6 +53,7 @@ async function resolveVars({ waId = null, vars = null } = {}) {
 // Observação: manter chaves estáveis; a UI do Admin trabalha em cima dessas keys.
 export const DEFAULT_COPY = Object.freeze({
   // FLOW — Identidade / Onboarding
+  FLOW_WELCOME: "Oi! 👋😊\n\nEu sou o *Amigo das Vendas*.",
   FLOW_ASK_NAME: `Oi! 👋😊
 
 Eu sou o Amigo das Vendas — pode me chamar de Amigo.
@@ -63,8 +65,52 @@ Qual é o seu NOME COMPLETO?`,
 
   // FLOW — Coleta de contexto
   FLOW_ASK_PRODUCT: "Perfeito{{firstNameComma}}! ✅\n\nAgora me diga: *o que você vende* ou *qual serviço você presta*?\n\nPode ser simples, tipo: “vendo bolo R$30” 😄",
+  FLOW_ASK_REFINEMENT: "Certo! ✅\n\nAgora me diga o que você quer *melhorar* nesse anúncio.\n\nExemplo: “deixa mais curto”, “coloca mais emoção”, “foca no preço”, etc.",
+  FLOW_ASK_TEMPLATE_CHOICE:
+    "Agora me diga como você prefere as próximas descrições:\n\n1) *Modelo FIXO* (padrão, sempre no mesmo formato)\n2) *Modelo LIVRE* (o Amigo escolhe o melhor formato)\n\nResponda com *1* ou *2* 🙂",
+
+
+  FLOW_ASK_TEMPLATE_CHOICE_LONG:
+    "Quer manter a estrutura do anúncio como *FIXO* (Template) ou prefere *LIVRE* (formatação por pedido)?\n\n📌 *Por que isso importa?*\nA gente atualiza nossos templates com frequência para acompanhar tendências de mercado e melhorar a conversão.\n\n✅ Sua escolha atual: *{{modeLabel}}*\n\n1) *FIXO* — eu mantenho a estrutura padrão (o que costuma converter mais)\n2) *LIVRE* — você me diz como quer a estrutura em cada refinamento\n\nResponda com *1* ou *2* (ou digite *TEMPLATE* / *LIVRE* a qualquer momento).",
+
+  FLOW_TEMPLATE_SET_FIXED: "Fechado! ✅\n\nA partir de agora eu vou usar o *MODELO FIXO*.",
+  FLOW_TEMPLATE_SET_FREE: "Fechado! ✅\n\nA partir de agora eu vou usar o *MODELO LIVRE*.",
+
+  // FLOW — Trial / Limites
+  FLOW_TRIAL_BLOCKED:
+    "Seu teste grátis acabou 😄\n\nPara continuar, escolha um plano:\n\n1️⃣ *De Vez em Quando* — R$ 24,90 (20 descrições/mês)\n2️⃣ *Sempre por Perto* — R$ 34,90 (60 descrições/mês)\n3️⃣ *Melhor Amigo* — R$ 49,90 (200 descrições/mês)\n\nResponda com *1*, *2* ou *3*.",
+
+  FLOW_TRIAL_PREFIX: "Não entendi 😅",
+
+  // FLOW — Fallback de planos (quando o Redis não tem planos cadastrados)
+  FLOW_PLANS_FALLBACK_STATIC:
+    `Para continuar, escolha um plano:
+
+1) De Vez em Quando — R$ 24.90
+   • 20 descrições/mês
+
+2) Sempre por Perto — R$ 34.90
+   • 60 descrições/mês
+
+3) Melhor Amigo — R$ 49.90
+   • 200 descrições/mês
+
+Responda com *1*, *2* ou *3*.`,
+
+
+  FLOW_PLANS_ONLY_HEADER: "Para continuar, escolha um plano:",
+  FLOW_PLANS_ONLY_FOOTER: "Responda com *1*, *2* ou *3*.",
+
   FLOW_QUOTA_BLOCKED:
     "Você atingiu o limite do seu plano neste mês 😕\n\nSe quiser, posso te ajudar a escolher um plano maior.\n\nResponda: *PLANOS*",
+
+  FLOW_UNKNOWN_COMMAND:
+    "Uhmm… acho que não entendi 😄\n\nMe envie uma descrição do que você vende, ou responda com:\n\n• *PLANOS*\n• *TEMPLATE*\n• *AJUDA*",
+
+  // FLOW — Pagamento
+  FLOW_ASK_PAYMENT_METHOD:
+    "Perfeito! ✅\n\nAgora escolha como prefere pagar:\n\n1) *PIX*\n2) *Cartão*\n\nResponda com *1* ou *2* 🙂",
+
   FLOW_ASK_DOC:
     "Nossa, quase esqueci 😄\n\nPra eu conseguir gerar e registrar o pagamento, preciso do seu CPF ou CNPJ (somente números).\n\nPode me enviar, por favor?\nFica tranquilo(a): eu uso só pra isso e não aparece em mensagens nem em logs. É totalmente *seguro* 🔒",
 
@@ -79,6 +125,10 @@ Qual é o seu NOME COMPLETO?`,
   // Vars:
   // - methodTitle: ex "Gerei sua cobrança via *PIX*." / "Agora é só concluir no *Cartão* (assinatura)."
   // - linkLine: ex "Pague por aqui: <url>\n\n" / "Finalize pelo link no Asaas.\n\n"
+  FLOW_PAYMENT_SUCCESS:
+    "✅ Pronto! {{methodTitle}}\n\n{{linkLine}}Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀",
+
+  // Vars: planTxt (opcional)
   FLOW_PAYMENT_PENDING:
     "Seu pagamento ainda está *pendente* no Asaas. {{planTxt}}\n\nAssim que confirmar, eu libero automaticamente. 🚀",
 
@@ -89,24 +139,42 @@ Qual é o seu NOME COMPLETO?`,
   FLOW_OPENAI_ERROR:
     "Tive um probleminha técnico para gerar sua descrição agora 😕\n\nPode tentar novamente em alguns instantes?",
 
+
   FLOW_BLOCKED:
     "Seu acesso está bloqueado no momento. Se isso for um engano, fale com o suporte.",
+
+  FLOW_AFTER_AD_TEMPLATE_CHOICE:
+    "\n\nQuer manter o *template*?\n\n1) Sim (manter template)\n2) Quero *formatação livre*\n\n{{hint}}\n\nVocê também pode digitar *TEMPLATE* ou *LIVRE* a qualquer momento.",
+
+  FLOW_ASK_SAVE_PROFILE:
+    "Notei que você incluiu alguns dados da sua empresa. Quer que eu salve isso para usar automaticamente nos próximos anúncios?\n\nVou salvar:\n{{profileLines}}\n\n1) Sim, pode salvar\n2) Não, obrigado",
+
+  FLOW_HINT_TEMPLATE_FIXED: "(*Hoje você está no TEMPLATE, que costuma converter mais.*)",
+  FLOW_HINT_TEMPLATE_FREE: "(*Hoje você está no modo LIVRE.*)",
+
+  FLOW_TEMPLATE_SWITCH_TO_FREE:
+    "Fechado! ✅ A partir de agora vou gerar em *formatação livre*.\n\nQuando quiser voltar, digite *TEMPLATE*.",
+  FLOW_TEMPLATE_KEEP_FIXED:
+    "Boa! ✅ Vou manter o *template* (ele costuma converter mais).\n\nQuando quiser mudar, digite *LIVRE*.",
+
   FLOW_ASK_PAYMENT_METHOD_WITH_PLAN:
     "Show! ✅ Plano escolhido: *{{planName}}* (R$ {{planPrice}} / mês)\n\nAgora escolha a forma de pagamento:\n\n1) *Cartão* (assinatura recorrente)\n2) *PIX* (pagamento manual todo mês)\n\nResponda com *1* ou *2*.",
 
   // FLOW — MENU (comando "MENU")
-  FLOW_MENU_MAIN:
-  FLOW_MENU_PROFILE_VIEW_TITLE: "📇 *Dados da empresa*",
-  FLOW_MENU_PROFILE_EMPTY: "Ainda não tenho dados salvos da sua empresa por aqui 🙂",
-  FLOW_MENU_PROFILE_ACTIONS: "1) Atualizar/Completar\n2) Limpar dados salvos\n3) Voltar ao menu",
-  FLOW_MENU_PROFILE_INVALID_CHOICE: "Responda com *1*, *2* ou *3*, por favor 🙂",
-  FLOW_MENU_PROFILE_CLEARED: "✅ Dados da empresa removidos.",
-    "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram
-11) Dados da empresa (ver/atualizar)\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
-  
+  // FLOW — MENU (comando "MENU")
+FLOW_MENU_MAIN:
+  "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram\n11) Dados da empresa (ver/atualizar)\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
 
-  FLOW_ACTIVE_NO_PLAN_ERROR: "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).\n\nPor favor, acesse nosso site para regularizar ou fale com nosso suporte.\n\nInstagram: https://www.instagram.com/amigo.das.vendas/",
+// FLOW — MENU (Dados da empresa)
+FLOW_MENU_PROFILE_VIEW_TITLE: "📇 *Dados da empresa*",
+FLOW_MENU_PROFILE_EMPTY: "Ainda não tenho dados salvos da sua empresa por aqui 🙂",
+FLOW_MENU_PROFILE_ACTIONS:
+  "1) Atualizar/Completar\n2) Limpar dados salvos\n3) Voltar ao menu",
+FLOW_MENU_PROFILE_INVALID_CHOICE:
+  "Responda com *1*, *2* ou *3*, por favor 🙂",
+FLOW_MENU_PROFILE_CLEARED: "✅ Dados da empresa removidos.",
 
+FLOW_ACTIVE_NO_PLAN_ERROR: "⚠️ Identificamos uma inconsistência na sua assinatura (conta ativa sem plano associado).\n\nPor favor, acesse nosso site para regularizar ou fale com nosso suporte.\n\nInstagram: https://www.instagram.com/amigo.das.vendas/",
 FLOW_MENU_NAME_UPDATED: "✅ Nome atualizado!",
 FLOW_MENU_DOC_UPDATED: "✅ CPF/CNPJ atualizado!",
 FLOW_OK_NEXT_DESCRIPTION: "Show! ✅\n\nMe manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.",
@@ -116,10 +184,28 @@ FLOW_SAVE_PROFILE_ASK: "Quer que eu *salve isso* para usar automaticamente nos p
 FLOW_SAVE_PROFILE_WILL_SAVE: "Vou salvar:",
 FLOW_SAVE_PROFILE_OPT_YES: "1) Sim, salvar",
 FLOW_SAVE_PROFILE_OPT_NO: "2) Não salvar",
+FLOW_SAVE_PROFILE_OPT_ADD: "3) Adicionar dados da empresa",
+
+// FLOW — Wizard: adicionar dados da empresa (manual)
+FLOW_PROFILE_WIZARD_INTRO: "Perfeito! ✅ Vamos completar seus dados da empresa. Você pode responder *PULAR* em qualquer etapa.",
+FLOW_PROFILE_WIZARD_STEP1_COMPANY: "1/7) Qual é o *nome da empresa*? (ou digite PULAR)",
+FLOW_PROFILE_WIZARD_STEP2_WHATSAPP: "2/7) Qual é o *WhatsApp* da empresa? (ex.: +55 11 99999-9999)\n(ou digite PULAR)",
+FLOW_PROFILE_WIZARD_STEP3_ADDRESS: "3/7) Qual é o *endereço* da empresa?\nVocê pode responder *APENAS ATENDIMENTO ONLINE*.\n(ou digite PULAR)",
+FLOW_PROFILE_WIZARD_STEP4_HOURS: "4/7) Qual é o *horário de atendimento*? (ex.: Seg a sex, 09h–17h)\n(ou digite PULAR)",
+FLOW_PROFILE_WIZARD_STEP5_SOCIAL: "5/7) Envie o link de uma *rede social* (Instagram, Facebook, TikTok, etc).\n• Para adicionar mais redes, envie outro link em seguida.\n• Quando terminar, digite *FIM*.\n(ou digite PULAR para não informar nenhuma)",
+FLOW_PROFILE_WIZARD_STEP6_WEBSITE: "6/7) Qual é o link do *site*? (ou digite PULAR)",
+FLOW_PROFILE_WIZARD_STEP7_PRODUCTS: "7/7) Link da sua *lista de produtos* / catálogo (ou digite PULAR)",
+FLOW_PROFILE_WIZARD_SOCIAL_ADDED: "✅ Rede social adicionada.\nEnvie outro link para adicionar mais, ou digite *FIM* para continuar.",
+FLOW_PROFILE_WIZARD_SOCIAL_INVALID: "Não entendi. Envie um link (ou digite PULAR / FIM).",
 FLOW_SAVE_PROFILE_BENEFIT: "Assim você não precisa repetir essas informações toda vez. ✅",
 FLOW_SAVE_PROFILE_SAVED_CONFIRM: "Perfeito! ✅ Vou salvar esses dados como padrão para seus próximos anúncios.",
 FLOW_SAVE_PROFILE_NOT_SAVED_CONFIRM: "Fechado! ✅ Não vou salvar esses dados por agora.",
+FLOW_SAVE_PROFILE_CHANGE_LATER: "Se quiser mudar isso depois, digite *MENU* e ajuste sua preferência.",
+
 FLOW_AFTER_SAVE_PROFILE_QUESTION: "Agora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?",
+
+  FLOW_REFINEMENTS_SHORT: "*Refinamentos*\n\nAgora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?\n* Para refinar: responda com o que você quer mudar (ex.: \"deixa mais curto\", \"mais emocional\", \"com mais emoji\", etc...).",
+// Vars: maxRefinements
 FLOW_AFTER_SAVE_PROFILE_REFINE_HINT: "• Para refinar: responda com o que você quer mudar (ex.: “deixa mais curto”, “inclua delivery”, “mude o preço”).\n\n(Lembrete: até {{maxRefinements}} refinamento(s) por descrição. No próximo, conta como uma nova descrição.)",
 FLOW_AFTER_SAVE_PROFILE_OK_HINT: "• Para criar outro: digite *OK*.",
   FLOW_REFINE_PROMPT_SHORT: "*Refinamentos*\n\nAgora me diz: você *gostou do anúncio* ou quer ajustar alguma coisa?\n* Para refinar: responda com o que você quer mudar (ex.: \"deixa mais curto\", \"mais emocional\", \"com mais emoji\", etc...).",
@@ -134,6 +220,7 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
   // Vars: renewalBr, daysLeft
   FLOW_MENU_CANCEL_OK:
     "✅ Pronto! A recorrência do *Cartão* foi cancelada.\n\nVocê continua com acesso até *{{renewalBr}}* (faltam {{daysLeft}} dia(s)).\n\nQuando chegar a data, é só escolher um plano novamente pelo *MENU* 😉",
+
 
   // OPENAI — Prompts
   OPENAI_SYSTEM_FIXED: [
@@ -213,74 +300,46 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
     "",
     "Saída: somente o anúncio final, sem comentários.",
   ].join("\n"),
-
-  FLOW_ASK_TEMPLATE_CHOICE: "Antes de eu gerar, me diz: você prefere um anúncio no *template* (mais direto) ou *livre* (mais humano)?
-
-1) Template
-2) Livre
-
-Responda *1* ou *2*.",
-  FLOW_SAVE_PROFILE_OPT_ADD: "3) Adicionar dados da empresa",
-  FLOW_PROFILE_WIZARD_INTRO: "Perfeito ✅ Vamos completar os dados da sua empresa.
-
-Você pode digitar *PULAR* em qualquer etapa para seguir.
-
-Vamos lá 👇",
-  FLOW_PROFILE_WIZARD_STEP1_COMPANY: "1/7 — Qual é o *nome da sua empresa*?
-
-(Responda com o nome ou digite *PULAR*)",
-  FLOW_PROFILE_WIZARD_STEP2_WHATSAPP: "2/7 — Qual é o *WhatsApp da empresa*?
-
-(Envie o número ou digite *PULAR*)",
-  FLOW_PROFILE_WIZARD_STEP3_ADDRESS: "3/7 — Qual é o *endereço / região de atendimento*?
-
-Se for só online, responda: *APENAS ATENDIMENTO ONLINE*
-
-(ou digite *PULAR*)",
-  FLOW_PROFILE_WIZARD_STEP4_HOURS: "4/7 — Qual é o *horário de atendimento*?
-
-(Ex.: Seg a sex, 09h–17h — ou digite *PULAR*)",
-  FLOW_PROFILE_WIZARD_STEP5_SOCIAL: "5/7 — Envie o link (ou @) de uma *rede social*.
-
-Você pode enviar *mais de uma*, uma por vez.
-Quando terminar, digite *FIM*.
-
-(ou digite *PULAR*)",
-  FLOW_PROFILE_WIZARD_SOCIAL_ADDED: "Boa! ✅ Rede social adicionada.
-
-Se quiser adicionar outra, envie mais uma.
-Quando terminar, digite *FIM*.",
-  FLOW_PROFILE_WIZARD_SOCIAL_INVALID: "Não consegui reconhecer esse link/usuário. 😅
-
-Envie um link (ex.: https://instagram.com/seuperfil) ou um @perfil.
-
-Quando terminar, digite *FIM* (ou *PULAR*).",
-  FLOW_PROFILE_WIZARD_STEP6_WEBSITE: "6/7 — Você tem *website*?
-
-Envie o link (ex.: https://seusite.com) ou digite *PULAR*.",
-  FLOW_PROFILE_WIZARD_STEP7_PRODUCTS: "7/7 — Você tem um link de *lista de produtos / catálogo*?
-
-Envie o link ou digite *PULAR*.",
-
 });
 
 // Catálogo para UI (ordem e categorias)
 export const COPY_CATALOG = Object.freeze([
+  { category: "Flow", key: "FLOW_WELCOME", label: "Boas-vindas (prefixo)" },
   { category: "Flow", key: "FLOW_ASK_NAME", label: "Pedir nome" },
   { category: "Flow", key: "FLOW_ASK_PRODUCT", label: "Pedir o que vende" },
+  { category: "Flow", key: "FLOW_ASK_REFINEMENT", label: "Pedir refinamento" },
+  { category: "Flow", key: "FLOW_ASK_TEMPLATE_CHOICE", label: "Escolha FIXO/LIVRE" },
+  { category: "Flow", key: "FLOW_ASK_TEMPLATE_CHOICE_LONG", label: "Escolha FIXO/LIVRE (texto longo)" },
+  { category: "Flow", key: "FLOW_TEMPLATE_SET_FIXED", label: "Confirma FIXO" },
+  { category: "Flow", key: "FLOW_TEMPLATE_SET_FREE", label: "Confirma LIVRE" },
+  { category: "Flow", key: "FLOW_TRIAL_BLOCKED", label: "Trial acabou / mostrar planos" },
+  { category: "Flow", key: "FLOW_TRIAL_PREFIX", label: "Trial: prefixo (não entendi)" },
+  { category: "Flow", key: "FLOW_PLANS_FALLBACK_STATIC", label: "Planos: fallback estático (sem planos no Redis)" },
+  { category: "Flow", key: "FLOW_PLANS_ONLY_HEADER", label: "Planos: cabeçalho (sem trial)" },
+  { category: "Flow", key: "FLOW_PLANS_ONLY_FOOTER", label: "Planos: rodapé (sem trial)" },
   { category: "Flow", key: "FLOW_QUOTA_BLOCKED", label: "Limite do plano" },
+  { category: "Flow", key: "FLOW_UNKNOWN_COMMAND", label: "Comando não entendido" },
+  { category: "Flow", key: "FLOW_ASK_PAYMENT_METHOD", label: "Escolher forma de pagamento" },
   { category: "Flow", key: "FLOW_ASK_DOC", label: "Pedir CPF/CNPJ" },
   { category: "Flow", key: "FLOW_INVALID_DOC", label: "CPF/CNPJ inválido" },
 
   { category: "Flow", key: "FLOW_NAME_TOO_SHORT", label: "Nome curto / inválido" },
   { category: "Flow", key: "FLOW_INVALID_PAYMENT_METHOD", label: "Pagamento: opção inválida" },
+  { category: "Flow", key: "FLOW_PAYMENT_SUCCESS", label: "Pagamento: sucesso (PIX/Cartão)" },
   { category: "Flow", key: "FLOW_PAYMENT_PENDING", label: "Pagamento: pendente" },
   { category: "Flow", key: "FLOW_QUOTA_REACHED_PREFIX", label: "Limite mensal atingido (prefixo)" },
   { category: "Flow", key: "FLOW_FALLBACK_UNKNOWN", label: "Fallback final (não entendi)" },
   { category: "Flow", key: "FLOW_OPENAI_ERROR", label: "Erro técnico OpenAI" },
 
+
   { category: "Flow", key: "FLOW_BLOCKED", label: "Acesso bloqueado" },
+  { category: "Flow", key: "FLOW_AFTER_AD_TEMPLATE_CHOICE", label: "Perguntar template após anúncio" },
+  { category: "Flow", key: "FLOW_HINT_TEMPLATE_FIXED", label: "Hint template FIXO" },
+  { category: "Flow", key: "FLOW_HINT_TEMPLATE_FREE", label: "Hint template LIVRE" },
+  { category: "Flow", key: "FLOW_TEMPLATE_SWITCH_TO_FREE", label: "Confirma trocar para LIVRE" },
+  { category: "Flow", key: "FLOW_TEMPLATE_KEEP_FIXED", label: "Confirma manter FIXO" },
   { category: "Flow", key: "FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", label: "Pagamento com plano (dinâmico)" },
+
 
   { category: "Flow", key: "FLOW_MENU_MAIN", label: "Menu principal (MENU)" },
   { category: "Flow", key: "FLOW_MENU_ASK_NEW_NAME", label: "Menu: pedir novo nome" },
@@ -290,45 +349,20 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_MENU_URL_INSTAGRAM", label: "Menu: URL Instagram" },
   { category: "Flow", key: "FLOW_MENU_CANCEL_NOT_FOUND", label: "Menu: cancelar cartão (não encontrado)" },
   { category: "Flow", key: "FLOW_MENU_CANCEL_OK", label: "Menu: cancelar cartão (sucesso)" },
+  { category: "Flow", key: "FLOW_SAVE_PROFILE_OPT_ADD", label: "Salvar perfil: opção 3 (Adicionar dados)" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_INTRO", label: "Wizard perfil: introdução" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP1_COMPANY", label: "Wizard perfil: 1/7 empresa" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP2_WHATSAPP", label: "Wizard perfil: 2/7 WhatsApp" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP3_ADDRESS", label: "Wizard perfil: 3/7 endereço" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP4_HOURS", label: "Wizard perfil: 4/7 horário" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP5_SOCIAL", label: "Wizard perfil: 5/7 redes sociais" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP6_WEBSITE", label: "Wizard perfil: 6/7 site" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP7_PRODUCTS", label: "Wizard perfil: 7/7 catálogo" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_ADDED", label: "Wizard perfil: rede social adicionada" },
+  { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_INVALID", label: "Wizard perfil: rede social inválida" },
 
   { category: "OpenAI", key: "OPENAI_SYSTEM_FIXED", label: "Prompt FIXO (system)" },
   { category: "OpenAI", key: "OPENAI_SYSTEM_FREE", label: "Prompt LIVRE (system)" },
-  { category: "Flow", key: "FLOW_ACTIVE_NO_PLAN_ERROR", label: "Erro: conta ativa sem plano" },
-  { category: "Flow", key: "FLOW_MENU_NAME_UPDATED", label: "Menu: nome atualizado" },
-  { category: "Flow", key: "FLOW_MENU_DOC_UPDATED", label: "Menu: documento atualizado" },
-  { category: "Flow", key: "FLOW_OK_NEXT_DESCRIPTION", label: "OK: pronto para próxima descrição" },
-  { category: "Flow", key: "FLOW_SAVE_PROFILE_INTRO", label: "Salvar dados: introdução" },
-  { category: "Flow", key: "FLOW_SAVE_PROFILE_ASK", label: "Salvar dados: pergunta" },
-  { category: "Flow", key: "FLOW_SAVE_PROFILE_WILL_SAVE", label: "Salvar dados: vou salvar" },
-  { category: "Flow", key: "FLOW_SAVE_PROFILE_OPT_YES", label: "Salvar dados: opção Sim" },
-  { category: "Flow", key: "FLOW_SAVE_PROFILE_OPT_NO", label: "Salvar dados: opção Não" },
-  { category: "Flow", key: "FLOW_SAVE_PROFILE_BENEFIT", label: "Salvar dados: benefício" },
-  { category: "Flow", key: "FLOW_SAVE_PROFILE_SAVED_CONFIRM", label: "Salvar dados: confirmação (salvo)" },
-  { category: "Flow", key: "FLOW_SAVE_PROFILE_NOT_SAVED_CONFIRM", label: "Salvar dados: confirmação (não salvo)" },
-  { category: "Flow", key: "FLOW_AFTER_SAVE_PROFILE_QUESTION", label: "Pós-salvar: pergunta refinamento" },
-  { category: "Flow", key: "FLOW_AFTER_SAVE_PROFILE_REFINE_HINT", label: "Pós-salvar: dica refinamento" },
-  { category: "Flow", key: "FLOW_AFTER_SAVE_PROFILE_OK_HINT", label: "Pós-salvar: dica OK" },
-  { category: "Flow", key: "FLOW_REFINE_PROMPT_SHORT", label: "Refinar: prompt curto" },
-
-  { category: "Flow", key: "FLOW_ASK_TEMPLATE_CHOICE", label: "Escolha template (1/2)" },
-  { category: "Flow", key: "FLOW_SAVE_PROFILE_OPT_ADD", label: "Salvar perfil: opção adicionar dados" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_INTRO", label: "Wizard perfil: introdução" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP1_COMPANY", label: "Wizard perfil: 1/7 nome empresa" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP2_WHATSAPP", label: "Wizard perfil: 2/7 WhatsApp" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP3_ADDRESS", label: "Wizard perfil: 3/7 Endereço / online" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP4_HOURS", label: "Wizard perfil: 4/7 Horário" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP5_SOCIAL", label: "Wizard perfil: 5/7 Redes sociais" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_ADDED", label: "Wizard perfil: social adicionada" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_INVALID", label: "Wizard perfil: social inválida" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP6_WEBSITE", label: "Wizard perfil: 6/7 Website" },
-  { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP7_PRODUCTS", label: "Wizard perfil: 7/7 Catálogo" },
-
-
-  { category: "Flow", key: "FLOW_MENU_PROFILE_VIEW_TITLE", label: "Menu: dados empresa (título)" },
-  { category: "Flow", key: "FLOW_MENU_PROFILE_EMPTY", label: "Menu: dados empresa (vazio)" },
-  { category: "Flow", key: "FLOW_MENU_PROFILE_ACTIONS", label: "Menu: dados empresa (ações)" },
-  { category: "Flow", key: "FLOW_MENU_PROFILE_INVALID_CHOICE", label: "Menu: dados empresa (opção inválida)" },
-  { category: "Flow", key: "FLOW_MENU_PROFILE_CLEARED", label: "Menu: dados empresa (limpo)" },
 ]);
 
 function defaultFor(key) {
@@ -348,8 +382,10 @@ async function ensureIndexedKey(key) {
 // ==============================
 
 export async function listCopyKeys() {
-  // ✅ Governança: listar apenas keys que existem no DEFAULT_COPY (evita keys órfãs no Admin)
-  return Object.keys(DEFAULT_COPY);
+  const indexed = await redisSMembers(KEY_INDEX).catch(() => []);
+  const defaults = Object.keys(DEFAULT_COPY);
+  const set = new Set([...(indexed || []), ...defaults].map(escapeKey).filter(Boolean));
+  return Array.from(set);
 }
 
 export async function getCopyResolved(key, { waId = null, vars = null } = {}) {
@@ -439,23 +475,4 @@ export function groupCatalog() {
     groups[cat].push(row);
   }
   return groups;
-}
-
-// ==============================
-// Auditoria (governança) — não quebra produção
-// ==============================
-
-export function auditCopyCatalog() {
-  const defaultKeys = Object.keys(DEFAULT_COPY || {}).map(escapeKey).filter(Boolean);
-  const catalogKeys = (COPY_CATALOG || [])
-    .map((r) => escapeKey(r?.key))
-    .filter(Boolean);
-
-  const setDefaults = new Set(defaultKeys);
-  const setCatalog = new Set(catalogKeys);
-
-  const missingInCatalog = defaultKeys.filter((k) => !setCatalog.has(k));
-  const extraInCatalog = catalogKeys.filter((k) => !setDefaults.has(k));
-
-  return { missingInCatalog, extraInCatalog };
 }
