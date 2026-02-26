@@ -103,6 +103,7 @@ const ST = Object.freeze({
   WAIT_MENU: "WAIT_MENU",
   WAIT_MENU_NEW_NAME: "WAIT_MENU_NEW_NAME",
   WAIT_MENU_NEW_DOC: "WAIT_MENU_NEW_DOC",
+  WAIT_MENU_PROFILE: "WAIT_MENU_PROFILE",
 
 
   // Pós-anúncio
@@ -191,11 +192,11 @@ function normalizeMenuChoice(t) {
   const m = s.match(/^(\d{1,2})\s*[)\.\-:]?/);
   if (!m) return "";
   const n = String(m[1] || "").trim();
-  // menu tem 1..10
+  // menu tem 1..11
   if (!n) return "";
   const num = Number(n);
   if (!Number.isFinite(num)) return "";
-  if (num < 1 || num > 10) return "";
+  if (num < 1 || num > 11) return "";
   return String(num);
 }
 
@@ -675,6 +676,50 @@ async function msgMenuMain(waId) {
   return await getCopyText("FLOW_MENU_MAIN", { waId });
 }
 
+async function msgMenuProfileView(waId) {
+  const biz = await getBizProfile(waId);
+  const lines = [];
+  lines.push(await getCopyText("FLOW_MENU_PROFILE_VIEW_TITLE", { waId }));
+  lines.push("");
+
+  if (!biz || typeof biz !== "object" || Object.keys(biz).length === 0) {
+    lines.push(await getCopyText("FLOW_MENU_PROFILE_EMPTY", { waId }));
+  } else {
+    // Mostra o que está salvo (visualização)
+    const get = (k) => {
+      const v = biz?.[k];
+      if (v === undefined || v === null) return "";
+      if (Array.isArray(v)) return v.filter(Boolean).join(", ");
+      return String(v || "").trim();
+    };
+
+    const companyName = get("companyName");
+    const whatsapp = get("whatsapp");
+    const address = get("address");
+    const hours = get("hours");
+    const socials = get("socials");
+    const website = get("website");
+    const productsUrl = get("productsUrl");
+
+    if (companyName) lines.push(`🏢 Nome: ${companyName}`);
+    if (whatsapp) lines.push(`📲 WhatsApp: ${whatsapp}`);
+    if (address) lines.push(`📍 Endereço: ${address}`);
+    if (hours) lines.push(`🕒 Horário: ${hours}`);
+    if (socials) lines.push(`📱 Redes: ${socials}`);
+    if (website) lines.push(`🌐 Site: ${website}`);
+    if (productsUrl) lines.push(`🛍️ Catálogo: ${productsUrl}`);
+
+    if (lines.length === 2) {
+      // só título e linha em branco
+      lines.push(await getCopyText("FLOW_MENU_PROFILE_EMPTY", { waId }));
+    }
+  }
+
+  lines.push("");
+  lines.push(await getCopyText("FLOW_MENU_PROFILE_ACTIONS", { waId }));
+  return lines.join("\n");
+}
+
 async function msgMenuAskNewName(waId) {
   return await getCopyText("FLOW_MENU_ASK_NEW_NAME", { waId });
 }
@@ -918,6 +963,12 @@ export async function handleInboundText({ waId, text }) {
     // opção 10: Instagram
     if (choice === "10") return reply(await msgMenuUrlInstagram(id));
 
+    // opção 11: Dados da empresa (ver/atualizar)
+    if (choice === "11") {
+      await setUserStatus(id, ST.WAIT_MENU_PROFILE);
+      return reply(await msgMenuProfileView(id));
+    }
+
     // fallback (não deve acontecer)
     return reply(await msgMenuMain(id));
   }
@@ -947,7 +998,38 @@ export async function handleInboundText({ waId, text }) {
 
 
   
-  // 0.3) Pós-anúncio — escolha de template (1/2)
+  
+  // 0.25) MENU — Dados da empresa (visualizar/atualizar)
+  if (status === ST.WAIT_MENU_PROFILE) {
+    const c = normalizeChoice(inbound);
+
+    if (c !== "1" && c !== "2" && c !== "3") {
+      return reply(await getCopyText("FLOW_MENU_PROFILE_INVALID_CHOICE", { waId: id }));
+    }
+
+    // 1) Atualizar/Completar (abre wizard)
+    if (c === "1") {
+      const current = await getBizProfile(id);
+      // Wizard trabalha em cima de um "pending" para só salvar no fim
+      await setPendingBizProfile(id, (current && typeof current === "object") ? current : {});
+      await setUserStatus(id, ST.WAIT_PROFILE_ADD_COMPANY);
+      return reply(await getCopyText("FLOW_PROFILE_WIZARD_INTRO", { waId: id }));
+    }
+
+    // 2) Limpar dados
+    if (c === "2") {
+      await clearBizProfile(id);
+      await clearPendingBizProfile(id);
+      await setUserStatus(id, ST.WAIT_MENU);
+      return reply(`${await getCopyText("FLOW_MENU_PROFILE_CLEARED", { waId: id })}\n\n${await msgMenuMain(id)}`);
+    }
+
+    // 3) Voltar
+    await setUserStatus(id, ST.WAIT_MENU);
+    return reply(await msgMenuMain(id));
+  }
+
+// 0.3) Pós-anúncio — escolha de template (1/2)
   if (status === ST.WAIT_TEMPLATE_MODE) {
     const c = normalizeChoice(inbound);
 
@@ -1388,7 +1470,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
         if (prof.productList) parts.push(`Catálogo/Lista: ${prof.productList}`);
         if (Array.isArray(prof.socials) && prof.socials.length) parts.push(`Redes: ${prof.socials.join(' | ')}`);
         if (parts.length) {
-          promptToSend = `DADOS_DA_EMPRESA:\n${parts.join("\n")}\n\nDESCRIÇÃO_DO_USUÁRIO:\n${userText}`;
+          promptToSend = `CONTEXTO_DA_EMPRESA (use somente se ajudar; não é obrigatório repetir literalmente):\n${parts.join("\n")}\n\nDESCRIÇÃO_DO_USUÁRIO:\n${userText}`;
         }
       }
     }
