@@ -268,7 +268,7 @@ function renderSidebar(activePath){
         <summary>⚙️ Sistema <span>▾</span></summary>
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
-        ${item("/asaas/test", "Asaas Test", "🧾")}
+        ${item("/admin/asaas-test-ui", "Asaas Teste", "🧾")}
       </details>
 
       <div class="hint" style="margin-top:10px;">Dica: tudo é protegido por Basic Auth (ADMIN_SECRET).</div>
@@ -876,7 +876,7 @@ router.get("/", async (req, res) => {
               <a class="pill" href="/health-redis">🧠 Health Redis</a>
               <a class="pill" href="/admin/health-plans">🧾 Health Planos (JSON)</a>
               <a class="pill" href="/admin/alerts-ui">🚨 Alertas</a>
-              <a class="pill" href="/asaas/test">🧾 Asaas Test</a>
+              <a class="pill" href="/admin/asaas-test-ui">🧾 Asaas Teste</a>
             </div>
             <div class="hr"></div>
             <div class="muted">Observação: ações avançadas estão nas seções do menu.</div>
@@ -1516,6 +1516,124 @@ async function toggle(code, active){
   router.get("/health-plans", async (req, res) => {
     const h = await getPlansHealth({ includeInactive: true });
     return res.json({ ok: true, health: h });
+  });
+
+
+  // -----------------------------
+  // 🧾 Asaas Teste (UI)
+  // -----------------------------
+  router.get("/asaas-test-ui", async (req, res) => {
+    const html = layoutBase({
+      title: "Asaas Teste",
+      activePath: "/admin/asaas-test-ui",
+      content: `
+        <h1>🧾 Asaas Teste</h1>
+        <p class="muted">Executa o endpoint de teste do Asaas e mostra o resultado sem navegar para outra página.</p>
+
+        <div class="kpi">
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <button class="btn" id="btnRun">Rodar teste</button>
+            <span class="pill" id="statusPill" style="display:none;"></span>
+            <span class="muted" id="hint" style="font-size:12px;"></span>
+          </div>
+          <div class="hr"></div>
+          <pre id="out" style="white-space:pre-wrap; margin:0; font-size:12px;">Clique em "Rodar teste".</pre>
+        </div>
+
+        <div id="modal" class="modal" style="display:none;">
+          <div class="modal__backdrop" id="modalBg"></div>
+          <div class="modal__panel">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+              <div style="font-weight:700;">Resultado — Asaas Teste</div>
+              <button class="btn btn-ghost" id="modalClose">Fechar</button>
+            </div>
+            <div class="hr"></div>
+            <div id="modalStatus" class="pill" style="display:inline-block; margin-bottom:10px;"></div>
+            <pre id="modalBody" style="white-space:pre-wrap; margin:0; font-size:12px;"></pre>
+          </div>
+        </div>
+      `,
+      headExtra: `
+        <style>
+          .btn{ background:var(--accent); color:white; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:600; box-shadow:0 6px 16px rgba(37,99,235,.25); }
+          .btn:disabled{ opacity:.6; cursor:not-allowed; }
+          .btn-ghost{ background:transparent; color:var(--text); border:1px solid var(--border); box-shadow:none; }
+          .modal{ position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; padding:18px; }
+          .modal__backdrop{ position:absolute; inset:0; background:rgba(15,23,42,.55); }
+          .pill-ok{ background:#dcfce7; color:#166534; border:1px solid #bbf7d0; }
+          .pill-bad{ background:#fee2e2; color:#991b1b; border:1px solid #fecaca; }
+          .modal__panel{ position:relative; background:var(--card); width:min(900px, 96vw); max-height:86vh; overflow:auto; border-radius:16px; padding:14px; box-shadow:0 18px 48px rgba(17,24,39,.25); border:1px solid rgba(229,231,235,.9); }
+        </style>
+      `,
+      scriptExtra: `
+        <script>
+          function esc(s){ return String(s ?? ''); }
+
+          function setPill(text, kind){
+            const el = document.getElementById('statusPill');
+            if(!text){ el.style.display='none'; el.textContent=''; el.className='pill'; return; }
+            el.style.display='inline-block';
+            el.textContent = text;
+            el.className = 'pill ' + (kind ? ('pill-' + kind) : '');
+          }
+
+          function openModal(statusText, bodyText){
+            document.getElementById('modalStatus').textContent = statusText || '';
+            document.getElementById('modalBody').textContent = bodyText || '';
+            document.getElementById('modal').style.display = 'flex';
+          }
+
+          function closeModal(){
+            document.getElementById('modal').style.display = 'none';
+          }
+
+          function classify(body){
+            const t = String(body || '').toLowerCase();
+            if (t.includes('ok') && !t.includes('error')) return { kind: 'ok', label: 'OK' };
+            if (t.includes('erro') || t.includes('error') || t.includes('fail')) return { kind: 'bad', label: 'ERRO' };
+            return { kind: '', label: 'RESULTADO' };
+          }
+
+          async function run(){
+            const btn = document.getElementById('btnRun');
+            const hint = document.getElementById('hint');
+            const out = document.getElementById('out');
+
+            btn.disabled = true;
+            hint.textContent = 'Executando...';
+            setPill('Executando...', '');
+            out.textContent = 'Carregando...';
+
+            try {
+              const res = await fetch('/asaas/test', { cache: 'no-store' });
+              const body = await res.text();
+              out.textContent = body;
+
+              const cls = classify(body);
+              const statusText = (res.ok ? '✅ ' : '❌ ') + cls.label + ' (HTTP ' + res.status + ')';
+
+              setPill(statusText, res.ok ? 'ok' : 'bad');
+              openModal(statusText, body);
+            } catch (e) {
+              const msg = '❌ ERRO: ' + esc(e && e.message ? e.message : e);
+              setPill(msg, 'bad');
+              out.textContent = msg;
+              openModal('❌ ERRO', msg);
+            } finally {
+              btn.disabled = false;
+              hint.textContent = '';
+            }
+          }
+
+          document.getElementById('btnRun').addEventListener('click', run);
+          document.getElementById('modalClose').addEventListener('click', closeModal);
+          document.getElementById('modalBg').addEventListener('click', closeModal);
+        </script>
+      `,
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
   });
 
   // -----------------------------
