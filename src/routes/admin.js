@@ -950,6 +950,10 @@ router.get("/", async (req, res) => {
           async function reloadUsers(){
             const limit = Number(document.getElementById("uLimit")?.value || 200);
             const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
+
+            // Feedback imediato
+            const tbody = document.getElementById("uTbody");
+            if (tbody) tbody.innerHTML = "<tr><td colspan=\"6\" class=\"muted\">Carregando...</td></tr>";
             const out = await fetchJson(url);
             const r = out.r, j = out.j;
             if (!r.ok || !j.ok) {
@@ -1087,7 +1091,13 @@ router.get("/", async (req, res) => {
 
           // auto-load
           setTimeout(() => { reloadUsers().catch(()=>{}); }, 50);
-        </script>
+        
+
+          // Auto-load na primeira renderização
+          (function initUsersList(){
+            try { reloadUsers(); } catch (_) {}
+          })();
+</script>
       `,
     });
 
