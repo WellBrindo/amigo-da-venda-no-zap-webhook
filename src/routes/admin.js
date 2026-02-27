@@ -926,9 +926,9 @@ router.get("/", async (req, res) => {
           }
 
           function windowLabel(u){
-            if (!u.lastInboundTs) return "—";
+            if (!u || !u.lastInboundTs) return "—";
             const exp = u.windowExpiresAt ? fmtTs(u.windowExpiresAt) : "—";
-            return u.inWindow ? `Ativa (até ${exp})` : `Fora (expirou em ${exp})`;
+            return u.inWindow ? ("Ativa (até " + exp + ")") : ("Fora (expirou em " + exp + ")");
           }
 
           function escapeHtml(s){
@@ -949,9 +949,11 @@ router.get("/", async (req, res) => {
 
           async function reloadUsers(){
             const limit = Number(document.getElementById("uLimit")?.value || 200);
-            const { r, j } = await fetchJson(`/admin/users/list?limit=${encodeURIComponent(limit)}`);
+            const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
+            const out = await fetchJson(url);
+            const r = out.r, j = out.j;
             if (!r.ok || !j.ok) {
-              document.getElementById("uTbody").innerHTML = `<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>`;
+              document.getElementById("uTbody").innerHTML = "<tr><td colspan=\"6\" class=\"muted\">Erro ao carregar usuários.</td></tr>";
               return;
             }
             _users = j.items || [];
@@ -966,95 +968,105 @@ router.get("/", async (req, res) => {
               return String(u.waId || "").includes(q) || String(u.fullName || "").toLowerCase().includes(q);
             });
 
-            document.getElementById("uMeta").textContent = `${items.length} exibidos • Total: ${_usersMeta.total}`;
+            const metaEl = document.getElementById("uMeta");
+            if (metaEl) metaEl.textContent = String(items.length) + " exibidos • Total: " + String(_usersMeta.total);
 
             if (!items.length){
-              document.getElementById("uTbody").innerHTML = `<tr><td colspan="6" class="muted">Nenhum usuário encontrado.</td></tr>`;
+              document.getElementById("uTbody").innerHTML = "<tr><td colspan=\"6\" class=\"muted\">Nenhum usuário encontrado.</td></tr>";
               return;
             }
 
-            document.getElementById("uTbody").innerHTML = items.map((u) => {
+            const rows = [];
+            for (const u of items){
               const name = escapeHtml(u.fullName || "—");
-              const wa = escapeHtml(u.waId || "");
+              const wa = String(u.waId || "");
+              const waHtml = escapeHtml(wa);
+              const waJs = wa.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
               const st = escapeHtml(u.status || "");
               const pl = escapeHtml(u.plan || "");
               const win = escapeHtml(windowLabel(u));
 
-              return `
-                <tr>
-                  <td>${name}</td>
-                  <td><code>${wa}</code></td>
-                  <td>${st}</td>
-                  <td>${pl || "—"}</td>
-                  <td>${win}</td>
-                  <td>
-                    <button onclick="expandUser('${wa}')">Expandir</button>
-                    <button onclick="openActions('${wa}')">Abrir</button>
-                  </td>
-                </tr>
-                <tr id="exp_${wa}" style="display:none;">
-                  <td colspan="6">
-                    <div class="muted">Carregando...</div>
-                  </td>
-                </tr>
-              `;
-            }).join("");
+              rows.push(
+                "<tr>" +
+                  "<td>" + name + "</td>" +
+                  "<td><code>" + waHtml + "</code></td>" +
+                  "<td>" + st + "</td>" +
+                  "<td>" + (pl || "—") + "</td>" +
+                  "<td>" + win + "</td>" +
+                  "<td>" +
+                    "<button onclick=\"expandUser(\'" + waJs + "\')\">Expandir</button> " +
+                    "<button onclick=\"openActions(\'" + waJs + "\')\">Abrir</button>" +
+                  "</td>" +
+                "</tr>"
+              );
+              rows.push(
+                "<tr id=\"exp_" + waHtml + "\" style=\"display:none;\">" +
+                  "<td colspan=\"6\"><div class=\"muted\">Carregando...</div></td>" +
+                "</tr>"
+              );
+            }
+
+            document.getElementById("uTbody").innerHTML = rows.join("");
           }
 
           async function expandUser(wa){
-            const row = document.getElementById(`exp_${wa}`);
+            const row = document.getElementById("exp_" + String(wa));
             if (!row) return;
 
             if (row.style.display === "none"){
               row.style.display = "";
-              row.querySelector("td").innerHTML = `<div class="muted">Carregando...</div>`;
+              row.querySelector("td").innerHTML = "<div class=\"muted\">Carregando...</div>";
 
-              const { r, j } = await fetchJson(`/admin/users/details?waId=${encodeURIComponent(wa)}`);
+              const url = "/admin/users/details?waId=" + encodeURIComponent(wa);
+              const out = await fetchJson(url);
+              const r = out.r, j = out.j;
               if (!r.ok || !j.ok) {
-                row.querySelector("td").innerHTML = `<div class="muted">Erro ao carregar detalhes.</div>`;
+                row.querySelector("td").innerHTML = "<div class=\"muted\">Erro ao carregar detalhes.</div>";
                 return;
               }
 
               const s = j.snapshot || {};
-              const header = `
-                <div class="row" style="justify-content:space-between; align-items:center;">
-                  <div>
-                    <div><b>${escapeHtml(s.fullName || "—")}</b> <span class="muted">(${escapeHtml(wa)})</span></div>
-                    <div class="muted">Status: <b>${escapeHtml(s.status || "—")}</b> • Plano: <b>${escapeHtml(s.plan || "—")}</b> • Janela 24h: <b>${escapeHtml(j.inWindow ? "Ativa" : "Fora")}</b></div>
-                  </div>
-                  <div class="row">
-                    <button onclick="openActions('${wa}')">Abrir nas ações</button>
-                    <button onclick="toggleRow('${wa}')">Fechar</button>
-                  </div>
-                </div>
-              `;
+              const header = (
+                "<div class=\"row\" style=\"justify-content:space-between; align-items:center;\">" +
+                  "<div>" +
+                    "<div><b>" + escapeHtml(s.fullName || "—") + "</b> <span class=\"muted\">(" + escapeHtml(wa) + ")</span></div>" +
+                    "<div class=\"muted\">Status: <b>" + escapeHtml(s.status || "—") + "</b> • Plano: <b>" + escapeHtml(s.plan || "—") + "</b> • Janela 24h: <b>" + escapeHtml(j.inWindow ? "Ativa" : "Fora") + "</b></div>" +
+                  "</div>" +
+                  "<div class=\"row\">" +
+                    "<button onclick=\"openActions(\'" + String(wa).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "\')\">Abrir nas ações</button> " +
+                    "<button onclick=\"toggleRow(\'" + String(wa).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "\')\">Fechar</button>" +
+                  "</div>" +
+                "</div>"
+              );
 
-              const details = `
-                <div class="hr"></div>
-                <div class="grid cols2">
-                  <div class="kpi">
-                    <div class="t">Dados pessoais</div>
-                    <div class="muted">Nome: <b>${escapeHtml(s.fullName || "—")}</b></div>
-                    <div class="muted">Documento: <b>${escapeHtml((s.doc && (s.doc.docType ? (s.doc.docType + " • " + s.doc.docLast4) : "")) || "—")}</b></div>
-                    <div class="muted">Cidade/UF: <b>${escapeHtml(s.billingCityState || "—")}</b></div>
-                    <div class="muted">Endereço: <b>${escapeHtml(s.billingAddress || "—")}</b></div>
-                  </div>
-                  <div class="kpi">
-                    <div class="t">Assinatura / Cobrança</div>
-                    <div class="muted">Status: <b>${escapeHtml(s.status || "—")}</b></div>
-                    <div class="muted">Plano: <b>${escapeHtml(s.plan || "—")}</b></div>
-                    <div class="muted">Payment: <b>${escapeHtml(s.paymentMethod || "—")}</b></div>
-                    <div class="muted">Asaas Customer: <code>${escapeHtml(s.asaasCustomerId || "—")}</code></div>
-                    <div class="muted">Asaas Subscription: <code>${escapeHtml(s.asaasSubscriptionId || "—")}</code></div>
-                  </div>
-                </div>
+              const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + " • " + (s.doc.docLast4 || "")) : "—";
 
-                <div class="hr"></div>
-                <details>
-                  <summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>
-                  <pre style="white-space:pre-wrap;">${escapeHtml(JSON.stringify(s, null, 2))}</pre>
-                </details>
-              `;
+              const details = (
+                "<div class=\"hr\"></div>" +
+                "<div class=\"grid cols2\">" +
+                  "<div class=\"kpi\">" +
+                    "<div class=\"t\">Dados pessoais</div>" +
+                    "<div class=\"muted\">Nome: <b>" + escapeHtml(s.fullName || "—") + "</b></div>" +
+                    "<div class=\"muted\">Documento: <b>" + escapeHtml(docLine) + "</b></div>" +
+                    "<div class=\"muted\">Cidade/UF: <b>" + escapeHtml(s.billingCityState || "—") + "</b></div>" +
+                    "<div class=\"muted\">Endereço: <b>" + escapeHtml(s.billingAddress || "—") + "</b></div>" +
+                  "</div>" +
+                  "<div class=\"kpi\">" +
+                    "<div class=\"t\">Assinatura / Cobrança</div>" +
+                    "<div class=\"muted\">Status: <b>" + escapeHtml(s.status || "—") + "</b></div>" +
+                    "<div class=\"muted\">Plano: <b>" + escapeHtml(s.plan || "—") + "</b></div>" +
+                    "<div class=\"muted\">Payment: <b>" + escapeHtml(s.paymentMethod || "—") + "</b></div>" +
+                    "<div class=\"muted\">Asaas Customer: <code>" + escapeHtml(s.asaasCustomerId || "—") + "</code></div>" +
+                    "<div class=\"muted\">Asaas Subscription: <code>" + escapeHtml(s.asaasSubscriptionId || "—") + "</code></div>" +
+                  "</div>" +
+                "</div>" +
+
+                "<div class=\"hr\"></div>" +
+                "<details>" +
+                  "<summary class=\"muted\">Ver JSON completo (inclui perfil da empresa)</summary>" +
+                  "<pre style=\"white-space:pre-wrap;\">" + escapeHtml(JSON.stringify(s, null, 2)) + "</pre>" +
+                "</details>"
+              );
 
               row.querySelector("td").innerHTML = header + details;
               return;
@@ -1064,7 +1076,7 @@ router.get("/", async (req, res) => {
           }
 
           function toggleRow(wa){
-            const row = document.getElementById(`exp_${wa}`);
+            const row = document.getElementById("exp_" + String(wa));
             if (!row) return;
             row.style.display = "none";
           }
