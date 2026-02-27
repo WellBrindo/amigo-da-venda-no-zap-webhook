@@ -971,7 +971,7 @@ router.get("/", async (req, res) => {
             return { r, j };
           }
 
-          async function reloadUsers(){
+          async async function reloadUsers(){
             const limit = Number(document.getElementById("uLimit")?.value || 200);
             const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
 
