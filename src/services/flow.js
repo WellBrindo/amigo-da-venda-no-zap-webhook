@@ -1531,4 +1531,4 @@ async function ensureAsaasCustomer({ waId, fullName, cpfCnpj }) {
   if (!customer?.id) throw new Error("Asaas: customer not created");
   await setAsaasCustomerId(waId, customer.id);
   return customer.id;
-}
+}\n// EOF
