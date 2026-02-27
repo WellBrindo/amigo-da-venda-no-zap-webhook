@@ -201,6 +201,7 @@ function layoutBase({ title, activePath = "/admin", content = "", headExtra = ""
 
 function renderSidebar(activePath){
   const ap = String(activePath||"");
+  const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h");
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
     return `<a class="item ${active}" href="${href}"><span>${icon||"•"}</span><span>${escapeHtml(label)}</span></a>`;
@@ -232,8 +233,9 @@ function renderSidebar(activePath){
         ${item("/admin/campaigns-ui", "Campanhas", "📦")}
       </details>
 
-      <details>
+      <details ${usersOpen ? "open" : ""}>
         <summary>👥 Usuários <span>▾</span></summary>
+        ${item("/admin/users-list-ui", "Lista de usuários", "📋")}
         ${item("/admin/users-ui", "Ações / Consulta", "👤")}
         ${item("/admin/window24h-ui", "Janela 24h", "🕒")}
       </details>
@@ -864,12 +866,12 @@ router.get("/", async (req, res) => {
   });
 
   // -----------------------------
-  // 👥 Usuários (UI) — ações que antes eram apenas por URL
+  // 👥 Usuários — Lista (UI)
   // -----------------------------
-  router.get("/users-ui", async (req, res) => {
+  router.get("/users-list-ui", async (req, res) => {
     const html = layoutBase({
-      title: "Usuários",
-      activePath: "/admin/users-ui",
+      title: "Usuários • Lista",
+      activePath: "/admin/users-list-ui",
       content: `
         <div class="card pad">
           <div class="row" style="justify-content:space-between;">
@@ -912,10 +914,184 @@ router.get("/", async (req, res) => {
           </div>
         </div>
 
-        <div style="height:14px;"></div>
+        <script>
+          let _users = [];
+          let _usersMeta = { total: 0, offset: 0, limit: 0 };
 
+          function fmtTs(ts){
+            if (!ts) return "—";
+            const d = new Date(ts);
+            if (Number.isNaN(d.getTime())) return "—";
+            return d.toLocaleString("pt-BR");
+          }
+
+          function windowLabel(u){
+            if (!u.lastInboundTs) return "—";
+            const exp = u.windowExpiresAt ? fmtTs(u.windowExpiresAt) : "—";
+            return u.inWindow ? `Ativa (até ${exp})` : `Fora (expirou em ${exp})`;
+          }
+
+          function escapeHtml(s){
+            const v = String(s ?? "");
+            return v
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;")
+              .replace(/"/g, "&quot;")
+              .replace(/'/g, "&#39;");
+          }
+
+          async function fetchJson(url, opt){
+            const r = await fetch(url, opt);
+            const j = await r.json().catch(()=>({}));
+            return { r, j };
+          }
+
+          async function reloadUsers(){
+            const limit = Number(document.getElementById("uLimit")?.value || 200);
+            const { r, j } = await fetchJson(`/admin/users/list?limit=${encodeURIComponent(limit)}`);
+            if (!r.ok || !j.ok) {
+              document.getElementById("uTbody").innerHTML = `<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>`;
+              return;
+            }
+            _users = j.items || [];
+            _usersMeta = { total: j.total || 0, offset: j.offset || 0, limit: j.limit || limit };
+            renderUsers();
+          }
+
+          function renderUsers(){
+            const q = (document.getElementById("uSearch")?.value || "").trim().toLowerCase();
+            const items = !_users?.length ? [] : _users.filter((u) => {
+              if (!q) return true;
+              return String(u.waId || "").includes(q) || String(u.fullName || "").toLowerCase().includes(q);
+            });
+
+            document.getElementById("uMeta").textContent = `${items.length} exibidos • Total: ${_usersMeta.total}`;
+
+            if (!items.length){
+              document.getElementById("uTbody").innerHTML = `<tr><td colspan="6" class="muted">Nenhum usuário encontrado.</td></tr>`;
+              return;
+            }
+
+            document.getElementById("uTbody").innerHTML = items.map((u) => {
+              const name = escapeHtml(u.fullName || "—");
+              const wa = escapeHtml(u.waId || "");
+              const st = escapeHtml(u.status || "");
+              const pl = escapeHtml(u.plan || "");
+              const win = escapeHtml(windowLabel(u));
+
+              return `
+                <tr>
+                  <td>${name}</td>
+                  <td><code>${wa}</code></td>
+                  <td>${st}</td>
+                  <td>${pl || "—"}</td>
+                  <td>${win}</td>
+                  <td>
+                    <button onclick="expandUser('${wa}')">Expandir</button>
+                    <button onclick="openActions('${wa}')">Abrir</button>
+                  </td>
+                </tr>
+                <tr id="exp_${wa}" style="display:none;">
+                  <td colspan="6">
+                    <div class="muted">Carregando...</div>
+                  </td>
+                </tr>
+              `;
+            }).join("");
+          }
+
+          async function expandUser(wa){
+            const row = document.getElementById(`exp_${wa}`);
+            if (!row) return;
+
+            if (row.style.display === "none"){
+              row.style.display = "";
+              row.querySelector("td").innerHTML = `<div class="muted">Carregando...</div>`;
+
+              const { r, j } = await fetchJson(`/admin/users/details?waId=${encodeURIComponent(wa)}`);
+              if (!r.ok || !j.ok) {
+                row.querySelector("td").innerHTML = `<div class="muted">Erro ao carregar detalhes.</div>`;
+                return;
+              }
+
+              const s = j.snapshot || {};
+              const header = `
+                <div class="row" style="justify-content:space-between; align-items:center;">
+                  <div>
+                    <div><b>${escapeHtml(s.fullName || "—")}</b> <span class="muted">(${escapeHtml(wa)})</span></div>
+                    <div class="muted">Status: <b>${escapeHtml(s.status || "—")}</b> • Plano: <b>${escapeHtml(s.plan || "—")}</b> • Janela 24h: <b>${escapeHtml(j.inWindow ? "Ativa" : "Fora")}</b></div>
+                  </div>
+                  <div class="row">
+                    <button onclick="openActions('${wa}')">Abrir nas ações</button>
+                    <button onclick="toggleRow('${wa}')">Fechar</button>
+                  </div>
+                </div>
+              `;
+
+              const details = `
+                <div class="hr"></div>
+                <div class="grid cols2">
+                  <div class="kpi">
+                    <div class="t">Dados pessoais</div>
+                    <div class="muted">Nome: <b>${escapeHtml(s.fullName || "—")}</b></div>
+                    <div class="muted">Documento: <b>${escapeHtml((s.doc && (s.doc.docType ? (s.doc.docType + " • " + s.doc.docLast4) : "")) || "—")}</b></div>
+                    <div class="muted">Cidade/UF: <b>${escapeHtml(s.billingCityState || "—")}</b></div>
+                    <div class="muted">Endereço: <b>${escapeHtml(s.billingAddress || "—")}</b></div>
+                  </div>
+                  <div class="kpi">
+                    <div class="t">Assinatura / Cobrança</div>
+                    <div class="muted">Status: <b>${escapeHtml(s.status || "—")}</b></div>
+                    <div class="muted">Plano: <b>${escapeHtml(s.plan || "—")}</b></div>
+                    <div class="muted">Payment: <b>${escapeHtml(s.paymentMethod || "—")}</b></div>
+                    <div class="muted">Asaas Customer: <code>${escapeHtml(s.asaasCustomerId || "—")}</code></div>
+                    <div class="muted">Asaas Subscription: <code>${escapeHtml(s.asaasSubscriptionId || "—")}</code></div>
+                  </div>
+                </div>
+
+                <div class="hr"></div>
+                <details>
+                  <summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>
+                  <pre style="white-space:pre-wrap;">${escapeHtml(JSON.stringify(s, null, 2))}</pre>
+                </details>
+              `;
+
+              row.querySelector("td").innerHTML = header + details;
+              return;
+            }
+
+            row.style.display = "none";
+          }
+
+          function toggleRow(wa){
+            const row = document.getElementById(`exp_${wa}`);
+            if (!row) return;
+            row.style.display = "none";
+          }
+
+          function openActions(wa){
+            window.location.href = "/admin/users-ui?waId=" + encodeURIComponent(wa);
+          }
+
+          // auto-load
+          setTimeout(() => { reloadUsers().catch(()=>{}); }, 50);
+        </script>
+      `,
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  // -----------------------------
+  // 👥 Usuários — Ações/Consulta (UI)
+  // -----------------------------
+  router.get("/users-ui", async (req, res) => {
+    const html = layoutBase({
+      title: "Usuários • Ações",
+      activePath: "/admin/users-ui",
+      content: `
         <div class="card pad">
-
           <div class="row" style="justify-content:space-between;">
             <div>
               <h3 style="margin:0 0 6px 0;">Ações por waId</h3>
@@ -963,164 +1139,6 @@ router.get("/", async (req, res) => {
         </div>
 
         <script>
-          let _users = [];
-          let _usersMeta = { total: 0, offset: 0, limit: 0 };
-
-          function fmtTs(ts){
-            if (!ts) return "—";
-            const d = new Date(ts);
-            if (Number.isNaN(d.getTime())) return "—";
-            return d.toLocaleString("pt-BR");
-          }
-
-          function windowLabel(u){
-            if (!u.lastInboundTs) return "—";
-            const exp = u.windowExpiresAt ? fmtTs(u.windowExpiresAt) : "—";
-            return u.inWindow ? \`Ativa (até \${exp})\` : \`Fora (expirou em \${exp})\`;
-          }
-
-          function escapeHtml(s){
-            const v = String(s ?? "");
-            return v
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;")
-              .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#39;");
-          }
-
-          async function reloadUsers(){
-            const limit = Number(document.getElementById("uLimit")?.value || 200);
-            const { r, j } = await fetchJson(\`/admin/users/list?limit=\${encodeURIComponent(limit)}\`);
-            if (!r.ok || !j.ok) {
-              document.getElementById("uTbody").innerHTML = \`<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>\`;
-              return;
-            }
-            _users = j.items || [];
-            _usersMeta = { total: j.total || 0, offset: j.offset || 0, limit: j.limit || limit };
-            renderUsers();
-          }
-
-          function renderUsers(){
-            const q = (document.getElementById("uSearch")?.value || "").trim().toLowerCase();
-            const items = !_users?.length ? [] : _users.filter((u) => {
-              if (!q) return true;
-              return String(u.waId || "").includes(q) || String(u.fullName || "").toLowerCase().includes(q);
-            });
-
-            document.getElementById("uMeta").textContent = \`\${items.length} exibidos • Total: \${_usersMeta.total}\`;
-
-            if (!items.length){
-              document.getElementById("uTbody").innerHTML = \`<tr><td colspan="6" class="muted">Nenhum usuário encontrado.</td></tr>\`;
-              return;
-            }
-
-            document.getElementById("uTbody").innerHTML = items.map((u) => {
-              const name = escapeHtml(u.fullName || "—");
-              const wa = escapeHtml(u.waId || "");
-              const st = escapeHtml(u.status || "");
-              const pl = escapeHtml(u.plan || "");
-              const win = escapeHtml(windowLabel(u));
-
-              return \`
-                <tr>
-                  <td>\${name}</td>
-                  <td><code>\${wa}</code></td>
-                  <td>\${st}</td>
-                  <td>\${pl || "—"}</td>
-                  <td>\${win}</td>
-                  <td>
-                    <button onclick="expandUser('\${wa}')">Expandir</button>
-                    <button onclick="quickOpen('\${wa}')">Abrir</button>
-                  </td>
-                </tr>
-                <tr id="exp_\${wa}" style="display:none;">
-                  <td colspan="6">
-                    <div class="muted">Carregando...</div>
-                  </td>
-                </tr>
-              \`;
-            }).join("");
-          }
-
-          async function expandUser(wa){
-            const row = document.getElementById(\`exp_\${wa}\`);
-            if (!row) return;
-
-            if (row.style.display === "none"){
-              row.style.display = "";
-              row.querySelector("td").innerHTML = \`<div class="muted">Carregando...</div>\`;
-
-              const { r, j } = await fetchJson(\`/admin/users/details?waId=\${encodeURIComponent(wa)}\`);
-              if (!r.ok || !j.ok) {
-                row.querySelector("td").innerHTML = \`<div class="muted">Erro ao carregar detalhes.</div>\`;
-                return;
-              }
-
-              const s = j.snapshot || {};
-              const header = \`
-                <div class="row" style="justify-content:space-between; align-items:center;">
-                  <div>
-                    <div><b>\${escapeHtml(s.fullName || "—")}</b> <span class="muted">(\${escapeHtml(wa)})</span></div>
-                    <div class="muted">Status: <b>\${escapeHtml(s.status || "—")}</b> • Plano: <b>\${escapeHtml(s.plan || "—")}</b> • Janela 24h: <b>\${escapeHtml(j.inWindow ? "Ativa" : "Fora")}</b></div>
-                  </div>
-                  <div class="row">
-                    <button onclick="quickOpen('\${wa}')">Abrir nas ações</button>
-                    <button onclick="toggleRow('\${wa}')">Fechar</button>
-                  </div>
-                </div>
-              \`;
-
-              const details = \`
-                <div class="hr"></div>
-                <div class="grid cols2">
-                  <div class="kpi">
-                    <div class="t">Dados pessoais</div>
-                    <div class="muted">Nome: <b>\${escapeHtml(s.fullName || "—")}</b></div>
-                    <div class="muted">Documento: <b>\${escapeHtml((s.doc && (s.doc.docType ? (s.doc.docType + " • " + s.doc.docLast4) : "")) || "—")}</b></div>
-                    <div class="muted">Cidade/UF: <b>\${escapeHtml(s.billingCityState || "—")}</b></div>
-                    <div class="muted">Endereço: <b>\${escapeHtml(s.billingAddress || "—")}</b></div>
-                  </div>
-                  <div class="kpi">
-                    <div class="t">Assinatura / Cobrança</div>
-                    <div class="muted">Status: <b>\${escapeHtml(s.status || "—")}</b></div>
-                    <div class="muted">Plano: <b>\${escapeHtml(s.plan || "—")}</b></div>
-                    <div class="muted">Payment: <b>\${escapeHtml(s.paymentMethod || "—")}</b></div>
-                    <div class="muted">Asaas Customer: <code>\${escapeHtml(s.asaasCustomerId || "—")}</code></div>
-                    <div class="muted">Asaas Subscription: <code>\${escapeHtml(s.asaasSubscriptionId || "—")}</code></div>
-                  </div>
-                </div>
-
-                <div class="hr"></div>
-                <details>
-                  <summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>
-                  <pre style="white-space:pre-wrap;">\${escapeHtml(JSON.stringify(s, null, 2))}</pre>
-                </details>
-              \`;
-
-              row.querySelector("td").innerHTML = header + details;
-              return;
-            }
-
-            row.style.display = "none";
-          }
-
-          function toggleRow(wa){
-            const row = document.getElementById(\`exp_\${wa}\`);
-            if (!row) return;
-            row.style.display = "none";
-          }
-
-          function quickOpen(wa){
-            document.getElementById('waId').value = wa;
-            loadSnapshot();
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-          }
-
-          // auto-load
-          setTimeout(() => { reloadUsers().catch(()=>{}); }, 50);
-
-
           function waId(){
             return (document.getElementById('waId').value || '').trim();
           }
@@ -1130,46 +1148,46 @@ router.get("/", async (req, res) => {
             return { r, j };
           }
           function renderUser(j){
-            const u = j?.user || j?.user?.snapshot || j?.user?.snapshot || j?.user;
-            const snap = j?.user || j?.userSnapshot || j?.user?.snapshot || j?.user;
-            const user = j?.user || j?.userSnapshot || j?.user;
-            const s = (j?.user && j.user.status) ? j.user : (j?.userSnapshot || j?.user || j?.user?.snapshot || {});
-            const status = (s?.status || '—');
-            const plan = (s?.plan || '—');
-            const quotaUsed = (s?.quotaUsed ?? '—');
-            const trialUsed = (s?.trialUsed ?? '—');
-            document.getElementById('kStatus').textContent = String(status);
-            document.getElementById('kPlan').textContent = 'Plano: ' + String(plan);
-            document.getElementById('kUsage').textContent = String(quotaUsed);
-            document.getElementById('kUsage2').textContent = 'trialUsed: ' + String(trialUsed);
+            const snap = j?.user || j?.userSnapshot || j?.user?.snapshot || j?.snapshot || {};
+            document.getElementById('kStatus').textContent = snap.status || '—';
+            document.getElementById('kPlan').textContent = 'Plano: ' + (snap.plan || '—');
+
+            const quotaUsed = Number(snap.quotaUsed ?? 0);
+            const trialUsed = Number(snap.trialUsed ?? 0);
+            const quotaStr = (snap.status === 'TRIAL')
+              ? (trialUsed + ' (trialUsed)')
+              : (quotaUsed + ' (quotaUsed)');
+
+            document.getElementById('kUsage').textContent = quotaStr;
+            document.getElementById('kUsage2').textContent = 'templatePrompted: ' + String(snap.templatePrompted ?? '—');
+
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
           }
 
           async function loadSnapshot(){
             const id = waId(); if(!id){ alert('Informe o waId'); return; }
-            const {j} = await fetchJson('/admin/state-test/get?waId=' + encodeURIComponent(id));
-            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+            const {r,j} = await fetchJson('/admin/users/snapshot?waId=' + encodeURIComponent(id));
+            if(!r.ok || !j.ok){ alert('Falha ao consultar.'); document.getElementById('out').textContent = JSON.stringify(j, null, 2); return; }
             renderUser(j);
-          }
-
-          async function resetTrial(){
-            const id = waId(); if(!id){ alert('Informe o waId'); return; }
-            const {j} = await fetchJson('/admin/state-test/reset-trial?waId=' + encodeURIComponent(id));
-            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-            renderUser(j);
-          }
-
-          async function resetUser(){
-            const id = waId(); if(!id){ alert('Informe o waId'); return; }
-            if(!confirm('Isso vai remover TODO o estado do usuário (teste) como se nunca tivesse escrito. Continuar?')) return;
-            const {j} = await fetchJson('/admin/state-test/reset-user?waId=' + encodeURIComponent(id));
-            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-            // Não chamamos get snapshot automaticamente, porque o reset remove as keys e o snapshot recria.
-            // Se quiser ver, clique em Consultar.
           }
 
           async function touchWindow(){
             const id = waId(); if(!id){ alert('Informe o waId'); return; }
             const {j} = await fetchJson('/admin/window24h/touch?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+          }
+
+          async function resetTrial(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            if(!confirm('Resetar TRIAL (status TRIAL, plan vazio, quotaUsed/trialUsed = 0, limpa lastPrompt)?')) return;
+            const {j} = await fetchJson('/admin/state-test/reset-trial?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+          }
+
+          async function resetUser(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            if(!confirm('RESET TOTAL: remove estado, métricas, janela 24h e overrides de copy. Confirmar?')) return;
+            const {j} = await fetchJson('/admin/state-test/reset-user?waId=' + encodeURIComponent(id));
             document.getElementById('out').textContent = JSON.stringify(j, null, 2);
           }
 
@@ -1181,8 +1199,6 @@ router.get("/", async (req, res) => {
 
           async function setStatus(st){
             const id = waId(); if(!id){ alert('Informe o waId'); return; }
-            // Mantemos como operação via endpoints existentes (estável). Se quiser UI completa de status/plan/quota, evoluímos depois.
-            const body = { status: st };
             const {j} = await fetchJson('/admin/users/status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ waId:id, status:st }) });
             document.getElementById('out').textContent = JSON.stringify(j, null, 2);
           }
