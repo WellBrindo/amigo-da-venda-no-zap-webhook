@@ -491,13 +491,13 @@ router.get("/dashboard", async (req, res) => {
 
         <h4 style="margin:0 0 6px 0;">Usuários</h4>
         <div class="row">
-          <span class="pill">Total: <b id="uTotal">—</b></span>
-          <span class="pill">TRIAL: <b id="uTrial">—</b></span>
-          <span class="pill">ACTIVE: <b id="uActive">—</b></span>
-          <span class="pill">WAIT_PLAN: <b id="uWait">—</b></span>
-          <span class="pill">PAYMENT_PENDING: <b id="uPayPend">—</b></span>
-          <span class="pill">BLOCKED: <b id="uBlocked">—</b></span>
-          <span class="pill">UNKNOWN: <b id="uUnknown">—</b></span>
+          <span class="pill">👥 Total de Usuários: <b id="uTotal">—</b></span>
+          <span class="pill">🧪 Em Teste: <b id="uTrial">—</b></span>
+          <span class="pill">🟢 Assinantes Ativos: <b id="uActive">—</b></span>
+          <span class="pill">⏳ Aguardando Plano: <b id="uWait">—</b></span>
+          <span class="pill">💳 Pagamento Pendente: <b id="uPayPend">—</b></span>
+          <span class="pill">🔒 Bloqueados: <b id="uBlocked">—</b></span>
+          <span class="pill">⚠️ Inconsistentes: <b id="uUnknown">—</b></span>
         </div>
         <div id="usersError" class="muted" style="margin-top:8px;"></div>
 
@@ -971,7 +971,7 @@ router.get("/", async (req, res) => {
             return { r, j };
           }
 
-          async async function reloadUsers(){
+          async function reloadUsers(){
             const limit = Number(document.getElementById("uLimit")?.value || 200);
             const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
 
