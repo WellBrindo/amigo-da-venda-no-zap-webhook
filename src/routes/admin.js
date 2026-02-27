@@ -67,6 +67,30 @@ function escapeHtml(s) {
     .replaceAll("'", "&#39;");
 }
 
+
+// -----------------------------
+// Concurrency-safe helper (evita tempestade de requests no Upstash em rotas do Admin)
+// -----------------------------
+async function mapLimit(items, limit, worker) {
+  const arr = Array.isArray(items) ? items : [];
+  const n = arr.length;
+  if (n === 0) return [];
+  const lim = Math.max(1, Math.min(Number(limit) || 1, n));
+  const out = new Array(n);
+  let cursor = 0;
+
+  const runners = Array.from({ length: lim }, async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= n) break;
+      out[i] = await worker(arr[i], i);
+    }
+  });
+
+  await Promise.all(runners);
+  return out;
+}
+
 function layoutBase({ title, activePath = "/admin", content = "", headExtra = "", scriptExtra = "" }) {
   const menu = renderSidebar(activePath);
   return `<!doctype html>
@@ -1258,12 +1282,19 @@ router.get("/", async (req, res) => {
       const slice = ids.slice(offset, offset + limit);
 
       const now = nowMs();
-      const items = await Promise.all(
-        slice.map(async (waId) => {
-          const snap = await getUserSnapshot(waId);
-          const lastInboundTs = await getLastInboundTs(waId);
-          const inWindow = lastInboundTs ? now - Number(lastInboundTs) < 24 * 60 * 60 * 1000 : false;
-          const windowExpiresAt = lastInboundTs ? Number(lastInboundTs) + 24 * 60 * 60 * 1000 : 0;
+
+      const items = await mapLimit(
+        slice,
+        20,
+        async (waId) => {
+          const [snap, lastInboundTsRaw] = await Promise.all([
+            getUserSnapshot(waId),
+            getLastInboundTs(waId),
+          ]);
+
+          const lastInboundTs = Number(lastInboundTsRaw) || 0;
+          const inWindow = lastInboundTs ? now - lastInboundTs < 24 * 60 * 60 * 1000 : false;
+          const windowExpiresAt = lastInboundTs ? lastInboundTs + 24 * 60 * 60 * 1000 : 0;
 
           return {
             waId,
@@ -1271,10 +1302,10 @@ router.get("/", async (req, res) => {
             plan: snap.plan || "",
             status: snap.status || "",
             inWindow,
-            lastInboundTs: Number(lastInboundTs) || 0,
+            lastInboundTs,
             windowExpiresAt,
           };
-        })
+        }
       );
 
       return res.status(200).json({
