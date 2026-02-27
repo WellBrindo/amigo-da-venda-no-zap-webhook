@@ -1289,8 +1289,11 @@ export async function handleInboundText({ waId, text }) {
       }
       await setPendingBizProfile(id, profile);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_PRODUCTS);
-      return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP7_PROD  // 6) Documento (CPF/CNPJ)
-  if (status === ST.WAIT_DOC) {
+      return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP7_PROD", { waId: id }));
+    }
+
+    // 6) Documento (CPF/CNPJ)
+    if (status === ST.WAIT_DOC) {
     const v = validateDoc(inbound);
     if (!v.ok) return reply(await msgInvalidDoc(id));
 
@@ -1303,37 +1306,37 @@ export async function handleInboundText({ waId, text }) {
     // Após documento, coletar cidade/estado + endereço (para cadastro/admin)
     await setUserStatus(id, ST.WAIT_BILLING_CITYSTATE);
     return reply(await msgAskBillingCityState(id));
-  }
+    }
 
-  // 6.1) Cidade/Estado
-  if (status === ST.WAIT_BILLING_CITYSTATE) {
+    // 6.1) Cidade/Estado
+    if (status === ST.WAIT_BILLING_CITYSTATE) {
     const t = (inbound || "").trim();
     const skip = wantsSkip(t);
     if (!skip) await setUserBillingCityState(id, t);
     await setUserStatus(id, ST.WAIT_BILLING_ADDRESS);
     return reply(await msgAskBillingAddress(id));
-  }
+    }
 
-  // 6.2) Endereço + cria cobrança/assinatura
-  if (status === ST.WAIT_BILLING_ADDRESS) {
+    // 6.2) Endereço + cria cobrança/assinatura
+    if (status === ST.WAIT_BILLING_ADDRESS) {
     const t = (inbound || "").trim();
     const skip = wantsSkip(t);
     if (!skip) await setUserBillingAddress(id, t);
 
     const r = await startBillingPaymentFlow(id);
     return reply(r.msg);
-  }
+    }
 
-  // 7) Pagamento pendente
-  if (status === ST.PAYMENT_PENDING) {
+    // 7) Pagamento pendente
+    if (status === ST.PAYMENT_PENDING) {
     const planCode = await getUserPlan(id);
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     const planTxt = plan ? `Plano: *${plan.name}*.` : "";
     return reply(await getCopyText("FLOW_PAYMENT_PENDING", { waId: id, vars: { planTxt } }));
-  }
+    }
 
-  // 8) ACTIVE
-  if (status === ST.ACTIVE) {
+    // 8) ACTIVE
+    if (status === ST.ACTIVE) {
     if (wantsOkCommand(inbound)) {
       await clearLastAd(id);
       await clearRefineCount(id);
@@ -1342,10 +1345,10 @@ export async function handleInboundText({ waId, text }) {
     }
     if (isGreeting(inbound)) return reply(await msgAskProduct(id));
     return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false, currentStatus: status });
-  }
+    }
 
-  // fallback seguro
-  return reply(await getCopyText("FLOW_FALLBACK_UNKNOWN", { waId: id }));
+    // fallback seguro
+    return reply(await getCopyText("FLOW_FALLBACK_UNKNOWN", { waId: id }));
 }
 
 async function resolveMaxRefinementsForUser(waId, isTrial) {
