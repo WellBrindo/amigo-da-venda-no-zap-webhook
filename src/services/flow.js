@@ -1386,14 +1386,8 @@ export async function handleInboundText({ waId, text }) {
       await setUserStatus(id, ST.PAYMENT_PENDING);
 
       const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
-      const line1 = "✅ Pronto! Gerei sua cobrança via *PIX*.
-
-";
-      const line2 = url ? `Pague por aqui: ${url}
-
-` : "Pague pelo link dentro do Asaas.
-
-";
+      const line1 = "✅ Pronto! Gerei sua cobrança via *PIX*.\n\n";
+      const line2 = url ? `Pague por aqui: ${url}\n\n` : "Pague pelo link dentro do Asaas.\n\n";
       const line3 = "Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀";
       return reply(line1 + line2 + line3);
     }
@@ -1410,14 +1404,8 @@ export async function handleInboundText({ waId, text }) {
     await setUserStatus(id, ST.PAYMENT_PENDING);
 
     const url = link?.url || link?.paymentLink || link?.link || "";
-    const line1 = "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).
-
-";
-    const line2 = url ? `Finalize por aqui: ${url}
-
-` : "Finalize pelo link no Asaas.
-
-";
+    const line1 = "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).\n\n";
+    const line2 = url ? `Finalize por aqui: ${url}\n\n` : "Finalize pelo link no Asaas.\n\n";
     const line3 = "Assim que confirmar, seu plano ativa automaticamente. 🚀";
     return reply(line1 + line2 + line3);
   }
