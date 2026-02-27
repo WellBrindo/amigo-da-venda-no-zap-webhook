@@ -65,6 +65,10 @@ const keyDocLegacy = (waId) => `user:${waId}:docDigits`;
 
 const keyPaymentMethod = (waId) => `user:${waId}:paymentMethod`;
 
+// ✅ Dados fiscais para emissão (sem CPF completo)
+const keyBillingCityState = (waId) => `user:${waId}:billingCityState`;
+const keyBillingAddress = (waId) => `user:${waId}:billingAddress`;
+
 const keyAsaasCustomerId = (waId) => `user:${waId}:asaasCustomerId`;
 const keyAsaasSubscriptionId = (waId) => `user:${waId}:asaasSubscriptionId`;
 
@@ -84,12 +88,6 @@ const keyBizProfile = (waId) => `user:${waId}:bizProfile`;
 const keyPendingBizProfile = (waId) => `user:${waId}:pendingBizProfile`;
 // Status anterior (para estados transitórios como escolha de template / salvar perfil)
 const keyPrevStatus = (waId) => `user:${waId}:prevStatus`;
-
-// ===================== BILLING INFO (para cobrança / cadastro) =====================
-// Cidade/Estado informado pelo usuário (ex: "Atibaia/SP")
-const keyBillingCityState = (waId) => `user:${waId}:billingCityState`;
-// Endereço informado pelo usuário (rua, nº, complemento etc)
-const keyBillingAddress = (waId) => `user:${waId}:billingAddress`;
 
 
 function safeStr(v) {
@@ -552,15 +550,14 @@ export async function clearPaymentMethod(waId) {
 }
 
 
-// ===================== Billing Info =====================
-export async function getUserBillingCityState(waId) {
-  const v = await redisGet(keyBillingCityState(waId));
-  return safeStr(v);
+// ===================== Dados fiscais (emissão de cobrança) =====================
+export async function getBillingCityState(waId) {
+  return safeStr(await redisGet(keyBillingCityState(waId)));
 }
 
-export async function setUserBillingCityState(waId, cityState) {
+export async function setBillingCityState(waId, value) {
   await indexUser(waId);
-  const v = safeStr(cityState);
+  const v = safeStr(value);
   if (!v) {
     await redisDel(keyBillingCityState(waId));
     return "";
@@ -569,20 +566,19 @@ export async function setUserBillingCityState(waId, cityState) {
   return v;
 }
 
-export async function clearUserBillingCityState(waId) {
+export async function clearBillingCityState(waId) {
   await indexUser(waId);
   await redisDel(keyBillingCityState(waId));
   return true;
 }
 
-export async function getUserBillingAddress(waId) {
-  const v = await redisGet(keyBillingAddress(waId));
-  return safeStr(v);
+export async function getBillingAddress(waId) {
+  return safeStr(await redisGet(keyBillingAddress(waId)));
 }
 
-export async function setUserBillingAddress(waId, address) {
+export async function setBillingAddress(waId, value) {
   await indexUser(waId);
-  const v = safeStr(address);
+  const v = safeStr(value);
   if (!v) {
     await redisDel(keyBillingAddress(waId));
     return "";
@@ -591,7 +587,7 @@ export async function setUserBillingAddress(waId, address) {
   return v;
 }
 
-export async function clearUserBillingAddress(waId) {
+export async function clearBillingAddress(waId) {
   await indexUser(waId);
   await redisDel(keyBillingAddress(waId));
   return true;
@@ -770,8 +766,6 @@ export async function resetUserToTrial(waId) {
     clearPrevStatus(waId),
     clearBizProfile(waId),
     clearPendingBizProfile(waId),
-    clearUserBillingCityState(waId),
-    clearUserBillingAddress(waId),
     setCardValidUntil(waId, ""),
     setCardCanceledAt(waId, ""),
   ]);
@@ -809,8 +803,6 @@ export async function resetUserAsNew(waId) {
     keyPrevStatus(id),
     keyBizProfile(id),
     keyPendingBizProfile(id),
-    keyBillingCityState(id),
-    keyBillingAddress(id),
   ];
 
   // best-effort: apaga todas as chaves conhecidas
@@ -841,14 +833,14 @@ export async function getUserSnapshot(waId) {
     fullName,
     docMasked,
     paymentMethod,
+    billingCityState,
+    billingAddress,
+    bizProfile,
+    pendingBizProfile,
     asaasCustomerId,
     asaasSubscriptionId,
     cardValidUntil,
     cardCanceledAt,
-    bizProfile,
-    pendingBizProfile,
-    billingCityState,
-    billingAddress,
   ] = await Promise.all([
     getUserStatus(waId),
     getUserPlan(waId),
@@ -859,14 +851,14 @@ export async function getUserSnapshot(waId) {
     getUserFullName(waId),
     getUserDocMasked(waId),
     getPaymentMethod(waId),
+    getBillingCityState(waId),
+    getBillingAddress(waId),
+    getBizProfile(waId),
+    getPendingBizProfile(waId),
     getAsaasCustomerId(waId),
     getAsaasSubscriptionId(waId),
     getCardValidUntil(waId),
     getCardCanceledAt(waId),
-    getBizProfile(waId),
-    getPendingBizProfile(waId),
-    getUserBillingCityState(waId),
-    getUserBillingAddress(waId),
   ]);
 
   return {
@@ -880,13 +872,13 @@ export async function getUserSnapshot(waId) {
     fullName: fullName || "",
     doc: docMasked, // {docType, docLast4}
     paymentMethod: paymentMethod || "",
-    asaasCustomerId: asaasCustomerId || "",
-    asaasSubscriptionId: asaasSubscriptionId || "",
-    cardValidUntil: cardValidUntil || "",
-    cardCanceledAt: cardCanceledAt || "",
     billingCityState: billingCityState || "",
     billingAddress: billingAddress || "",
     bizProfile: bizProfile || null,
     pendingBizProfile: pendingBizProfile || null,
+    asaasCustomerId: asaasCustomerId || "",
+    asaasSubscriptionId: asaasSubscriptionId || "",
+    cardValidUntil: cardValidUntil || "",
+    cardCanceledAt: cardCanceledAt || "",
   };
 }
