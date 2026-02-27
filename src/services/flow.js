@@ -50,10 +50,10 @@ import {
   setPaymentMethod,
   getUserDocMasked,
   setUserDocMasked,
-  getUserBillingCityState,
-  setUserBillingCityState,
-  getUserBillingAddress,
-  setUserBillingAddress,
+  getBillingCityState,
+  setBillingCityState,
+  getBillingAddress,
+  setBillingAddress,
   getAsaasCustomerId,
   setAsaasCustomerId,
   getAsaasSubscriptionId,
@@ -103,7 +103,7 @@ const ST = Object.freeze({
   WAIT_PLAN: "WAIT_PLAN",
   WAIT_PAYMENT_METHOD: "WAIT_PAYMENT_METHOD",
   WAIT_DOC: "WAIT_DOC",
-  WAIT_BILLING_CITYSTATE: "WAIT_BILLING_CITYSTATE",
+  WAIT_BILLING_CITY_STATE: "WAIT_BILLING_CITY_STATE",
   WAIT_BILLING_ADDRESS: "WAIT_BILLING_ADDRESS",
 
   WAIT_MENU: "WAIT_MENU",
@@ -617,76 +617,14 @@ async function msgInvalidDoc(waId){
   return await getCopyText("FLOW_INVALID_DOC", { waId });
 }
 
-
 async function msgAskBillingCityState(waId){
-  // ⚠️ Literal por enquanto (evita key órfã no Copy Manager).
-  return "Perfeito! ✅\n\nAgora me diga sua *cidade e estado* (ex: Atibaia/SP).\n\nSe preferir pular por enquanto, digite: *PULAR*";
+  return "Perfeito! ✅ Agora preciso só de mais 2 informações para emitir sua cobrança.\n\n📍 Qual é sua *Cidade/UF*? (ex: Atibaia/SP)";
 }
 
 async function msgAskBillingAddress(waId){
-  // ⚠️ Literal por enquanto (evita key órfã no Copy Manager).
-  return "Agora me diga seu *endereço* (rua, número e, se quiser, complemento).\n\nSe preferir pular por enquanto, digite: *PULAR*";
+  return "Ótimo! ✅ Agora me diga seu *endereço* (rua, número, bairro).\n\nSe for apenas atendimento online, responda: *APENAS ONLINE*";
 }
 
-async function startBillingPaymentFlow(waId) {
-  const planCode = await getUserPlan(waId);
-  const plan = (await getMenuPlans()).find((p) => p.code === planCode);
-  if (!plan) {
-    await setUserStatus(waId, ST.WAIT_PLAN);
-    return { ok: false, msg: await msgPlansOnly() };
-  }
-
-  const pm = await getPaymentMethod(waId);
-  if (!pm) {
-    await setUserStatus(waId, ST.WAIT_PAYMENT_METHOD);
-    return { ok: false, msg: await msgAskPaymentMethod(waId, plan) };
-  }
-
-  // customer (CPF/CNPJ só em memória; não logar)
-  const customerIdExisting = await getAsaasCustomerId(waId);
-  if (!customerIdExisting) {
-    // Se não temos customerId, voltamos a pedir documento (não guardamos CPF/CNPJ completo).
-    await setUserStatus(waId, ST.WAIT_DOC);
-    return { ok: false, msg: await msgAskDoc(waId) };
-  }
-  const customerId = customerIdExisting;
-
-  // PIX mensal avulso
-  if (pm === "PIX") {
-    const pay = await createPixPayment({
-      customerId,
-      value: (Number(plan.priceCents) || 0) / 100,
-      description: `Amigo das Vendas - Plano ${plan.code} (PIX mensal)`,
-      externalReference: waId,
-      dueDate: todayISO(),
-    });
-
-    await setUserStatus(waId, ST.PAYMENT_PENDING);
-
-    const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
-    const line1 = "✅ Pronto! Gerei sua cobrança via *PIX*.\n\n";
-    const line2 = url ? `Pague por aqui: ${url}\n\n` : "Pague pelo link dentro do Asaas.\n\n";
-    const line3 = "Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀";
-    return { ok: true, msg: line1 + line2 + line3 };
-  }
-
-  // Cartão recorrente: Payment Link
-  const link = await createRecurringCardPaymentLink({
-    name: `Assinatura ${plan.name}`,
-    description: `Amigo das Vendas - Plano ${plan.code} (Cartão recorrente)`,
-    value: (Number(plan.priceCents) || 0) / 100,
-    externalReference: waId,
-    subscriptionCycle: "MONTHLY",
-  });
-
-  await setUserStatus(waId, ST.PAYMENT_PENDING);
-
-  const url = link?.url || link?.paymentLink || link?.link || "";
-  const line1 = "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).\n\n";
-  const line2 = url ? `Finalize por aqui: ${url}\n\n` : "Finalize pelo link no Asaas.\n\n";
-  const line3 = "Assim que confirmar, seu plano ativa automaticamente. 🚀";
-  return { ok: true, msg: line1 + line2 + line3 };
-}
 
 async function msgAfterAdAskTemplateChoice(waId, currentMode){
   return await getCopyText("FLOW_ASK_TEMPLATE_CHOICE", { waId });
@@ -1289,54 +1227,211 @@ export async function handleInboundText({ waId, text }) {
       }
       await setPendingBizProfile(id, profile);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_PRODUCTS);
-      return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP7_PROD", { waId: id }));
+      return reply(await getCopyText("FLOW_PROFILE_WIZARD_STEP7_PRODUCTS", { waId: id }));
     }
 
-    // 6) Documento (CPF/CNPJ)
-    if (status === ST.WAIT_DOC) {
+    // Etapa 7: lista de produtos
+    if (status === ST.WAIT_PROFILE_ADD_PRODUCTS) {
+      if (!wantsSkipCommand(inbound)) {
+        const url = normalizeUrlLike(inbound);
+        if (url) profile.productList = url;
+      }
+
+      // salva direto (o usuário escolheu "Adicionar dados")
+      await setBizProfile(id, profile);
+      await clearPendingBizProfile(id);
+
+      const prev = await getPrevStatus(id);
+      await clearPrevStatus(id);
+      if (prev && prev !== ST.WAIT_SAVE_PROFILE) await setUserStatus(id, prev);
+      else await setUserStatus(id, ST.WAIT_PRODUCT);
+
+      const isTrialNow = prev !== ST.ACTIVE;
+      const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
+      return replyMulti([await msgAfterSaveProfile(id, true, maxRef)]);
+    }
+  }
+
+// ✅ Se o usuário manda "oi" e ainda não tem nome, inicia onboarding
+  if (isGreeting(inbound)) {
+    const name = await getUserFullName(id);
+    if (!name) {
+      await setUserStatus(id, ST.WAIT_NAME);
+      return reply(await msgAskName(id));
+    }
+  }
+
+  // 1) Onboarding: nome
+  if (status === ST.WAIT_NAME) {
+    const name = inbound;
+    if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
+    await setUserFullName(id, name);
+    await setUserStatus(id, ST.WAIT_PRODUCT);
+    return reply(await msgAskProduct(id));
+  }
+
+  // 2) Onboarding: produto/serviço
+  if (status === ST.WAIT_PRODUCT) {
+    if (isGreeting(inbound)) return reply(await msgAskProduct(id));
+    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true, currentStatus: status });
+  }
+
+  // 3) Trial
+  if (status === ST.TRIAL) {
+    if (isGreeting(inbound)) return reply(await msgAskProduct(id));
+    return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: true, currentStatus: status });
+  }
+
+  // 4) Escolha de plano
+  if (status === ST.WAIT_PLAN) {
+    const choice = normalizeChoice(inbound);
+    const plan = await getPlanByChoice(choice);
+    if (!plan) return reply(await msgPlansOnly());
+
+    await setUserPlan(id, plan.code);
+    await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
+
+    return reply(await msgAskPaymentMethod(id, plan));
+  }
+
+  // 5) Forma de pagamento
+  if (status === ST.WAIT_PAYMENT_METHOD) {
+    const c = normalizeChoice(inbound);
+    if (c !== "1" && c !== "2") return reply(await getCopyText("FLOW_INVALID_PAYMENT_METHOD", { waId: id }));
+
+    const pm = c === "1" ? "CARD" : "PIX";
+    await setPaymentMethod(id, pm);
+    await setUserStatus(id, ST.WAIT_DOC);
+
+    return reply(await msgAskDoc(id));
+  }
+
+  // 6) Documento (CPF/CNPJ) + prepara cobrança (coleta dados fiscais antes de emitir)
+  if (status === ST.WAIT_DOC) {
     const v = validateDoc(inbound);
     if (!v.ok) return reply(await msgInvalidDoc(id));
 
-    // Guarda somente mascarado (⚠️ nunca guardar CPF/CNPJ completo)
+    // Guarda somente mascarado
     await setUserDocMasked(id, v.type, v.last4);
 
-    // Cria/garante customer no Asaas (CPF/CNPJ só em memória; não logar)
+    const planCode = await getUserPlan(id);
+    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
+    if (!plan) {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
+    }
+
+    const pm = await getPaymentMethod(id);
+    if (!pm) {
+      await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
+      return reply(await msgAskPaymentMethod(id, plan));
+    }
+
+    // customer (CPF/CNPJ só é usado aqui; nunca persistimos o número completo)
     await ensureAsaasCustomer({ waId: id, fullName: await getUserFullName(id), cpfCnpj: v.digits });
 
-    // Após documento, coletar cidade/estado + endereço (para cadastro/admin)
-    await setUserStatus(id, ST.WAIT_BILLING_CITYSTATE);
+    // Coletar Cidade/UF e Endereço antes de emitir cobrança/assinatura
+    await setUserStatus(id, ST.WAIT_BILLING_CITY_STATE);
     return reply(await msgAskBillingCityState(id));
-    }
+  }
 
-    // 6.1) Cidade/Estado
-    if (status === ST.WAIT_BILLING_CITYSTATE) {
-    const t = (inbound || "").trim();
-    const skip = wantsSkip(t);
-    if (!skip) await setUserBillingCityState(id, t);
+  // 6.1) Cidade/UF (para emissão da cobrança)
+  if (status === ST.WAIT_BILLING_CITY_STATE) {
+    const v = String(inbound || "").trim();
+    if (!v) return reply(await msgAskBillingCityState(id));
+
+    await setBillingCityState(id, v);
     await setUserStatus(id, ST.WAIT_BILLING_ADDRESS);
     return reply(await msgAskBillingAddress(id));
+  }
+
+  // 6.2) Endereço (para emissão da cobrança) + cria cobrança/assinatura
+  if (status === ST.WAIT_BILLING_ADDRESS) {
+    const v = String(inbound || "").trim();
+    if (!v) return reply(await msgAskBillingAddress(id));
+
+    const addr = v.toUpperCase() === "APENAS ONLINE" ? "APENAS ONLINE" : v;
+    await setBillingAddress(id, addr);
+
+    const planCode = await getUserPlan(id);
+    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
+    if (!plan) {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
     }
 
-    // 6.2) Endereço + cria cobrança/assinatura
-    if (status === ST.WAIT_BILLING_ADDRESS) {
-    const t = (inbound || "").trim();
-    const skip = wantsSkip(t);
-    if (!skip) await setUserBillingAddress(id, t);
-
-    const r = await startBillingPaymentFlow(id);
-    return reply(r.msg);
+    const pm = await getPaymentMethod(id);
+    if (!pm) {
+      await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
+      return reply(await msgAskPaymentMethod(id, plan));
     }
 
-    // 7) Pagamento pendente
-    if (status === ST.PAYMENT_PENDING) {
+    const customerId = await getAsaasCustomerId(id);
+    if (!customerId) {
+      // estado inconsistente: força reentrada no fluxo de documento (único ponto onde temos CPF/CNPJ)
+      await setUserStatus(id, ST.WAIT_DOC);
+      return reply(await msgAskDoc(id));
+    }
+
+    // PIX mensal avulso
+    if (pm === "PIX") {
+      const pay = await createPixPayment({
+        customerId,
+        value: (Number(plan.priceCents) || 0) / 100,
+        description: `Amigo das Vendas - Plano ${plan.code} (PIX mensal)`,
+        externalReference: id,
+        dueDate: todayISO(),
+      });
+
+      await setUserStatus(id, ST.PAYMENT_PENDING);
+
+      const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
+      const line1 = "✅ Pronto! Gerei sua cobrança via *PIX*.
+
+";
+      const line2 = url ? `Pague por aqui: ${url}
+
+` : "Pague pelo link dentro do Asaas.
+
+";
+      const line3 = "Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀";
+      return reply(line1 + line2 + line3);
+    }
+
+    // Cartão recorrente: Payment Link
+    const link = await createRecurringCardPaymentLink({
+      name: `Assinatura ${plan.name}`,
+      description: `Amigo das Vendas - Plano ${plan.code} (Cartão recorrente)`,
+      value: (Number(plan.priceCents) || 0) / 100,
+      externalReference: id,
+      subscriptionCycle: "MONTHLY",
+    });
+
+    await setUserStatus(id, ST.PAYMENT_PENDING);
+
+    const url = link?.url || link?.paymentLink || link?.link || "";
+    const line1 = "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).
+
+";
+    const line2 = url ? `Finalize por aqui: ${url}
+
+` : "Finalize pelo link no Asaas.
+
+";
+    const line3 = "Assim que confirmar, seu plano ativa automaticamente. 🚀";
+    return reply(line1 + line2 + line3);
+  }
+
+  // 7) Pagamento pendente
+  if (status === ST.PAYMENT_PENDING) {
     const planCode = await getUserPlan(id);
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     const planTxt = plan ? `Plano: *${plan.name}*.` : "";
     return reply(await getCopyText("FLOW_PAYMENT_PENDING", { waId: id, vars: { planTxt } }));
-    }
+  }
 
-    // 8) ACTIVE
-    if (status === ST.ACTIVE) {
+  // 8) ACTIVE
+  if (status === ST.ACTIVE) {
     if (wantsOkCommand(inbound)) {
       await clearLastAd(id);
       await clearRefineCount(id);
@@ -1345,10 +1440,10 @@ export async function handleInboundText({ waId, text }) {
     }
     if (isGreeting(inbound)) return reply(await msgAskProduct(id));
     return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false, currentStatus: status });
-    }
+  }
 
-    // fallback seguro
-    return reply(await getCopyText("FLOW_FALLBACK_UNKNOWN", { waId: id }));
+  // fallback seguro
+  return reply(await getCopyText("FLOW_FALLBACK_UNKNOWN", { waId: id }));
 }
 
 async function resolveMaxRefinementsForUser(waId, isTrial) {
@@ -1531,4 +1626,4 @@ async function ensureAsaasCustomer({ waId, fullName, cpfCnpj }) {
   if (!customer?.id) throw new Error("Asaas: customer not created");
   await setAsaasCustomerId(waId, customer.id);
   return customer.id;
-}\n// EOF
+}
