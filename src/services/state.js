@@ -85,6 +85,12 @@ const keyPendingBizProfile = (waId) => `user:${waId}:pendingBizProfile`;
 // Status anterior (para estados transitórios como escolha de template / salvar perfil)
 const keyPrevStatus = (waId) => `user:${waId}:prevStatus`;
 
+// ===================== BILLING INFO (para cobrança / cadastro) =====================
+// Cidade/Estado informado pelo usuário (ex: "Atibaia/SP")
+const keyBillingCityState = (waId) => `user:${waId}:billingCityState`;
+// Endereço informado pelo usuário (rua, nº, complemento etc)
+const keyBillingAddress = (waId) => `user:${waId}:billingAddress`;
+
 
 function safeStr(v) {
   return String(v ?? "").trim();
@@ -545,6 +551,52 @@ export async function clearPaymentMethod(waId) {
   return true;
 }
 
+
+// ===================== Billing Info =====================
+export async function getUserBillingCityState(waId) {
+  const v = await redisGet(keyBillingCityState(waId));
+  return safeStr(v);
+}
+
+export async function setUserBillingCityState(waId, cityState) {
+  await indexUser(waId);
+  const v = safeStr(cityState);
+  if (!v) {
+    await redisDel(keyBillingCityState(waId));
+    return "";
+  }
+  await redisSet(keyBillingCityState(waId), v);
+  return v;
+}
+
+export async function clearUserBillingCityState(waId) {
+  await indexUser(waId);
+  await redisDel(keyBillingCityState(waId));
+  return true;
+}
+
+export async function getUserBillingAddress(waId) {
+  const v = await redisGet(keyBillingAddress(waId));
+  return safeStr(v);
+}
+
+export async function setUserBillingAddress(waId, address) {
+  await indexUser(waId);
+  const v = safeStr(address);
+  if (!v) {
+    await redisDel(keyBillingAddress(waId));
+    return "";
+  }
+  await redisSet(keyBillingAddress(waId), v);
+  return v;
+}
+
+export async function clearUserBillingAddress(waId) {
+  await indexUser(waId);
+  await redisDel(keyBillingAddress(waId));
+  return true;
+}
+
 // ===================== Asaas IDs =====================
 export async function setAsaasCustomerId(waId, customerId) {
   await indexUser(waId);
@@ -718,6 +770,8 @@ export async function resetUserToTrial(waId) {
     clearPrevStatus(waId),
     clearBizProfile(waId),
     clearPendingBizProfile(waId),
+    clearUserBillingCityState(waId),
+    clearUserBillingAddress(waId),
     setCardValidUntil(waId, ""),
     setCardCanceledAt(waId, ""),
   ]);
@@ -755,6 +809,8 @@ export async function resetUserAsNew(waId) {
     keyPrevStatus(id),
     keyBizProfile(id),
     keyPendingBizProfile(id),
+    keyBillingCityState(id),
+    keyBillingAddress(id),
   ];
 
   // best-effort: apaga todas as chaves conhecidas
@@ -789,6 +845,10 @@ export async function getUserSnapshot(waId) {
     asaasSubscriptionId,
     cardValidUntil,
     cardCanceledAt,
+    bizProfile,
+    pendingBizProfile,
+    billingCityState,
+    billingAddress,
   ] = await Promise.all([
     getUserStatus(waId),
     getUserPlan(waId),
@@ -803,6 +863,10 @@ export async function getUserSnapshot(waId) {
     getAsaasSubscriptionId(waId),
     getCardValidUntil(waId),
     getCardCanceledAt(waId),
+    getBizProfile(waId),
+    getPendingBizProfile(waId),
+    getUserBillingCityState(waId),
+    getUserBillingAddress(waId),
   ]);
 
   return {
@@ -820,5 +884,9 @@ export async function getUserSnapshot(waId) {
     asaasSubscriptionId: asaasSubscriptionId || "",
     cardValidUntil: cardValidUntil || "",
     cardCanceledAt: cardCanceledAt || "",
+    billingCityState: billingCityState || "",
+    billingAddress: billingAddress || "",
+    bizProfile: bizProfile || null,
+    pendingBizProfile: pendingBizProfile || null,
   };
 }
