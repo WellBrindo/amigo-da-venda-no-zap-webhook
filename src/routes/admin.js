@@ -40,9 +40,9 @@ import {
   upsertPlan,
   setPlanActive,
   getPlansHealth,
+  listSystemAlerts,
+  getSystemAlertsCount,
 } from "../services/plans.js";
-
-import { listSystemAlerts, getSystemAlertsCount } from "../services/alerts.js";
 
 import { createCampaignAndDispatch, listCampaigns, getCampaign } from "../services/broadcast.js";
 
@@ -57,6 +57,15 @@ import {
   setCopyUser,
   delCopyUser,
 } from "../services/copy.js";
+
+import {
+  listPaymentsByExternalReference,
+  listSubscriptionsByExternalReference,
+  getSubscription,
+  cancelSubscription,
+} from "../services/asaas/client.js";
+
+import { listAsaasEvents } from "../services/asaas/ledger.js";
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -268,7 +277,8 @@ function renderSidebar(activePath){
         <summary>⚙️ Sistema <span>▾</span></summary>
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
-        ${item("/asaas/test", "Asaas Test", "🧾")}
+        ${item("/admin/finance-asaas-ui", "Financeiro • Asaas", "💰")}
+        ${item("/admin/asaas-test-ui", "Asaas Teste", "🧾")}
       </details>
 
       <div class="hint" style="margin-top:10px;">Dica: tudo é protegido por Basic Auth (ADMIN_SECRET).</div>
@@ -491,13 +501,13 @@ router.get("/dashboard", async (req, res) => {
 
         <h4 style="margin:0 0 6px 0;">Usuários</h4>
         <div class="row">
-          <span class="pill">Total: <b id="uTotal">—</b></span>
-          <span class="pill">TRIAL: <b id="uTrial">—</b></span>
-          <span class="pill">ACTIVE: <b id="uActive">—</b></span>
-          <span class="pill">WAIT_PLAN: <b id="uWait">—</b></span>
-          <span class="pill">PAYMENT_PENDING: <b id="uPayPend">—</b></span>
-          <span class="pill">BLOCKED: <b id="uBlocked">—</b></span>
-          <span class="pill">UNKNOWN: <b id="uUnknown">—</b></span>
+          <span class="pill">👥 Total de Usuários: <b id="uTotal">—</b></span>
+          <span class="pill">🧪 Em Teste: <b id="uTrial">—</b></span>
+          <span class="pill">🟢 Assinantes Ativos: <b id="uActive">—</b></span>
+          <span class="pill">⏳ Aguardando Plano: <b id="uWait">—</b></span>
+          <span class="pill">💳 Pagamento Pendente: <b id="uPayPend">—</b></span>
+          <span class="pill">🔒 Bloqueados: <b id="uBlocked">—</b></span>
+          <span class="pill">⚠️ Inconsistentes: <b id="uUnknown">—</b></span>
         </div>
         <div id="usersError" class="muted" style="margin-top:8px;"></div>
 
@@ -876,7 +886,7 @@ router.get("/", async (req, res) => {
               <a class="pill" href="/health-redis">🧠 Health Redis</a>
               <a class="pill" href="/admin/health-plans">🧾 Health Planos (JSON)</a>
               <a class="pill" href="/admin/alerts-ui">🚨 Alertas</a>
-              <a class="pill" href="/asaas/test">🧾 Asaas Test</a>
+              <a class="pill" href="/admin/asaas-test-ui">🧾 Asaas Teste</a>
             </div>
             <div class="hr"></div>
             <div class="muted">Observação: ações avançadas estão nas seções do menu.</div>
@@ -971,7 +981,7 @@ router.get("/", async (req, res) => {
             return { r, j };
           }
 
-          async async function reloadUsers(){
+          async function reloadUsers(){
             const limit = Number(document.getElementById("uLimit")?.value || 200);
             const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
 
@@ -1516,6 +1526,124 @@ async function toggle(code, active){
   router.get("/health-plans", async (req, res) => {
     const h = await getPlansHealth({ includeInactive: true });
     return res.json({ ok: true, health: h });
+  });
+
+
+  // -----------------------------
+  // 🧾 Asaas Teste (UI)
+  // -----------------------------
+  router.get("/asaas-test-ui", async (req, res) => {
+    const html = layoutBase({
+      title: "Asaas Teste",
+      activePath: "/admin/asaas-test-ui",
+      content: `
+        <h1>🧾 Asaas Teste</h1>
+        <p class="muted">Executa o endpoint de teste do Asaas e mostra o resultado sem navegar para outra página.</p>
+
+        <div class="kpi">
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <button class="btn" id="btnRun">Rodar teste</button>
+            <span class="pill" id="statusPill" style="display:none;"></span>
+            <span class="muted" id="hint" style="font-size:12px;"></span>
+          </div>
+          <div class="hr"></div>
+          <pre id="out" style="white-space:pre-wrap; margin:0; font-size:12px;">Clique em "Rodar teste".</pre>
+        </div>
+
+        <div id="modal" class="modal" style="display:none;">
+          <div class="modal__backdrop" id="modalBg"></div>
+          <div class="modal__panel">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+              <div style="font-weight:700;">Resultado — Asaas Teste</div>
+              <button class="btn btn-ghost" id="modalClose">Fechar</button>
+            </div>
+            <div class="hr"></div>
+            <div id="modalStatus" class="pill" style="display:inline-block; margin-bottom:10px;"></div>
+            <pre id="modalBody" style="white-space:pre-wrap; margin:0; font-size:12px;"></pre>
+          </div>
+        </div>
+      `,
+      headExtra: `
+        <style>
+          .btn{ background:var(--accent); color:white; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:600; box-shadow:0 6px 16px rgba(37,99,235,.25); }
+          .btn:disabled{ opacity:.6; cursor:not-allowed; }
+          .btn-ghost{ background:transparent; color:var(--text); border:1px solid var(--border); box-shadow:none; }
+          .modal{ position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; padding:18px; }
+          .modal__backdrop{ position:absolute; inset:0; background:rgba(15,23,42,.55); }
+          .pill-ok{ background:#dcfce7; color:#166534; border:1px solid #bbf7d0; }
+          .pill-bad{ background:#fee2e2; color:#991b1b; border:1px solid #fecaca; }
+          .modal__panel{ position:relative; background:var(--card); width:min(900px, 96vw); max-height:86vh; overflow:auto; border-radius:16px; padding:14px; box-shadow:0 18px 48px rgba(17,24,39,.25); border:1px solid rgba(229,231,235,.9); }
+        </style>
+      `,
+      scriptExtra: `
+        <script>
+          function esc(s){ return String(s ?? ''); }
+
+          function setPill(text, kind){
+            const el = document.getElementById('statusPill');
+            if(!text){ el.style.display='none'; el.textContent=''; el.className='pill'; return; }
+            el.style.display='inline-block';
+            el.textContent = text;
+            el.className = 'pill ' + (kind ? ('pill-' + kind) : '');
+          }
+
+          function openModal(statusText, bodyText){
+            document.getElementById('modalStatus').textContent = statusText || '';
+            document.getElementById('modalBody').textContent = bodyText || '';
+            document.getElementById('modal').style.display = 'flex';
+          }
+
+          function closeModal(){
+            document.getElementById('modal').style.display = 'none';
+          }
+
+          function classify(body){
+            const t = String(body || '').toLowerCase();
+            if (t.includes('ok') && !t.includes('error')) return { kind: 'ok', label: 'OK' };
+            if (t.includes('erro') || t.includes('error') || t.includes('fail')) return { kind: 'bad', label: 'ERRO' };
+            return { kind: '', label: 'RESULTADO' };
+          }
+
+          async function run(){
+            const btn = document.getElementById('btnRun');
+            const hint = document.getElementById('hint');
+            const out = document.getElementById('out');
+
+            btn.disabled = true;
+            hint.textContent = 'Executando...';
+            setPill('Executando...', '');
+            out.textContent = 'Carregando...';
+
+            try {
+              const res = await fetch('/asaas/test', { cache: 'no-store' });
+              const body = await res.text();
+              out.textContent = body;
+
+              const cls = classify(body);
+              const statusText = (res.ok ? '✅ ' : '❌ ') + cls.label + ' (HTTP ' + res.status + ')';
+
+              setPill(statusText, res.ok ? 'ok' : 'bad');
+              openModal(statusText, body);
+            } catch (e) {
+              const msg = '❌ ERRO: ' + esc(e && e.message ? e.message : e);
+              setPill(msg, 'bad');
+              out.textContent = msg;
+              openModal('❌ ERRO', msg);
+            } finally {
+              btn.disabled = false;
+              hint.textContent = '';
+            }
+          }
+
+          document.getElementById('btnRun').addEventListener('click', run);
+          document.getElementById('modalClose').addEventListener('click', closeModal);
+          document.getElementById('modalBg').addEventListener('click', closeModal);
+        </script>
+      `,
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
   });
 
   // -----------------------------
@@ -2249,6 +2377,315 @@ async function toggle(code, active){
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
   });
+
+  // ===================== Financeiro / Asaas (Reconciliação + Histórico) =====================
+
+router.get("/finance/asaas/events", async (req, res) => {
+  const waId = String(req.query?.waId || "").trim();
+  const offset = Number(req.query?.offset || 0);
+  const limit = Number(req.query?.limit || 50);
+  const out = await listAsaasEvents({ waId, offset, limit });
+  return res.json(out);
+});
+
+router.get("/finance/asaas/user", async (req, res) => {
+  const waId = requireWaId(req);
+
+  const snap = await getUserSnapshot(waId);
+
+  // 1) Histórico via ledger (webhook)
+  const ledger = await listAsaasEvents({ waId, offset: 0, limit: 200 });
+
+  // 2) Consulta live no Asaas (best-effort)
+  let payments = null;
+  let subscriptions = null;
+  let subscription = null;
+
+  try {
+    payments = await listPaymentsByExternalReference(waId, { limit: 50, offset: 0 });
+  } catch (err) {
+    payments = { error: String(err?.message || "Asaas payments error") };
+  }
+
+  try {
+    subscriptions = await listSubscriptionsByExternalReference(waId, { limit: 20, offset: 0 });
+  } catch (err) {
+    subscriptions = { error: String(err?.message || "Asaas subscriptions error") };
+  }
+
+  if (snap?.asaasSubscriptionId) {
+    try {
+      subscription = await getSubscription({ subscriptionId: snap.asaasSubscriptionId });
+    } catch (err) {
+      subscription = { error: String(err?.message || "Asaas subscription error") };
+    }
+  }
+
+  return res.json({
+    ok: true,
+    user: snap,
+    ledger: ledger?.items || [],
+    payments,
+    subscriptions,
+    subscription,
+  });
+});
+
+router.post("/finance/asaas/cancel-subscription", async (req, res) => {
+  const waId = String(req.body?.waId || "").trim();
+  const subscriptionId = String(req.body?.subscriptionId || "").trim();
+  if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+  if (!subscriptionId) return res.status(400).json({ ok: false, error: "subscriptionId required" });
+
+  // Ação administrativa: cancelar recorrência no Asaas.
+  // Regras de status continuam sendo aplicadas pelo webhook (sem side effects silenciosos aqui).
+  try {
+    const out = await cancelSubscription({ subscriptionId });
+    return res.json({ ok: true, result: out });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: String(err?.message || "cancel error") });
+  }
+});
+
+router.get("/finance-asaas-ui", async (req, res) => {
+  const inner = `
+    <div class="card pad">
+      <div class="row" style="justify-content:space-between; align-items:flex-start;">
+        <div>
+          <h2 style="margin:0;">Financeiro • Asaas</h2>
+          <div class="muted" style="margin-top:6px;">Histórico (webhook) + consulta ao vivo no Asaas por usuário.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid" style="grid-template-columns:1.2fr .8fr; align-items:start; margin-top:12px;">
+      <div class="card pad">
+        <h3 style="margin-top:0;">Últimos eventos do Asaas (webhook)</h3>
+        <div class="row" style="gap:8px; align-items:end;">
+          <div style="flex:1;">
+            <label class="muted">Filtro (waId opcional)</label>
+            <input id="evWaId" class="input" placeholder="55DDXXXXXXXXX" />
+          </div>
+          <div style="width:120px;">
+            <label class="muted">Limite</label>
+            <input id="evLimit" class="input" value="50" />
+          </div>
+          <button id="btnLoadEvents" class="btn">Carregar</button>
+        </div>
+        <div id="eventsBox" class="muted" style="margin-top:10px;">Carregando...</div>
+      </div>
+
+      <div class="card pad">
+        <h3 style="margin-top:0;">Consultar usuário</h3>
+        <div class="row" style="gap:8px; align-items:end;">
+          <div style="flex:1;">
+            <label class="muted">waId</label>
+            <input id="userWaId" class="input" placeholder="55DDXXXXXXXXX" />
+          </div>
+          <button id="btnLoadUser" class="btn">Buscar</button>
+        </div>
+        <div id="userBox" class="muted" style="margin-top:10px;">Informe um waId para ver detalhes.</div>
+      </div>
+    </div>
+
+    <div class="card pad" style="margin-top:12px;">
+      <h3 style="margin-top:0;">Detalhes do usuário</h3>
+      <div id="detailBox" class="muted">Nenhum usuário carregado.</div>
+    </div>
+  `;
+
+  const script = `
+    const $ = (id) => document.getElementById(id);
+
+    function esc(s){
+      return String(s ?? "")
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#39;");
+    }
+
+    function fmtMoney(v){
+      const n = Number(v || 0);
+      return n.toLocaleString("pt-BR", { style:"currency", currency:"BRL" });
+    }
+
+    function renderEvents(items){
+      if(!items || !items.length) return "<div class='muted'>Sem eventos.</div>";
+      const rows = items.map(e=>{
+        const p = e.payment || {};
+        const s = e.subscription || {};
+        const id = p.id || s.id || "-";
+        const val = p.value ? fmtMoney(p.value) : (s.value ? fmtMoney(s.value) : "-");
+        const st = p.status || s.status || "-";
+        const due = p.dueDate || s.nextDueDate || "-";
+        return \`<tr>
+          <td>\${esc(e.ts || "")}</td>
+          <td>\${esc(e.waId || "")}</td>
+          <td>\${esc(e.event || "")}</td>
+          <td>\${esc(id)}</td>
+          <td>\${esc(st)}</td>
+          <td>\${esc(due)}</td>
+          <td style="text-align:right;">\${esc(val)}</td>
+        </tr>\`;
+      }).join("");
+      return \`<div style="overflow:auto;">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Data</th><th>waId</th><th>Evento</th><th>ID</th><th>Status</th><th>Venc.</th><th style="text-align:right;">Valor</th>
+            </tr>
+          </thead>
+          <tbody>\${rows}</tbody>
+        </table>
+      </div>\`;
+    }
+
+    async function loadEvents(){
+      $("eventsBox").textContent = "Carregando...";
+      const waId = $("evWaId").value.trim();
+      const limit = Number($("evLimit").value || 50) || 50;
+      const qs = new URLSearchParams({ limit: String(limit) });
+      if(waId) qs.set("waId", waId);
+      const r = await fetch("/admin/finance/asaas/events?" + qs.toString());
+      const j = await r.json();
+      $("eventsBox").innerHTML = renderEvents(j.items || []);
+    }
+
+    function renderUserSummary(u){
+      if(!u) return "<div class='muted'>Usuário não encontrado.</div>";
+      return \`
+        <div class="row" style="justify-content:space-between;">
+          <div><b>\${esc(u.fullName || "(sem nome)")}</b></div>
+          <div class="pill">\${esc(u.status || "UNKNOWN")}</div>
+        </div>
+        <div class="muted" style="margin-top:6px;">
+          <div><b>waId:</b> \${esc(u.waId)}</div>
+          <div><b>Plano:</b> \${esc(u.plan || "—")}</div>
+          <div><b>Método:</b> \${esc(u.paymentMethod || "—")}</div>
+          <div><b>Asaas Customer:</b> \${esc(u.asaasCustomerId || "—")}</div>
+          <div><b>Assinatura:</b> \${esc(u.asaasSubscriptionId || "—")}</div>
+          <div><b>Validade cartão:</b> \${esc(u.cardValidUntil || "—")}</div>
+        </div>
+      \`;
+    }
+
+    function renderPayments(p){
+      const arr = p?.data || [];
+      if(!Array.isArray(arr)) return "<div class='muted'>Falha ao consultar pagamentos.</div>";
+      if(!arr.length) return "<div class='muted'>Sem pagamentos encontrados.</div>";
+      const rows = arr.map(x=>\`<tr>
+        <td>\${esc(x.dateCreated || "")}</td>
+        <td>\${esc(x.id || "")}</td>
+        <td>\${esc(x.status || "")}</td>
+        <td>\${esc(x.billingType || "")}</td>
+        <td>\${esc(x.dueDate || "")}</td>
+        <td style="text-align:right;">\${esc(fmtMoney(x.value))}</td>
+      </tr>\`).join("");
+      return \`<div style="overflow:auto;">
+        <table class="table">
+          <thead><tr><th>Criado</th><th>ID</th><th>Status</th><th>Tipo</th><th>Venc.</th><th style="text-align:right;">Valor</th></tr></thead>
+          <tbody>\${rows}</tbody>
+        </table>
+      </div>\`;
+    }
+
+    function renderSubscriptions(s){
+      const arr = s?.data || [];
+      if(!Array.isArray(arr)) return "<div class='muted'>Falha ao consultar assinaturas.</div>";
+      if(!arr.length) return "<div class='muted'>Sem assinaturas encontradas.</div>";
+      const rows = arr.map(x=>\`<tr>
+        <td>\${esc(x.dateCreated || "")}</td>
+        <td>\${esc(x.id || "")}</td>
+        <td>\${esc(x.status || "")}</td>
+        <td>\${esc(x.cycle || "")}</td>
+        <td>\${esc(x.nextDueDate || x.nextPaymentDate || "")}</td>
+        <td style="text-align:right;">\${esc(fmtMoney(x.value))}</td>
+      </tr>\`).join("");
+      return \`<div style="overflow:auto;">
+        <table class="table">
+          <thead><tr><th>Criado</th><th>ID</th><th>Status</th><th>Ciclo</th><th>Próx. venc.</th><th style="text-align:right;">Valor</th></tr></thead>
+          <tbody>\${rows}</tbody>
+        </table>
+      </div>\`;
+    }
+
+    async function loadUser(){
+      const waId = $("userWaId").value.trim();
+      if(!waId){
+        $("userBox").textContent = "Informe um waId.";
+        return;
+      }
+      $("userBox").textContent = "Carregando...";
+      $("detailBox").textContent = "Carregando...";
+      const r = await fetch("/admin/finance/asaas/user?waId=" + encodeURIComponent(waId));
+      const j = await r.json();
+      if(!j.ok){
+        $("userBox").innerHTML = "<div class='muted'>Erro: " + esc(j.error || "unknown") + "</div>";
+        return;
+      }
+      $("userBox").innerHTML = renderUserSummary(j.user);
+
+      const cancelBtn = (j.user?.asaasSubscriptionId)
+        ? \`<button class="btn danger" id="btnCancelSub">Cancelar recorrência</button>\`
+        : "";
+
+      $("detailBox").innerHTML = \`
+        <div class="grid" style="grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="card pad">
+            <h4 style="margin-top:0;">Pagamentos (Asaas)</h4>
+            \${j.payments?.error ? "<div class='muted'>Erro: " + esc(j.payments.error) + "</div>" : renderPayments(j.payments)}
+          </div>
+          <div class="card pad">
+            <h4 style="margin-top:0;">Assinaturas (Asaas)</h4>
+            \${j.subscriptions?.error ? "<div class='muted'>Erro: " + esc(j.subscriptions.error) + "</div>" : renderSubscriptions(j.subscriptions)}
+            <div style="margin-top:10px;">\${cancelBtn}</div>
+          </div>
+        </div>
+
+        <div class="card pad" style="margin-top:12px;">
+          <h4 style="margin-top:0;">Eventos (Webhook • Ledger)</h4>
+          \${renderEvents(j.ledger || [])}
+        </div>
+      \`;
+
+      const btn = document.getElementById("btnCancelSub");
+      if(btn){
+        btn.addEventListener("click", async ()=>{
+          const subId = j.user.asaasSubscriptionId;
+          if(!subId) return;
+          if(!confirm("Cancelar a recorrência desta assinatura no Asaas?")) return;
+          btn.disabled = true;
+          try{
+            const rr = await fetch("/admin/finance/asaas/cancel-subscription", {
+              method:"POST",
+              headers:{ "Content-Type":"application/json" },
+              body: JSON.stringify({ waId, subscriptionId: subId })
+            });
+            const jj = await rr.json();
+            alert(jj.ok ? "Cancelamento enviado ao Asaas." : ("Erro: " + (jj.error || "unknown")));
+          } finally {
+            btn.disabled = false;
+            loadUser();
+          }
+        });
+      }
+    }
+
+    $("btnLoadEvents").addEventListener("click", loadEvents);
+    $("btnLoadUser").addEventListener("click", loadUser);
+
+    loadEvents();
+  `;
+
+  return res.send(layoutBase({
+    title: "Financeiro • Asaas",
+    activePath: "/admin/finance-asaas-ui",
+    content: inner,
+    scriptExtra: script,
+  }));
+});
 
   return router;
 }
