@@ -35,6 +35,16 @@ import {
 } from "../services/metrics.js";
 
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
+
+import {
+  listPaymentsByExternalReference,
+  listSubscriptionsByExternalReference,
+  getSubscription,
+  cancelSubscription,
+} from "../services/asaas/client.js";
+
+import { listAsaasEvents } from "../services/asaas/ledger.js";
+
 import {
   listPlans,
   upsertPlan,
@@ -65,30 +75,6 @@ function escapeHtml(s) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
-}
-
-
-// -----------------------------
-// Concurrency-safe helper (evita tempestade de requests no Upstash em rotas do Admin)
-// -----------------------------
-async function mapLimit(items, limit, worker) {
-  const arr = Array.isArray(items) ? items : [];
-  const n = arr.length;
-  if (n === 0) return [];
-  const lim = Math.max(1, Math.min(Number(limit) || 1, n));
-  const out = new Array(n);
-  let cursor = 0;
-
-  const runners = Array.from({ length: lim }, async () => {
-    while (true) {
-      const i = cursor++;
-      if (i >= n) break;
-      out[i] = await worker(arr[i], i);
-    }
-  });
-
-  await Promise.all(runners);
-  return out;
 }
 
 function layoutBase({ title, activePath = "/admin", content = "", headExtra = "", scriptExtra = "" }) {
@@ -225,7 +211,6 @@ function layoutBase({ title, activePath = "/admin", content = "", headExtra = ""
 
 function renderSidebar(activePath){
   const ap = String(activePath||"");
-  const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h");
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
     return `<a class="item ${active}" href="${href}"><span>${icon||"•"}</span><span>${escapeHtml(label)}</span></a>`;
@@ -257,18 +242,23 @@ function renderSidebar(activePath){
         ${item("/admin/campaigns-ui", "Campanhas", "📦")}
       </details>
 
-      <details ${usersOpen ? "open" : ""}>
+      <details>
         <summary>👥 Usuários <span>▾</span></summary>
-        ${item("/admin/users-list-ui", "Lista de usuários", "📋")}
         ${item("/admin/users-ui", "Ações / Consulta", "👤")}
         ${item("/admin/window24h-ui", "Janela 24h", "🕒")}
       </details>
 
+
+<details>
+  <summary>💰 Financeiro <span>▾</span></summary>
+  ${item("/admin/finance-asaas-ui", "Asaas (Reconciliação)", "🧾")}
+</details>
+
       <details>
-        <summary>⚙️ Sistema <span>▾</span></summary>
+        <summary>⚙️ Sistema <span>▾</span></summary
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
-        ${item("/admin/asaas-test-ui", "Asaas Teste", "🧾")}
+        ${item("/asaas/test", "Asaas Teste", "🧾")}
       </details>
 
       <div class="hint" style="margin-top:10px;">Dica: tudo é protegido por Basic Auth (ADMIN_SECRET).</div>
@@ -491,13 +481,13 @@ router.get("/dashboard", async (req, res) => {
 
         <h4 style="margin:0 0 6px 0;">Usuários</h4>
         <div class="row">
-          <span class="pill">👥 Total de Usuários: <b id="uTotal">—</b></span>
-          <span class="pill">🧪 Em Teste: <b id="uTrial">—</b></span>
-          <span class="pill">🟢 Assinantes Ativos: <b id="uActive">—</b></span>
-          <span class="pill">⏳ Aguardando Plano: <b id="uWait">—</b></span>
-          <span class="pill">💳 Pagamento Pendente: <b id="uPayPend">—</b></span>
-          <span class="pill">🔒 Bloqueados: <b id="uBlocked">—</b></span>
-          <span class="pill">⚠️ Inconsistentes: <b id="uUnknown">—</b></span>
+          <span class="pill">Total: <b id="uTotal">—</b></span>
+          <span class="pill">TRIAL: <b id="uTrial">—</b></span>
+          <span class="pill">ACTIVE: <b id="uActive">—</b></span>
+          <span class="pill">WAIT_PLAN: <b id="uWait">—</b></span>
+          <span class="pill">PAYMENT_PENDING: <b id="uPayPend">—</b></span>
+          <span class="pill">BLOCKED: <b id="uBlocked">—</b></span>
+          <span class="pill">UNKNOWN: <b id="uUnknown">—</b></span>
         </div>
         <div id="usersError" class="muted" style="margin-top:8px;"></div>
 
@@ -876,7 +866,7 @@ router.get("/", async (req, res) => {
               <a class="pill" href="/health-redis">🧠 Health Redis</a>
               <a class="pill" href="/admin/health-plans">🧾 Health Planos (JSON)</a>
               <a class="pill" href="/admin/alerts-ui">🚨 Alertas</a>
-              <a class="pill" href="/admin/asaas-test-ui">🧾 Asaas Teste</a>
+              <a class="pill" href="/asaas/test">🧾 Asaas Test</a>
             </div>
             <div class="hr"></div>
             <div class="muted">Observação: ações avançadas estão nas seções do menu.</div>
@@ -890,251 +880,11 @@ router.get("/", async (req, res) => {
   });
 
   // -----------------------------
-  // 👥 Usuários — Lista (UI)
-  // -----------------------------
-  router.get("/users-list-ui", async (req, res) => {
-    const html = layoutBase({
-      title: "Usuários • Lista",
-      activePath: "/admin/users-list-ui",
-      content: `
-        <div class="card pad">
-          <div class="row" style="justify-content:space-between;">
-            <div>
-              <h3 style="margin:0 0 6px 0;">Lista de usuários</h3>
-              <div class="muted">Visualize rapidamente: Nome, waId, Plano e Janela 24h. Expanda para ver todos os dados salvos no fluxo.</div>
-            </div>
-            <div class="row">
-              <button onclick="reloadUsers()">Recarregar</button>
-            </div>
-          </div>
-
-          <div class="hr"></div>
-
-          <div class="row" style="gap:10px; flex-wrap:wrap;">
-            <input id="uSearch" placeholder="Buscar por nome ou waId..." style="min-width:320px" oninput="renderUsers()" />
-            <input id="uLimit" type="number" min="1" max="500" value="200" style="width:110px" />
-            <button class="primary" onclick="reloadUsers()">Carregar</button>
-            <div class="muted" id="uMeta" style="margin-left:auto;"></div>
-          </div>
-
-          <div class="hr"></div>
-
-          <div style="overflow:auto;">
-            <table class="table" style="min-width:900px;">
-              <thead>
-                <tr>
-                  <th>Nome</th>
-                  <th>waId</th>
-                  <th>Status</th>
-                  <th>Plano</th>
-                  <th>Janela 24h</th>
-                  <th style="width:120px;">Ações</th>
-                </tr>
-              </thead>
-              <tbody id="uTbody">
-                <tr><td colspan="6" class="muted">Carregando...</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <script>
-          let _users = [];
-          let _usersMeta = { total: 0, offset: 0, limit: 0 };
-
-          function fmtTs(ts){
-            if (!ts) return "—";
-            const d = new Date(ts);
-            if (Number.isNaN(d.getTime())) return "—";
-            return d.toLocaleString("pt-BR");
-          }
-
-          function windowLabel(u){
-            if (!u || !u.lastInboundTs) return "—";
-            const exp = u.windowExpiresAt ? fmtTs(u.windowExpiresAt) : "—";
-            return u.inWindow ? ("Ativa (até " + exp + ")") : ("Fora (expirou em " + exp + ")");
-          }
-
-          function escapeHtml(s){
-            const v = String(s ?? "");
-            return v
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;")
-              .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#39;");
-          }
-
-          async function fetchJson(url, opt){
-            const r = await fetch(url, opt);
-            const j = await r.json().catch(()=>({}));
-            return { r, j };
-          }
-
-          async function reloadUsers(){
-            const limit = Number(document.getElementById("uLimit")?.value || 200);
-            const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
-
-            // Feedback imediato
-            const tbody = document.getElementById("uTbody");
-            if (tbody) tbody.innerHTML = "<tr><td colspan=\"6\" class=\"muted\">Carregando...</td></tr>";
-            const out = await fetchJson(url);
-            const r = out.r, j = out.j;
-            if (!r.ok || !j.ok) {
-              document.getElementById("uTbody").innerHTML = "<tr><td colspan=\"6\" class=\"muted\">Erro ao carregar usuários.</td></tr>";
-              return;
-            }
-            _users = j.items || [];
-            _usersMeta = { total: j.total || 0, offset: j.offset || 0, limit: j.limit || limit };
-            renderUsers();
-          }
-
-          function renderUsers(){
-            const q = (document.getElementById("uSearch")?.value || "").trim().toLowerCase();
-            const items = !_users?.length ? [] : _users.filter((u) => {
-              if (!q) return true;
-              return String(u.waId || "").includes(q) || String(u.fullName || "").toLowerCase().includes(q);
-            });
-
-            const metaEl = document.getElementById("uMeta");
-            if (metaEl) metaEl.textContent = String(items.length) + " exibidos • Total: " + String(_usersMeta.total);
-
-            if (!items.length){
-              document.getElementById("uTbody").innerHTML = "<tr><td colspan=\"6\" class=\"muted\">Nenhum usuário encontrado.</td></tr>";
-              return;
-            }
-
-            const rows = [];
-            for (const u of items){
-              const name = escapeHtml(u.fullName || "—");
-              const wa = String(u.waId || "");
-              const waHtml = escapeHtml(wa);
-              const waJs = wa.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-              const st = escapeHtml(u.status || "");
-              const pl = escapeHtml(u.plan || "");
-              const win = escapeHtml(windowLabel(u));
-
-              rows.push(
-                "<tr>" +
-                  "<td>" + name + "</td>" +
-                  "<td><code>" + waHtml + "</code></td>" +
-                  "<td>" + st + "</td>" +
-                  "<td>" + (pl || "—") + "</td>" +
-                  "<td>" + win + "</td>" +
-                  "<td>" +
-                    "<button onclick=\"expandUser(\'" + waJs + "\')\">Expandir</button> " +
-                    "<button onclick=\"openActions(\'" + waJs + "\')\">Abrir</button>" +
-                  "</td>" +
-                "</tr>"
-              );
-              rows.push(
-                "<tr id=\"exp_" + waHtml + "\" style=\"display:none;\">" +
-                  "<td colspan=\"6\"><div class=\"muted\">Carregando...</div></td>" +
-                "</tr>"
-              );
-            }
-
-            document.getElementById("uTbody").innerHTML = rows.join("");
-          }
-
-          async function expandUser(wa){
-            const row = document.getElementById("exp_" + String(wa));
-            if (!row) return;
-
-            if (row.style.display === "none"){
-              row.style.display = "";
-              row.querySelector("td").innerHTML = "<div class=\"muted\">Carregando...</div>";
-
-              const url = "/admin/users/details?waId=" + encodeURIComponent(wa);
-              const out = await fetchJson(url);
-              const r = out.r, j = out.j;
-              if (!r.ok || !j.ok) {
-                row.querySelector("td").innerHTML = "<div class=\"muted\">Erro ao carregar detalhes.</div>";
-                return;
-              }
-
-              const s = j.snapshot || {};
-              const header = (
-                "<div class=\"row\" style=\"justify-content:space-between; align-items:center;\">" +
-                  "<div>" +
-                    "<div><b>" + escapeHtml(s.fullName || "—") + "</b> <span class=\"muted\">(" + escapeHtml(wa) + ")</span></div>" +
-                    "<div class=\"muted\">Status: <b>" + escapeHtml(s.status || "—") + "</b> • Plano: <b>" + escapeHtml(s.plan || "—") + "</b> • Janela 24h: <b>" + escapeHtml(j.inWindow ? "Ativa" : "Fora") + "</b></div>" +
-                  "</div>" +
-                  "<div class=\"row\">" +
-                    "<button onclick=\"openActions(\'" + String(wa).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "\')\">Abrir nas ações</button> " +
-                    "<button onclick=\"toggleRow(\'" + String(wa).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "\')\">Fechar</button>" +
-                  "</div>" +
-                "</div>"
-              );
-
-              const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + " • " + (s.doc.docLast4 || "")) : "—";
-
-              const details = (
-                "<div class=\"hr\"></div>" +
-                "<div class=\"grid cols2\">" +
-                  "<div class=\"kpi\">" +
-                    "<div class=\"t\">Dados pessoais</div>" +
-                    "<div class=\"muted\">Nome: <b>" + escapeHtml(s.fullName || "—") + "</b></div>" +
-                    "<div class=\"muted\">Documento: <b>" + escapeHtml(docLine) + "</b></div>" +
-                    "<div class=\"muted\">Cidade/UF: <b>" + escapeHtml(s.billingCityState || "—") + "</b></div>" +
-                    "<div class=\"muted\">Endereço: <b>" + escapeHtml(s.billingAddress || "—") + "</b></div>" +
-                  "</div>" +
-                  "<div class=\"kpi\">" +
-                    "<div class=\"t\">Assinatura / Cobrança</div>" +
-                    "<div class=\"muted\">Status: <b>" + escapeHtml(s.status || "—") + "</b></div>" +
-                    "<div class=\"muted\">Plano: <b>" + escapeHtml(s.plan || "—") + "</b></div>" +
-                    "<div class=\"muted\">Payment: <b>" + escapeHtml(s.paymentMethod || "—") + "</b></div>" +
-                    "<div class=\"muted\">Asaas Customer: <code>" + escapeHtml(s.asaasCustomerId || "—") + "</code></div>" +
-                    "<div class=\"muted\">Asaas Subscription: <code>" + escapeHtml(s.asaasSubscriptionId || "—") + "</code></div>" +
-                  "</div>" +
-                "</div>" +
-
-                "<div class=\"hr\"></div>" +
-                "<details>" +
-                  "<summary class=\"muted\">Ver JSON completo (inclui perfil da empresa)</summary>" +
-                  "<pre style=\"white-space:pre-wrap;\">" + escapeHtml(JSON.stringify(s, null, 2)) + "</pre>" +
-                "</details>"
-              );
-
-              row.querySelector("td").innerHTML = header + details;
-              return;
-            }
-
-            row.style.display = "none";
-          }
-
-          function toggleRow(wa){
-            const row = document.getElementById("exp_" + String(wa));
-            if (!row) return;
-            row.style.display = "none";
-          }
-
-          function openActions(wa){
-            window.location.href = "/admin/users-ui?waId=" + encodeURIComponent(wa);
-          }
-
-          // auto-load
-          setTimeout(() => { reloadUsers().catch(()=>{}); }, 50);
-        
-
-          // Auto-load na primeira renderização
-          (function initUsersList(){
-            try { reloadUsers(); } catch (_) {}
-          })();
-</script>
-      `,
-    });
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
-  });
-
-  // -----------------------------
-  // 👥 Usuários — Ações/Consulta (UI)
+  // 👥 Usuários (UI) — ações que antes eram apenas por URL
   // -----------------------------
   router.get("/users-ui", async (req, res) => {
     const html = layoutBase({
-      title: "Usuários • Ações",
+      title: "Usuários",
       activePath: "/admin/users-ui",
       content: `
         <div class="card pad">
@@ -1194,46 +944,46 @@ router.get("/", async (req, res) => {
             return { r, j };
           }
           function renderUser(j){
-            const snap = j?.user || j?.userSnapshot || j?.user?.snapshot || j?.snapshot || {};
-            document.getElementById('kStatus').textContent = snap.status || '—';
-            document.getElementById('kPlan').textContent = 'Plano: ' + (snap.plan || '—');
-
-            const quotaUsed = Number(snap.quotaUsed ?? 0);
-            const trialUsed = Number(snap.trialUsed ?? 0);
-            const quotaStr = (snap.status === 'TRIAL')
-              ? (trialUsed + ' (trialUsed)')
-              : (quotaUsed + ' (quotaUsed)');
-
-            document.getElementById('kUsage').textContent = quotaStr;
-            document.getElementById('kUsage2').textContent = 'templatePrompted: ' + String(snap.templatePrompted ?? '—');
-
-            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+            const u = j?.user || j?.user?.snapshot || j?.user?.snapshot || j?.user;
+            const snap = j?.user || j?.userSnapshot || j?.user?.snapshot || j?.user;
+            const user = j?.user || j?.userSnapshot || j?.user;
+            const s = (j?.user && j.user.status) ? j.user : (j?.userSnapshot || j?.user || j?.user?.snapshot || {});
+            const status = (s?.status || '—');
+            const plan = (s?.plan || '—');
+            const quotaUsed = (s?.quotaUsed ?? '—');
+            const trialUsed = (s?.trialUsed ?? '—');
+            document.getElementById('kStatus').textContent = String(status);
+            document.getElementById('kPlan').textContent = 'Plano: ' + String(plan);
+            document.getElementById('kUsage').textContent = String(quotaUsed);
+            document.getElementById('kUsage2').textContent = 'trialUsed: ' + String(trialUsed);
           }
 
           async function loadSnapshot(){
             const id = waId(); if(!id){ alert('Informe o waId'); return; }
-            const {r,j} = await fetchJson('/admin/users/snapshot?waId=' + encodeURIComponent(id));
-            if(!r.ok || !j.ok){ alert('Falha ao consultar.'); document.getElementById('out').textContent = JSON.stringify(j, null, 2); return; }
+            const {j} = await fetchJson('/admin/state-test/get?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
             renderUser(j);
+          }
+
+          async function resetTrial(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            const {j} = await fetchJson('/admin/state-test/reset-trial?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+            renderUser(j);
+          }
+
+          async function resetUser(){
+            const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            if(!confirm('Isso vai remover TODO o estado do usuário (teste) como se nunca tivesse escrito. Continuar?')) return;
+            const {j} = await fetchJson('/admin/state-test/reset-user?waId=' + encodeURIComponent(id));
+            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+            // Não chamamos get snapshot automaticamente, porque o reset remove as keys e o snapshot recria.
+            // Se quiser ver, clique em Consultar.
           }
 
           async function touchWindow(){
             const id = waId(); if(!id){ alert('Informe o waId'); return; }
             const {j} = await fetchJson('/admin/window24h/touch?waId=' + encodeURIComponent(id));
-            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-          }
-
-          async function resetTrial(){
-            const id = waId(); if(!id){ alert('Informe o waId'); return; }
-            if(!confirm('Resetar TRIAL (status TRIAL, plan vazio, quotaUsed/trialUsed = 0, limpa lastPrompt)?')) return;
-            const {j} = await fetchJson('/admin/state-test/reset-trial?waId=' + encodeURIComponent(id));
-            document.getElementById('out').textContent = JSON.stringify(j, null, 2);
-          }
-
-          async function resetUser(){
-            const id = waId(); if(!id){ alert('Informe o waId'); return; }
-            if(!confirm('RESET TOTAL: remove estado, métricas, janela 24h e overrides de copy. Confirmar?')) return;
-            const {j} = await fetchJson('/admin/state-test/reset-user?waId=' + encodeURIComponent(id));
             document.getElementById('out').textContent = JSON.stringify(j, null, 2);
           }
 
@@ -1245,6 +995,8 @@ router.get("/", async (req, res) => {
 
           async function setStatus(st){
             const id = waId(); if(!id){ alert('Informe o waId'); return; }
+            // Mantemos como operação via endpoints existentes (estável). Se quiser UI completa de status/plan/quota, evoluímos depois.
+            const body = { status: st };
             const {j} = await fetchJson('/admin/users/status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ waId:id, status:st }) });
             document.getElementById('out').textContent = JSON.stringify(j, null, 2);
           }
@@ -1270,81 +1022,7 @@ router.get("/", async (req, res) => {
   });
 
   // APIs de usuário (para UI clean, sem depender de múltiplas URLs)
-    router.get("/users/list", async (req, res) => {
-    try {
-      const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 200)));
-      const offset = Math.max(0, Number(req.query?.offset || 0));
-
-      const idsRaw = await listUsers();
-      const ids = Array.isArray(idsRaw) ? idsRaw.slice() : [];
-      ids.sort(); // ordenação simples por waId
-
-      const slice = ids.slice(offset, offset + limit);
-
-      const now = nowMs();
-
-      const items = await mapLimit(
-        slice,
-        20,
-        async (waId) => {
-          const [snap, lastInboundTsRaw] = await Promise.all([
-            getUserSnapshot(waId),
-            getLastInboundTs(waId),
-          ]);
-
-          const lastInboundTs = Number(lastInboundTsRaw) || 0;
-          const inWindow = lastInboundTs ? now - lastInboundTs < 24 * 60 * 60 * 1000 : false;
-          const windowExpiresAt = lastInboundTs ? lastInboundTs + 24 * 60 * 60 * 1000 : 0;
-
-          return {
-            waId,
-            fullName: snap.fullName || "",
-            plan: snap.plan || "",
-            status: snap.status || "",
-            inWindow,
-            lastInboundTs,
-            windowExpiresAt,
-          };
-        }
-      );
-
-      return res.status(200).json({
-        ok: true,
-        total: ids.length,
-        offset,
-        limit,
-        items,
-      });
-    } catch (e) {
-      return res.status(500).json({ ok: false, error: String(e?.message || e) });
-    }
-  });
-
-  router.get("/users/details", async (req, res) => {
-    try {
-      const waId = String(req.query?.waId || "").trim();
-      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
-
-      const snap = await getUserSnapshot(waId);
-      const now = nowMs();
-      const lastInboundTs = await getLastInboundTs(waId);
-      const inWindow = lastInboundTs ? now - Number(lastInboundTs) < 24 * 60 * 60 * 1000 : false;
-      const windowExpiresAt = lastInboundTs ? Number(lastInboundTs) + 24 * 60 * 60 * 1000 : 0;
-
-      return res.status(200).json({
-        ok: true,
-        waId,
-        inWindow,
-        lastInboundTs: Number(lastInboundTs) || 0,
-        windowExpiresAt,
-        snapshot: snap,
-      });
-    } catch (e) {
-      return res.status(500).json({ ok: false, error: String(e?.message || e) });
-    }
-  });
-
-router.post("/users/status", async (req, res) => {
+  router.post("/users/status", async (req, res) => {
     try {
       const waId = String(req.body?.waId || "").trim();
       const status = String(req.body?.status || "").trim();
@@ -1516,124 +1194,6 @@ async function toggle(code, active){
   router.get("/health-plans", async (req, res) => {
     const h = await getPlansHealth({ includeInactive: true });
     return res.json({ ok: true, health: h });
-  });
-
-
-  // -----------------------------
-  // 🧾 Asaas Teste (UI)
-  // -----------------------------
-  router.get("/asaas-test-ui", async (req, res) => {
-    const html = layoutBase({
-      title: "Asaas Teste",
-      activePath: "/admin/asaas-test-ui",
-      content: `
-        <h1>🧾 Asaas Teste</h1>
-        <p class="muted">Executa o endpoint de teste do Asaas e mostra o resultado sem navegar para outra página.</p>
-
-        <div class="kpi">
-          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-            <button class="btn" id="btnRun">Rodar teste</button>
-            <span class="pill" id="statusPill" style="display:none;"></span>
-            <span class="muted" id="hint" style="font-size:12px;"></span>
-          </div>
-          <div class="hr"></div>
-          <pre id="out" style="white-space:pre-wrap; margin:0; font-size:12px;">Clique em "Rodar teste".</pre>
-        </div>
-
-        <div id="modal" class="modal" style="display:none;">
-          <div class="modal__backdrop" id="modalBg"></div>
-          <div class="modal__panel">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
-              <div style="font-weight:700;">Resultado — Asaas Teste</div>
-              <button class="btn btn-ghost" id="modalClose">Fechar</button>
-            </div>
-            <div class="hr"></div>
-            <div id="modalStatus" class="pill" style="display:inline-block; margin-bottom:10px;"></div>
-            <pre id="modalBody" style="white-space:pre-wrap; margin:0; font-size:12px;"></pre>
-          </div>
-        </div>
-      `,
-      headExtra: `
-        <style>
-          .btn{ background:var(--accent); color:white; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:600; box-shadow:0 6px 16px rgba(37,99,235,.25); }
-          .btn:disabled{ opacity:.6; cursor:not-allowed; }
-          .btn-ghost{ background:transparent; color:var(--text); border:1px solid var(--border); box-shadow:none; }
-          .modal{ position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; padding:18px; }
-          .modal__backdrop{ position:absolute; inset:0; background:rgba(15,23,42,.55); }
-          .pill-ok{ background:#dcfce7; color:#166534; border:1px solid #bbf7d0; }
-          .pill-bad{ background:#fee2e2; color:#991b1b; border:1px solid #fecaca; }
-          .modal__panel{ position:relative; background:var(--card); width:min(900px, 96vw); max-height:86vh; overflow:auto; border-radius:16px; padding:14px; box-shadow:0 18px 48px rgba(17,24,39,.25); border:1px solid rgba(229,231,235,.9); }
-        </style>
-      `,
-      scriptExtra: `
-        <script>
-          function esc(s){ return String(s ?? ''); }
-
-          function setPill(text, kind){
-            const el = document.getElementById('statusPill');
-            if(!text){ el.style.display='none'; el.textContent=''; el.className='pill'; return; }
-            el.style.display='inline-block';
-            el.textContent = text;
-            el.className = 'pill ' + (kind ? ('pill-' + kind) : '');
-          }
-
-          function openModal(statusText, bodyText){
-            document.getElementById('modalStatus').textContent = statusText || '';
-            document.getElementById('modalBody').textContent = bodyText || '';
-            document.getElementById('modal').style.display = 'flex';
-          }
-
-          function closeModal(){
-            document.getElementById('modal').style.display = 'none';
-          }
-
-          function classify(body){
-            const t = String(body || '').toLowerCase();
-            if (t.includes('ok') && !t.includes('error')) return { kind: 'ok', label: 'OK' };
-            if (t.includes('erro') || t.includes('error') || t.includes('fail')) return { kind: 'bad', label: 'ERRO' };
-            return { kind: '', label: 'RESULTADO' };
-          }
-
-          async function run(){
-            const btn = document.getElementById('btnRun');
-            const hint = document.getElementById('hint');
-            const out = document.getElementById('out');
-
-            btn.disabled = true;
-            hint.textContent = 'Executando...';
-            setPill('Executando...', '');
-            out.textContent = 'Carregando...';
-
-            try {
-              const res = await fetch('/asaas/test', { cache: 'no-store' });
-              const body = await res.text();
-              out.textContent = body;
-
-              const cls = classify(body);
-              const statusText = (res.ok ? '✅ ' : '❌ ') + cls.label + ' (HTTP ' + res.status + ')';
-
-              setPill(statusText, res.ok ? 'ok' : 'bad');
-              openModal(statusText, body);
-            } catch (e) {
-              const msg = '❌ ERRO: ' + esc(e && e.message ? e.message : e);
-              setPill(msg, 'bad');
-              out.textContent = msg;
-              openModal('❌ ERRO', msg);
-            } finally {
-              btn.disabled = false;
-              hint.textContent = '';
-            }
-          }
-
-          document.getElementById('btnRun').addEventListener('click', run);
-          document.getElementById('modalClose').addEventListener('click', closeModal);
-          document.getElementById('modalBg').addEventListener('click', closeModal);
-        </script>
-      `,
-    });
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
   });
 
   // -----------------------------
@@ -2367,6 +1927,314 @@ async function toggle(code, active){
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
   });
+// ===================== Financeiro / Asaas (Reconciliação + Histórico) =====================
+
+router.get("/finance/asaas/events", async (req, res) => {
+  const waId = String(req.query?.waId || "").trim();
+  const offset = Number(req.query?.offset || 0);
+  const limit = Number(req.query?.limit || 50);
+  const out = await listAsaasEvents({ waId, offset, limit });
+  return res.json(out);
+});
+
+router.get("/finance/asaas/user", async (req, res) => {
+  const waId = requireWaId(req);
+
+  const snap = await getUserSnapshot(waId);
+
+  // 1) Histórico via ledger (webhook)
+  const ledger = await listAsaasEvents({ waId, offset: 0, limit: 200 });
+
+  // 2) Consulta live no Asaas (best-effort)
+  let payments = null;
+  let subscriptions = null;
+  let subscription = null;
+
+  try {
+    payments = await listPaymentsByExternalReference(waId, { limit: 50, offset: 0 });
+  } catch (err) {
+    payments = { error: String(err?.message || "Asaas payments error") };
+  }
+
+  try {
+    subscriptions = await listSubscriptionsByExternalReference(waId, { limit: 20, offset: 0 });
+  } catch (err) {
+    subscriptions = { error: String(err?.message || "Asaas subscriptions error") };
+  }
+
+  if (snap?.asaasSubscriptionId) {
+    try {
+      subscription = await getSubscription({ subscriptionId: snap.asaasSubscriptionId });
+    } catch (err) {
+      subscription = { error: String(err?.message || "Asaas subscription error") };
+    }
+  }
+
+  return res.json({
+    ok: true,
+    user: snap,
+    ledger: ledger?.items || [],
+    payments,
+    subscriptions,
+    subscription,
+  });
+});
+
+router.post("/finance/asaas/cancel-subscription", async (req, res) => {
+  const waId = String(req.body?.waId || "").trim();
+  const subscriptionId = String(req.body?.subscriptionId || "").trim();
+  if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+  if (!subscriptionId) return res.status(400).json({ ok: false, error: "subscriptionId required" });
+
+  // Ação administrativa: cancelar recorrência no Asaas.
+  // Regras de status continuam sendo aplicadas pelo webhook (sem side effects silenciosos aqui).
+  try {
+    const out = await cancelSubscription({ subscriptionId });
+    return res.json({ ok: true, result: out });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: String(err?.message || "cancel error") });
+  }
+});
+
+router.get("/finance-asaas-ui", async (req, res) => {
+  const inner = `
+    <div class="card pad">
+      <div class="row" style="justify-content:space-between; align-items:flex-start;">
+        <div>
+          <h2 style="margin:0;">Financeiro • Asaas</h2>
+          <div class="muted" style="margin-top:6px;">Histórico (webhook) + consulta ao vivo no Asaas por usuário.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid" style="grid-template-columns:1.2fr .8fr; align-items:start; margin-top:12px;">
+      <div class="card pad">
+        <h3 style="margin-top:0;">Últimos eventos do Asaas (webhook)</h3>
+        <div class="row" style="gap:8px; align-items:end;">
+          <div style="flex:1;">
+            <label class="muted">Filtro (waId opcional)</label>
+            <input id="evWaId" class="input" placeholder="55DDXXXXXXXXX" />
+          </div>
+          <div style="width:120px;">
+            <label class="muted">Limite</label>
+            <input id="evLimit" class="input" value="50" />
+          </div>
+          <button id="btnLoadEvents" class="btn">Carregar</button>
+        </div>
+        <div id="eventsBox" class="muted" style="margin-top:10px;">Carregando...</div>
+      </div>
+
+      <div class="card pad">
+        <h3 style="margin-top:0;">Consultar usuário</h3>
+        <div class="row" style="gap:8px; align-items:end;">
+          <div style="flex:1;">
+            <label class="muted">waId</label>
+            <input id="userWaId" class="input" placeholder="55DDXXXXXXXXX" />
+          </div>
+          <button id="btnLoadUser" class="btn">Buscar</button>
+        </div>
+        <div id="userBox" class="muted" style="margin-top:10px;">Informe um waId para ver detalhes.</div>
+      </div>
+    </div>
+
+    <div class="card pad" style="margin-top:12px;">
+      <h3 style="margin-top:0;">Detalhes do usuário</h3>
+      <div id="detailBox" class="muted">Nenhum usuário carregado.</div>
+    </div>
+  `;
+
+  const script = `
+    const $ = (id) => document.getElementById(id);
+
+    function esc(s){
+      return String(s ?? "")
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#39;");
+    }
+
+    function fmtMoney(v){
+      const n = Number(v || 0);
+      return n.toLocaleString("pt-BR", { style:"currency", currency:"BRL" });
+    }
+
+    function renderEvents(items){
+      if(!items || !items.length) return "<div class='muted'>Sem eventos.</div>";
+      const rows = items.map(e=>{
+        const p = e.payment || {};
+        const s = e.subscription || {};
+        const id = p.id || s.id || "-";
+        const val = p.value ? fmtMoney(p.value) : (s.value ? fmtMoney(s.value) : "-");
+        const st = p.status || s.status || "-";
+        const due = p.dueDate || s.nextDueDate || "-";
+        return \`<tr>
+          <td>\${esc(e.ts || "")}</td>
+          <td>\${esc(e.waId || "")}</td>
+          <td>\${esc(e.event || "")}</td>
+          <td>\${esc(id)}</td>
+          <td>\${esc(st)}</td>
+          <td>\${esc(due)}</td>
+          <td style="text-align:right;">\${esc(val)}</td>
+        </tr>\`;
+      }).join("");
+      return \`<div style="overflow:auto;">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Data</th><th>waId</th><th>Evento</th><th>ID</th><th>Status</th><th>Venc.</th><th style="text-align:right;">Valor</th>
+            </tr>
+          </thead>
+          <tbody>\${rows}</tbody>
+        </table>
+      </div>\`;
+    }
+
+    async function loadEvents(){
+      $("eventsBox").textContent = "Carregando...";
+      const waId = $("evWaId").value.trim();
+      const limit = Number($("evLimit").value || 50) || 50;
+      const qs = new URLSearchParams({ limit: String(limit) });
+      if(waId) qs.set("waId", waId);
+      const r = await fetch("/admin/finance/asaas/events?" + qs.toString());
+      const j = await r.json();
+      $("eventsBox").innerHTML = renderEvents(j.items || []);
+    }
+
+    function renderUserSummary(u){
+      if(!u) return "<div class='muted'>Usuário não encontrado.</div>";
+      return \`
+        <div class="row" style="justify-content:space-between;">
+          <div><b>\${esc(u.fullName || "(sem nome)")}</b></div>
+          <div class="pill">\${esc(u.status || "UNKNOWN")}</div>
+        </div>
+        <div class="muted" style="margin-top:6px;">
+          <div><b>waId:</b> \${esc(u.waId)}</div>
+          <div><b>Plano:</b> \${esc(u.plan || "—")}</div>
+          <div><b>Método:</b> \${esc(u.paymentMethod || "—")}</div>
+          <div><b>Asaas Customer:</b> \${esc(u.asaasCustomerId || "—")}</div>
+          <div><b>Assinatura:</b> \${esc(u.asaasSubscriptionId || "—")}</div>
+          <div><b>Validade cartão:</b> \${esc(u.cardValidUntil || "—")}</div>
+        </div>
+      \`;
+    }
+
+    function renderPayments(p){
+      const arr = p?.data || [];
+      if(!Array.isArray(arr)) return "<div class='muted'>Falha ao consultar pagamentos.</div>";
+      if(!arr.length) return "<div class='muted'>Sem pagamentos encontrados.</div>";
+      const rows = arr.map(x=>\`<tr>
+        <td>\${esc(x.dateCreated || "")}</td>
+        <td>\${esc(x.id || "")}</td>
+        <td>\${esc(x.status || "")}</td>
+        <td>\${esc(x.billingType || "")}</td>
+        <td>\${esc(x.dueDate || "")}</td>
+        <td style="text-align:right;">\${esc(fmtMoney(x.value))}</td>
+      </tr>\`).join("");
+      return \`<div style="overflow:auto;">
+        <table class="table">
+          <thead><tr><th>Criado</th><th>ID</th><th>Status</th><th>Tipo</th><th>Venc.</th><th style="text-align:right;">Valor</th></tr></thead>
+          <tbody>\${rows}</tbody>
+        </table>
+      </div>\`;
+    }
+
+    function renderSubscriptions(s){
+      const arr = s?.data || [];
+      if(!Array.isArray(arr)) return "<div class='muted'>Falha ao consultar assinaturas.</div>";
+      if(!arr.length) return "<div class='muted'>Sem assinaturas encontradas.</div>";
+      const rows = arr.map(x=>\`<tr>
+        <td>\${esc(x.dateCreated || "")}</td>
+        <td>\${esc(x.id || "")}</td>
+        <td>\${esc(x.status || "")}</td>
+        <td>\${esc(x.cycle || "")}</td>
+        <td>\${esc(x.nextDueDate || x.nextPaymentDate || "")}</td>
+        <td style="text-align:right;">\${esc(fmtMoney(x.value))}</td>
+      </tr>\`).join("");
+      return \`<div style="overflow:auto;">
+        <table class="table">
+          <thead><tr><th>Criado</th><th>ID</th><th>Status</th><th>Ciclo</th><th>Próx. venc.</th><th style="text-align:right;">Valor</th></tr></thead>
+          <tbody>\${rows}</tbody>
+        </table>
+      </div>\`;
+    }
+
+    async function loadUser(){
+      const waId = $("userWaId").value.trim();
+      if(!waId){
+        $("userBox").textContent = "Informe um waId.";
+        return;
+      }
+      $("userBox").textContent = "Carregando...";
+      $("detailBox").textContent = "Carregando...";
+      const r = await fetch("/admin/finance/asaas/user?waId=" + encodeURIComponent(waId));
+      const j = await r.json();
+      if(!j.ok){
+        $("userBox").innerHTML = "<div class='muted'>Erro: " + esc(j.error || "unknown") + "</div>";
+        return;
+      }
+      $("userBox").innerHTML = renderUserSummary(j.user);
+
+      const cancelBtn = (j.user?.asaasSubscriptionId)
+        ? \`<button class="btn danger" id="btnCancelSub">Cancelar recorrência</button>\`
+        : "";
+
+      $("detailBox").innerHTML = \`
+        <div class="grid" style="grid-template-columns:1fr 1fr; gap:12px;">
+          <div class="card pad">
+            <h4 style="margin-top:0;">Pagamentos (Asaas)</h4>
+            \${j.payments?.error ? "<div class='muted'>Erro: " + esc(j.payments.error) + "</div>" : renderPayments(j.payments)}
+          </div>
+          <div class="card pad">
+            <h4 style="margin-top:0;">Assinaturas (Asaas)</h4>
+            \${j.subscriptions?.error ? "<div class='muted'>Erro: " + esc(j.subscriptions.error) + "</div>" : renderSubscriptions(j.subscriptions)}
+            <div style="margin-top:10px;">\${cancelBtn}</div>
+          </div>
+        </div>
+
+        <div class="card pad" style="margin-top:12px;">
+          <h4 style="margin-top:0;">Eventos (Webhook • Ledger)</h4>
+          \${renderEvents(j.ledger || [])}
+        </div>
+      \`;
+
+      const btn = document.getElementById("btnCancelSub");
+      if(btn){
+        btn.addEventListener("click", async ()=>{
+          const subId = j.user.asaasSubscriptionId;
+          if(!subId) return;
+          if(!confirm("Cancelar a recorrência desta assinatura no Asaas?")) return;
+          btn.disabled = true;
+          try{
+            const rr = await fetch("/admin/finance/asaas/cancel-subscription", {
+              method:"POST",
+              headers:{ "Content-Type":"application/json" },
+              body: JSON.stringify({ waId, subscriptionId: subId })
+            });
+            const jj = await rr.json();
+            alert(jj.ok ? "Cancelamento enviado ao Asaas." : ("Erro: " + (jj.error || "unknown")));
+          } finally {
+            btn.disabled = false;
+            loadUser();
+          }
+        });
+      }
+    }
+
+    $("btnLoadEvents").addEventListener("click", loadEvents);
+    $("btnLoadUser").addEventListener("click", loadUser);
+
+    loadEvents();
+  `;
+
+  return res.send(layoutBase({
+    title: "Financeiro • Asaas",
+    activePath: "/admin/finance-asaas-ui",
+    content: inner,
+    scriptExtra: script,
+  }));
+});
 
   return router;
 }
