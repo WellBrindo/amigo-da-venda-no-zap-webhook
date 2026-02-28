@@ -151,3 +151,68 @@ export async function cancelSubscription({ subscriptionId }) {
   // 2) DELETE subscription
   return asaasFetch(`/subscriptions/${id}`, { method: "DELETE" });
 }
+
+// -------------------- Payments (Consulta / Reconciliação) --------------------
+export async function getPayment({ paymentId }) {
+  const id = String(paymentId || "").trim();
+  if (!id) throw new Error("paymentId required");
+  return asaasFetch(`/payments/${id}`, { method: "GET" });
+}
+
+export async function listPayments({
+  externalReference,
+  customerId,
+  subscriptionId,
+  status,
+  billingType,
+  dateCreatedFrom,
+  dateCreatedTo,
+  limit = 50,
+  offset = 0,
+} = {}) {
+  const params = new URLSearchParams();
+
+  if (externalReference) params.set("externalReference", String(externalReference));
+  if (customerId) params.set("customer", String(customerId));
+  if (subscriptionId) params.set("subscription", String(subscriptionId));
+  if (status) params.set("status", String(status));
+  if (billingType) params.set("billingType", String(billingType));
+
+  // Asaas aceita dateCreated (YYYY-MM-DD) e possivelmente filtros por intervalo via createdDate[ge]/[le] em alguns endpoints.
+  // Mantemos abordagem compatível: se apenas um lado foi fornecido, enviamos dateCreated (from).
+  if (dateCreatedFrom && !dateCreatedTo) params.set("dateCreated", String(dateCreatedFrom));
+  if (dateCreatedFrom && dateCreatedTo) {
+    params.set("dateCreated[ge]", String(dateCreatedFrom));
+    params.set("dateCreated[le]", String(dateCreatedTo));
+  }
+
+  params.set("limit", String(Number(limit) || 50));
+  params.set("offset", String(Number(offset) || 0));
+
+  return asaasFetch(`/payments?${params.toString()}`, { method: "GET" });
+}
+
+export async function listPaymentsByExternalReference(externalReference, { limit = 50, offset = 0 } = {}) {
+  return listPayments({ externalReference, limit, offset });
+}
+
+// -------------------- Subscriptions (Listagem) --------------------
+export async function listSubscriptions({
+  externalReference,
+  customerId,
+  status,
+  limit = 50,
+  offset = 0,
+} = {}) {
+  const params = new URLSearchParams();
+  if (externalReference) params.set("externalReference", String(externalReference));
+  if (customerId) params.set("customer", String(customerId));
+  if (status) params.set("status", String(status));
+  params.set("limit", String(Number(limit) || 50));
+  params.set("offset", String(Number(offset) || 0));
+  return asaasFetch(`/subscriptions?${params.toString()}`, { method: "GET" });
+}
+
+export async function listSubscriptionsByExternalReference(externalReference, { limit = 50, offset = 0 } = {}) {
+  return listSubscriptions({ externalReference, limit, offset });
+}
