@@ -57,6 +57,9 @@ import {
   setCopyUser,
   delCopyUser,
 } from "../services/copy.js";
+import { listPayments, getSubscription, cancelSubscription } from "../services/asaas/client.js";
+import { listAsaasEvents } from "../services/asaas/ledger.js";
+
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -226,7 +229,9 @@ function layoutBase({ title, activePath = "/admin", content = "", headExtra = ""
 function renderSidebar(activePath){
   const ap = String(activePath||"");
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h");
-  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/finance-asaas") || ap.startsWith("/admin/asaas-test");
+  const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
+  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test");
+
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
     return `<a class="item ${active}" href="${href}"><span>${icon||"•"}</span><span>${escapeHtml(label)}</span></a>`;
@@ -265,18 +270,23 @@ function renderSidebar(activePath){
         ${item("/admin/window24h-ui", "Janela 24h", "🕒")}
       </details>
 
+      <details ${financeOpen ? "open" : ""}>
+        <summary>💰 Financeiro <span>▾</span></summary>
+        ${item("/admin/finance-asaas-ui", "Asaas (Reconciliação)", "🧾")}
+      </details>
+
       <details ${systemOpen ? "open" : ""}>
         <summary>⚙️ Sistema <span>▾</span></summary>
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
-        ${item("/admin/finance-asaas-ui", "Financeiro • Asaas", "💰")}
-        ${item("/asaas/test", "Asaas Test", "🧾")}
+        ${item("/admin/asaas-test-ui", "Asaas Teste", "🧪")}
       </details>
 
       <div class="hint" style="margin-top:10px;">Dica: tudo é protegido por Basic Auth (ADMIN_SECRET).</div>
     </nav>
   `;
 }
+
 
 function requireWaId(req) {
   const waId = String(req.query?.waId || "").trim();
@@ -878,7 +888,7 @@ router.get("/", async (req, res) => {
               <a class="pill" href="/health-redis">🧠 Health Redis</a>
               <a class="pill" href="/admin/health-plans">🧾 Health Planos (JSON)</a>
               <a class="pill" href="/admin/alerts-ui">🚨 Alertas</a>
-              <a class="pill" href="/asaas/test">🧾 Asaas Test</a>
+              <a class="pill" href="/admin/asaas-test-ui">🧪 Asaas Teste</a>
             </div>
             <div class="hr"></div>
             <div class="muted">Observação: ações avançadas estão nas seções do menu.</div>
@@ -1861,7 +1871,341 @@ async function toggle(code, active){
   // -----------------------------
   // Janela 24h (UI já existente)
   // -----------------------------
-  router.get("/window24h-ui", async (req, res) => {
+  
+  // ===================== Financeiro • Asaas (UI + APIs) =====================
+  // Página: Reconciliação + Histórico (Ledger de webhooks)
+  router.get("/finance-asaas-ui", async (req, res) => {
+    const inner = `
+      <div class="row" style="justify-content:space-between; align-items:flex-end; gap:16px;">
+        <div>
+          <h2 style="margin:0 0 6px 0;">💰 Financeiro — Asaas</h2>
+          <div class="muted">Reconciliação rápida por usuário + histórico dos eventos recebidos via webhook (ledger).</div>
+        </div>
+        <div class="row" style="gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+          <a class="pill" href="/admin/asaas-test-ui">🧪 Asaas Teste</a>
+        </div>
+      </div>
+
+      <div class="grid" style="margin-top:14px; grid-template-columns: 1.2fr 0.8fr; gap:14px;">
+        <div class="card pad">
+          <h3 style="margin:0 0 8px 0;">🔎 Reconciliação por usuário</h3>
+          <div class="muted" style="margin-bottom:10px;">Informe o waId (55DDXXXXXXXXX) para consultar status/plano + dados do Asaas.</div>
+
+          <div class="row" style="gap:8px; flex-wrap:wrap;">
+            <input id="waId" class="input" placeholder="Ex: 5511980000000" style="min-width:260px; flex:1;" />
+            <button class="primary" onclick="loadUser()">Buscar</button>
+          </div>
+
+          <div class="hr"></div>
+
+          <div id="userOut" class="muted">Nenhuma consulta ainda.</div>
+
+          <div class="hr"></div>
+          <details>
+            <summary class="muted">Ver JSON bruto</summary>
+            <pre id="userRaw" style="white-space:pre-wrap;"></pre>
+          </details>
+        </div>
+
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+            <div>
+              <h3 style="margin:0 0 8px 0;">📜 Histórico (Ledger)</h3>
+              <div class="muted">Eventos recentes recebidos do Asaas.</div>
+            </div>
+            <button class="ghost" onclick="loadEvents()">Atualizar</button>
+          </div>
+
+          <div class="hr"></div>
+          <div id="eventsOut" class="muted">Carregando…</div>
+
+          <div class="hr"></div>
+          <details>
+            <summary class="muted">Ver JSON bruto</summary>
+            <pre id="eventsRaw" style="white-space:pre-wrap;"></pre>
+          </details>
+        </div>
+      </div>
+
+      <div id="modal" class="modal" style="display:none;">
+        <div class="modal__backdrop" onclick="hideModal()"></div>
+        <div class="modal__card">
+          <div class="row" style="justify-content:space-between; align-items:center;">
+            <h3 id="modalTitle" style="margin:0;">Aviso</h3>
+            <button class="ghost" onclick="hideModal()">Fechar</button>
+          </div>
+          <div class="hr"></div>
+          <pre id="modalBody" style="white-space:pre-wrap; margin:0;"></pre>
+        </div>
+      </div>
+
+      <style>
+        .modal { position:fixed; inset:0; z-index:9999; }
+        .modal__backdrop { position:absolute; inset:0; background:rgba(0,0,0,.35); }
+        .modal__card { position:relative; width:min(920px, calc(100% - 24px)); margin:42px auto; background:#fff; border-radius:14px; padding:14px; box-shadow:0 14px 40px rgba(0,0,0,.22); }
+        pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px; }
+      </style>
+
+      <script>
+        function esc(s){
+          return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+        }
+        function showModal(title, obj){
+          document.getElementById('modalTitle').textContent = title || 'Aviso';
+          document.getElementById('modalBody').textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+          document.getElementById('modal').style.display = 'block';
+        }
+        function hideModal(){
+          document.getElementById('modal').style.display = 'none';
+        }
+
+        async function loadEvents(){
+          const r = await fetch('/admin/api/finance/asaas/events?limit=50&offset=0');
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('eventsRaw').textContent = JSON.stringify(j, null, 2);
+
+          const items = Array.isArray(j.items) ? j.items : [];
+          if(!items.length){
+            document.getElementById('eventsOut').innerHTML = '<div class="muted">Nenhum evento registrado.</div>';
+            return;
+          }
+
+          const html = '<table><thead><tr><th>Quando</th><th>Evento</th><th>Ref</th></tr></thead><tbody>' +
+            items.map(it => {
+              const when = it.receivedAt || it.ts || it.dateCreated || it.createdAt || '';
+              const ev = it.event || it.type || it.kind || '';
+              const ref = it.paymentId || it.subscriptionId || it.invoiceId || it.id || it.externalReference || '';
+              return '<tr>' +
+                '<td><code>'+esc(when)+'</code></td>' +
+                '<td>'+esc(ev)+'</td>' +
+                '<td><code>'+esc(ref)+'</code></td>' +
+              '</tr>';
+            }).join('') +
+            '</tbody></table>';
+
+          document.getElementById('eventsOut').innerHTML = html;
+        }
+
+        async function loadUser(){
+          const waId = String(document.getElementById('waId').value || '').trim();
+          if(!waId){
+            showModal('Atenção', 'Informe o waId.');
+            return;
+          }
+          const r = await fetch('/admin/api/finance/asaas/user?waId=' + encodeURIComponent(waId));
+          const j = await r.json().catch(()=>({ ok:false, error:'Falha ao ler resposta'}));
+          document.getElementById('userRaw').textContent = JSON.stringify(j, null, 2);
+
+          if(!j.ok){
+            document.getElementById('userOut').innerHTML = '<div class="muted">Erro: '+esc(j.error||'')+'</div>';
+            return;
+          }
+
+          const u = j.user || {};
+          const sub = j.subscription || null;
+          const pays = Array.isArray(j.payments?.data) ? j.payments.data : (Array.isArray(j.payments?.items) ? j.payments.items : []);
+          const subStatus = sub && sub.status ? sub.status : (u.asaasSubscriptionId ? '(não encontrado)' : '—');
+
+          const cancelBtn = (sub && sub.id) ? '<button class="danger" style="margin-left:8px;" onclick="cancelSub(\\''+esc(sub.id)+'\\', \\''+esc(u.waId)+'\\')">Cancelar assinatura</button>' : '';
+
+          const html =
+            '<div class="row" style="justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;">' +
+              '<div>' +
+                '<div><b>Nome:</b> '+esc(u.fullName||'—')+'</div>' +
+                '<div><b>waId:</b> <code>'+esc(u.waId||'')+'</code></div>' +
+                '<div><b>Status:</b> '+esc(u.status||'')+'</div>' +
+                '<div><b>Plano:</b> '+esc(u.plan||'')+'</div>' +
+                '<div><b>Forma de pagamento:</b> '+esc(u.paymentMethod||'—')+'</div>' +
+                '<div><b>Documento:</b> '+esc(u.doc?.docType ? (u.doc.docType+' • ****'+(u.doc.docLast4||'')) : '—')+'</div>' +
+              '</div>' +
+              '<div>' +
+                '<div><b>Asaas Customer:</b> <code>'+esc(u.asaasCustomerId||'—')+'</code></div>' +
+                '<div><b>Asaas Subscription:</b> <code>'+esc(u.asaasSubscriptionId||'—')+'</code></div>' +
+                '<div><b>Status assinatura:</b> '+esc(subStatus) + cancelBtn + '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="hr"></div>' +
+            '<div><b>Pagamentos (recentes)</b></div>' +
+            (pays.length
+              ? ('<table><thead><tr><th>Data</th><th>Status</th><th>Valor</th><th>Id</th></tr></thead><tbody>' +
+                 pays.slice(0, 12).map(p => {
+                   const d = p.dateCreated || p.createdAt || '';
+                   const st = p.status || '';
+                   const v = (p.value !== undefined && p.value !== null) ? String(p.value) : '';
+                   const id = p.id || '';
+                   return '<tr><td><code>'+esc(d)+'</code></td><td>'+esc(st)+'</td><td>'+esc(v)+'</td><td><code>'+esc(id)+'</code></td></tr>';
+                 }).join('') +
+               '</tbody></table>')
+              : '<div class="muted">Nenhum pagamento encontrado para este usuário.</div>'
+            );
+
+          document.getElementById('userOut').innerHTML = html;
+        }
+
+        async function cancelSub(subId, waId){
+          if(!confirm('Cancelar a assinatura no Asaas?')){
+            return;
+          }
+          const r = await fetch('/admin/api/finance/asaas/cancel-subscription', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subscriptionId: subId, waId })
+          });
+          const j = await r.json().catch(()=>({ ok:false, error:'Falha ao ler resposta'}));
+          showModal('Resultado', j);
+          if(j.ok){
+            await loadUser();
+          }
+        }
+
+        loadEvents();
+      </script>
+    `;
+
+    const html = layoutBase({ title: "Financeiro — Asaas", activePath: "/admin/finance-asaas-ui", content: inner });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  // APIs (JSON)
+  router.get("/api/finance/asaas/events", async (req, res) => {
+    const waId = String(req.query?.waId || "").trim() || null;
+    const limit = Number(req.query?.limit || 50);
+    const offset = Number(req.query?.offset || 0);
+    const data = await listAsaasEvents({ waId, limit, offset });
+    return res.json(data);
+  });
+
+  router.get("/api/finance/asaas/user", async (req, res) => {
+    try {
+      const waId = requireWaId(req);
+      const user = await getUserSnapshot(waId);
+
+      let subscription = null;
+      if (user.asaasSubscriptionId) {
+        try {
+          subscription = await getSubscription(user.asaasSubscriptionId);
+        } catch (e) {
+          // não falha a página se o Asaas não encontrar a assinatura
+          subscription = null;
+        }
+      }
+
+      const payments = user.asaasCustomerId
+        ? await listPayments({ customerId: user.asaasCustomerId, limit: 20, offset: 0 })
+        : (user.asaasSubscriptionId ? await listPayments({ subscriptionId: user.asaasSubscriptionId, limit: 20, offset: 0 }) : { data: [] });
+
+      return res.json({ ok: true, user, subscription, payments });
+    } catch (e) {
+      const msg = String(e?.message || e || "Erro").slice(0, 300);
+      return res.status(Number(e?.statusCode || 500)).json({ ok: false, error: msg });
+    }
+  });
+
+  router.post("/api/finance/asaas/cancel-subscription", async (req, res) => {
+    try {
+      const subscriptionId = String(req.body?.subscriptionId || "").trim();
+      const waId = String(req.body?.waId || "").trim();
+
+      let subId = subscriptionId;
+      if (!subId && waId) {
+        const u = await getUserSnapshot(waId);
+        subId = String(u.asaasSubscriptionId || "").trim();
+      }
+
+      if (!subId) {
+        return res.status(400).json({ ok: false, error: "subscriptionId ausente." });
+      }
+
+      const out = await cancelSubscription(subId);
+      return res.json({ ok: true, canceled: out });
+    } catch (e) {
+      const msg = String(e?.message || e || "Erro").slice(0, 300);
+      return res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
+  // ===================== Asaas Teste (UI + API) =====================
+  router.get("/asaas-test-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;">
+          <div>
+            <h2 style="margin:0 0 6px 0;">🧪 Asaas Teste</h2>
+            <div class="muted">Teste de conectividade usando a mesma chave/ambiente do backend (sem expor dados sensíveis).</div>
+          </div>
+          <div class="row" style="gap:8px;">
+            <button class="primary" onclick="run()">Testar agora</button>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+        <div id="out" class="muted">Clique em “Testar agora”.</div>
+
+        <div class="hr"></div>
+        <details>
+          <summary class="muted">Ver JSON bruto</summary>
+          <pre id="raw" style="white-space:pre-wrap;"></pre>
+        </details>
+      </div>
+
+      <div id="modal" class="modal" style="display:none;">
+        <div class="modal__backdrop" onclick="hideModal()"></div>
+        <div class="modal__card">
+          <div class="row" style="justify-content:space-between; align-items:center;">
+            <h3 style="margin:0;">Resultado</h3>
+            <button class="ghost" onclick="hideModal()">Fechar</button>
+          </div>
+          <div class="hr"></div>
+          <pre id="modalBody" style="white-space:pre-wrap; margin:0;"></pre>
+        </div>
+      </div>
+
+      <style>
+        .modal { position:fixed; inset:0; z-index:9999; }
+        .modal__backdrop { position:absolute; inset:0; background:rgba(0,0,0,.35); }
+        .modal__card { position:relative; width:min(820px, calc(100% - 24px)); margin:42px auto; background:#fff; border-radius:14px; padding:14px; box-shadow:0 14px 40px rgba(0,0,0,.22); }
+      </style>
+
+      <script>
+        function esc(s){
+          return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+        }
+        function showModal(obj){
+          document.getElementById('modalBody').textContent = JSON.stringify(obj, null, 2);
+          document.getElementById('modal').style.display = 'block';
+        }
+        function hideModal(){
+          document.getElementById('modal').style.display = 'none';
+        }
+        async function run(){
+          const r = await fetch('/admin/api/asaas/test');
+          const j = await r.json().catch(()=>({ ok:false, error:'Falha ao ler resposta' }));
+          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+          document.getElementById('out').innerHTML = j.ok
+            ? '<div><b>✅ OK</b> — Consegui falar com o Asaas.</div>'
+            : '<div><b>❌ Falha</b> — '+esc(j.error||'')+'</div>';
+          showModal(j);
+        }
+      </script>
+    `;
+    const html = layoutBase({ title: "Asaas Teste", activePath: "/admin/asaas-test-ui", content: inner });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  router.get("/api/asaas/test", async (req, res) => {
+    try {
+      const out = await listPayments({ limit: 1, offset: 0 });
+      return res.json({ ok: true, sampleCount: Array.isArray(out?.data) ? out.data.length : 0 });
+    } catch (e) {
+      const msg = String(e?.message || e || "Erro").slice(0, 300);
+      return res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
+
+router.get("/window24h-ui", async (req, res) => {
     const inner = `
       <div class="card pad">
         <div class="row" style="justify-content:space-between;">
