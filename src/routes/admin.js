@@ -308,7 +308,7 @@ export function adminRouter() {
     return Number.isFinite(n) ? Math.trunc(n) : def;
   }
 
-  async function mapLimit(items, limit, fn) {
+  async function mapLimitDashboard(items, limit, fn) {
     const arr = Array.isArray(items) ? items : [];
     const lim = Math.max(1, toInt(limit, 10));
     const out = new Array(arr.length);
@@ -371,7 +371,7 @@ export function adminRouter() {
     // Plano breakdown (best-effort)
     const plans = {}; // { CODE: count }
 
-    const snapshots = await mapLimit(users, 25, async (id) => {
+    const snapshots = await mapLimitDashboard(users, 25, async (id) => {
       const snap = await getUserSnapshot(id);
       return snap || {};
     });
