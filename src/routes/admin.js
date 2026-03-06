@@ -60,8 +60,6 @@ import {
 import { listPayments, getSubscription, cancelSubscription } from "../services/asaas/client.js";
 import { listAsaasEvents } from "../services/asaas/ledger.js";
 
-import { redisGet, redisSet, redisDel } from "../services/redis.js";
-
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -232,7 +230,7 @@ function renderSidebar(activePath){
   const ap = String(activePath||"");
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
-  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
+  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test");
 
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
@@ -281,7 +279,6 @@ function renderSidebar(activePath){
         <summary>⚙️ Sistema <span>▾</span></summary>
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
-        ${item("/admin/settings-ui", "Configurações Globais", "🛠️")}
         ${item("/admin/asaas-test-ui", "Asaas Teste", "🧪")}
       </details>
 
@@ -301,127 +298,127 @@ function requireWaId(req) {
   return waId;
 }
 
-const GLOBAL_SETTINGS_PREFIX = "cfg:global:";
 
+async function buildInconsistencyReport() {
+  const [usersRaw, plansRaw] = await Promise.all([
+    listUsers().catch(() => []),
+    listPlans({ includeInactive: true }).catch(() => []),
+  ]);
 
-const GLOBAL_SETTINGS_CATALOG = [
-  {
-    key: "trial.maxDescriptions",
-    label: "Limite de anúncios no teste gratuito",
-    section: "Plano Trial",
-    type: "int",
-    defaultValue: 5,
-    min: 1,
-    max: 1000,
-    help: "Define quantos anúncios um usuário pode gerar durante o período de teste gratuito. Se você aumentar esse número, os usuários poderão criar mais anúncios antes de precisar assinar um plano."
-  },
-  {
-    key: "trial.maxRefinements",
-    label: "Limite de melhorias do anúncio no teste",
-    section: "Plano Trial",
-    type: "int",
-    defaultValue: 2,
-    min: 0,
-    max: 100,
-    help: "Define quantas vezes o usuário pode pedir para o sistema melhorar ou ajustar um anúncio durante o teste gratuito."
-  },
-  {
-    key: "flow.defaultTemplateMode",
-    label: "Modo padrão de criação de anúncio",
-    section: "Fluxo do Bot",
-    type: "enum",
-    defaultValue: "FIXED",
-    options: ["FIXED", "FREE"],
-    help: "Define como o anúncio será criado por padrão. FIXED = usa um modelo estruturado do sistema. FREE = permite texto mais livre e criativo."
-  },
-  {
-    key: "flow.requireNameOnStart",
-    label: "Solicitar nome do usuário no início",
-    section: "Fluxo do Bot",
-    type: "bool",
-    defaultValue: true,
-    help: "Se ativado, o bot sempre pedirá o nome do usuário antes de iniciar o fluxo de criação de anúncios."
-  },
-  {
-    key: "feature.companyProfileWizard",
-    label: "Ativar cadastro de dados da empresa",
-    section: "Funcionalidades",
-    type: "bool",
-    defaultValue: true,
-    help: "Se ativado, o sistema pedirá dados da empresa do usuário (nome do negócio, cidade, etc.) para melhorar os anúncios gerados."
-  },
-  {
-    key: "feature.refinement",
-    label: "Permitir melhoria automática de anúncios",
-    section: "Funcionalidades",
-    type: "bool",
-    defaultValue: true,
-    help: "Se ativado, o usuário pode pedir para o sistema melhorar ou ajustar o anúncio gerado."
+  const userIds = Array.isArray(usersRaw) ? usersRaw : [];
+  const plans = Array.isArray(plansRaw) ? plansRaw : [];
+  const planMap = new Map();
+  for (const plan of plans) {
+    const code = String(plan?.code || "").trim().toUpperCase();
+    if (code) planMap.set(code, plan);
   }
-];
 
+  const now = nowMs();
+  const rows = await mapLimit(userIds, 20, async (waId) => {
+    const [snap, lastInboundTsRaw] = await Promise.all([
+      getUserSnapshot(waId).catch(() => ({})),
+      getLastInboundTs(waId).catch(() => 0),
+    ]);
 
-function settingRedisKey(key) {
-  return `${GLOBAL_SETTINGS_PREFIX}${key}`;
+    const snapshot = snap || {};
+    const lastInboundTs = Number(lastInboundTsRaw) || 0;
+    const issues = [];
+
+    const status = String(snapshot.status || "").trim().toUpperCase();
+    const planCode = String(snapshot.plan || "").trim().toUpperCase();
+    const paymentMethod = String(snapshot.paymentMethod || "").trim().toUpperCase();
+    const quotaUsed = Number(snapshot.quotaUsed || 0);
+    const trialUsed = Number(snapshot.trialUsed || 0);
+    const hasName = Boolean(String(snapshot.fullName || "").trim());
+    const hasBillingCity = Boolean(String(snapshot.billingCityState || "").trim());
+    const hasBillingAddress = Boolean(String(snapshot.billingAddress || "").trim());
+    const hasAsaasCustomer = Boolean(String(snapshot.asaasCustomerId || "").trim());
+    const hasAsaasSubscription = Boolean(String(snapshot.asaasSubscriptionId || "").trim());
+    const planDef = planCode ? planMap.get(planCode) : null;
+
+    function pushIssue(code, severity, title, detail) {
+      issues.push({ code, severity, title, detail });
+    }
+
+    if (status === "ACTIVE" && !planCode) {
+      pushIssue("ACTIVE_WITHOUT_PLAN", "danger", "Usuário ativo sem plano", "O status está ACTIVE, mas não existe plano vinculado no cadastro.");
+    }
+
+    if (status === "TRIAL" && planCode) {
+      pushIssue("TRIAL_WITH_PLAN", "warn", "Usuário em teste com plano preenchido", "O status está TRIAL, mas existe um plano preenchido. Vale revisar se houve migração incompleta.");
+    }
+
+    if (planCode && !planDef) {
+      pushIssue("PLAN_NOT_FOUND", "danger", "Plano inexistente no catálogo", "O código de plano salvo no usuário não foi encontrado no catálogo atual de planos.");
+    }
+
+    if (status === "ACTIVE" && planDef && planDef.active === false) {
+      pushIssue("INACTIVE_PLAN_IN_USE", "warn", "Plano inativo sendo usado", "O usuário está ativo, mas o plano vinculado está marcado como inativo no catálogo.");
+    }
+
+    if (paymentMethod && !hasAsaasCustomer) {
+      pushIssue("PAYMENT_WITHOUT_CUSTOMER", "danger", "Cobrança sem cliente Asaas", "Existe forma de pagamento definida, mas o cadastro do cliente no Asaas não está salvo.");
+    }
+
+    if (hasAsaasSubscription && !hasAsaasCustomer) {
+      pushIssue("SUBSCRIPTION_WITHOUT_CUSTOMER", "danger", "Assinatura sem cliente Asaas", "Existe ID de assinatura, mas não existe ID de cliente vinculado.");
+    }
+
+    if (status === "ACTIVE" && !hasAsaasSubscription && paymentMethod === "CARD") {
+      pushIssue("ACTIVE_CARD_WITHOUT_SUBSCRIPTION", "warn", "Usuário ativo no cartão sem assinatura salva", "O usuário parece estar ativo com pagamento por cartão, mas não há ID de assinatura salvo.");
+    }
+
+    if (trialUsed < 0 || quotaUsed < 0) {
+      pushIssue("NEGATIVE_COUNTER", "danger", "Contador negativo", "Há contador negativo em quotaUsed ou trialUsed, o que indica dado inconsistente.");
+    }
+
+    if (status === "TRIAL" && quotaUsed > 0) {
+      pushIssue("TRIAL_WITH_QUOTAUSED", "warn", "Usuário em teste com uso de plano pago", "O usuário está em TRIAL, mas quotaUsed está acima de zero.");
+    }
+
+    if (!hasName) {
+      pushIssue("MISSING_NAME", "info", "Usuário sem nome cadastrado", "Ainda não existe nome salvo para este usuário.");
+    }
+
+    if (paymentMethod && (!hasBillingCity || !hasBillingAddress)) {
+      pushIssue("INCOMPLETE_BILLING", "warn", "Dados de cobrança incompletos", "Existe forma de pagamento definida, mas cidade/UF ou endereço de cobrança estão incompletos.");
+    }
+
+    if (lastInboundTs && lastInboundTs > (now + 60000)) {
+      pushIssue("FUTURE_INBOUND_TS", "warn", "Última mensagem no futuro", "O timestamp da última mensagem recebida está à frente do horário atual.");
+    }
+
+    if (hasAsaasSubscription && status === "WAIT_PLAN") {
+      pushIssue("WAIT_PLAN_WITH_SUBSCRIPTION", "warn", "Aguardando plano com assinatura já criada", "O status ainda indica WAIT_PLAN, mas já existe assinatura vinculada.");
+    }
+
+    return {
+      waId,
+      snapshot,
+      lastInboundTs,
+      issueCount: issues.length,
+      issues,
+    };
+  });
+
+  const items = rows.filter((row) => row.issueCount > 0);
+
+  const counts = {
+    usersChecked: userIds.length,
+    usersWithIssues: items.length,
+    issuesTotal: items.reduce((acc, row) => acc + row.issueCount, 0),
+    danger: items.reduce((acc, row) => acc + row.issues.filter((i) => i.severity === "danger").length, 0),
+    warn: items.reduce((acc, row) => acc + row.issues.filter((i) => i.severity === "warn").length, 0),
+    info: items.reduce((acc, row) => acc + row.issues.filter((i) => i.severity === "info").length, 0),
+  };
+
+  return {
+    generatedAt: now,
+    counts,
+    items,
+  };
 }
 
-function normalizeSettingValue(def, rawValue) {
-  if (rawValue === undefined || rawValue === null || rawValue === "") {
-    return def.defaultValue;
-  }
-
-  if (def.type === "bool") {
-    if (typeof rawValue === "boolean") return rawValue;
-    const v = String(rawValue).trim().toLowerCase();
-    return v === "1" || v === "true" || v === "on" || v === "yes";
-  }
-
-  if (def.type === "int") {
-    const n = Number(rawValue);
-    let out = Number.isFinite(n) ? Math.trunc(n) : Number(def.defaultValue || 0);
-    if (Number.isFinite(def.min)) out = Math.max(def.min, out);
-    if (Number.isFinite(def.max)) out = Math.min(def.max, out);
-    return out;
-  }
-
-  if (def.type === "enum") {
-    const v = String(rawValue).trim();
-    return Array.isArray(def.options) && def.options.includes(v) ? v : def.defaultValue;
-  }
-
-  return String(rawValue);
-}
-
-function serializeSettingValue(def, value) {
-  if (def.type === "bool") return value ? "true" : "false";
-  if (def.type === "int") return String(Math.trunc(Number(value) || 0));
-  return String(value ?? "");
-}
-
-async function getResolvedGlobalSettings() {
-  const rows = [];
-  for (const def of GLOBAL_SETTINGS_CATALOG) {
-    const raw = await redisGet(settingRedisKey(def.key));
-    const resolved = normalizeSettingValue(def, raw);
-    rows.push({
-      ...def,
-      value: resolved,
-      storedValue: raw,
-      isCustom: raw !== null && raw !== undefined,
-    });
-  }
-  return rows;
-}
-
-function groupGlobalSettings(rows) {
-  const groups = new Map();
-  for (const row of rows) {
-    const section = row.section || "Geral";
-    if (!groups.has(section)) groups.set(section, []);
-    groups.get(section).push(row);
-  }
-  return Array.from(groups.entries()).map(([section, items]) => ({ section, items }));
-}
 
 export function adminRouter() {
   const router = Router();
@@ -1026,178 +1023,108 @@ router.get("/", async (req, res) => {
     return res.status(200).send(html);
   });
 
+
   // -----------------------------
-  // 🛠️ Configurações Globais
+  // 🧠 Painel de Inconsistências
   // -----------------------------
-  router.get("/settings", async (req, res) => {
+  router.get("/inconsistencies", async (req, res) => {
     try {
-      const rows = await getResolvedGlobalSettings();
-      return res.json({ ok: true, items: rows });
+      const report = await buildInconsistencyReport();
+      return res.json({ ok: true, ...report });
     } catch (err) {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
   });
 
-  router.post("/settings", async (req, res) => {
-    try {
-      const key = String(req.body?.key || "").trim();
-      const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
-      if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
+  router.get("/inconsistencies-ui", async (req, res) => {
+    const report = await buildInconsistencyReport();
 
-      const normalized = normalizeSettingValue(def, req.body?.value);
-      await redisSet(settingRedisKey(def.key), serializeSettingValue(def, normalized));
-
-      return res.json({ ok: true, key: def.key, value: normalized });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    function severityBadge(severity) {
+      if (severity === "danger") return '<span class="badge danger">crítico</span>';
+      if (severity === "warn") return '<span class="badge warn">atenção</span>';
+      return '<span class="badge info">informativo</span>';
     }
-  });
 
-  router.post("/settings/reset", async (req, res) => {
-    try {
-      const key = String(req.body?.key || "").trim();
-      const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
-      if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
+    const rowsHtml = report.items.length
+      ? report.items.map((row) => {
+          const snap = row.snapshot || {};
+          const issuesHtml = row.issues.map((issue) => `
+            <div style="margin-bottom:10px;">
+              ${severityBadge(issue.severity)}
+              <div style="margin-top:6px;"><b>${escapeHtml(issue.title)}</b></div>
+              <div class="muted" style="font-size:12px;">${escapeHtml(issue.detail)}</div>
+              <div class="muted" style="font-size:12px;margin-top:4px;"><code>${escapeHtml(issue.code)}</code></div>
+            </div>
+          `).join("");
 
-      await redisDel(settingRedisKey(def.key));
-      return res.json({ ok: true, key: def.key, value: def.defaultValue, reset: true });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: String(err?.message || err) });
-    }
-  });
+          return `
+            <tr>
+              <td>
+                <div><b>${escapeHtml(snap.fullName || "Sem nome")}</b></div>
+                <div class="muted" style="font-size:12px;"><code>${escapeHtml(row.waId)}</code></div>
+              </td>
+              <td>
+                <div>Status: <b>${escapeHtml(snap.status || "—")}</b></div>
+                <div class="muted" style="font-size:12px;">Plano: <b>${escapeHtml(snap.plan || "—")}</b></div>
+                <div class="muted" style="font-size:12px;">Pagamento: <b>${escapeHtml(snap.paymentMethod || "—")}</b></div>
+              </td>
+              <td>${issuesHtml}</td>
+              <td>
+                <div class="row">
+                  <a class="pill" href="/admin/users-ui?waId=${encodeURIComponent(row.waId)}">Abrir usuário</a>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join("")
+      : '<tr><td colspan="4" class="muted">Nenhuma inconsistência detectada no momento.</td></tr>';
 
-  router.get("/settings-ui", async (req, res) => {
-    const rows = await getResolvedGlobalSettings();
-    const groups = groupGlobalSettings(rows);
+    const html = layoutBase({
+      title: "Painel de Inconsistências",
+      activePath: "/admin/inconsistencies-ui",
+      content: `
+        <div class="grid cols3" style="margin-bottom:14px;">
+          <div class="kpi">
+            <div class="t">Usuários verificados</div>
+            <div class="v">${escapeHtml(String(report.counts.usersChecked))}</div>
+          </div>
+          <div class="kpi">
+            <div class="t">Usuários com problemas</div>
+            <div class="v">${escapeHtml(String(report.counts.usersWithIssues))}</div>
+          </div>
+          <div class="kpi">
+            <div class="t">Ocorrências encontradas</div>
+            <div class="v">${escapeHtml(String(report.counts.issuesTotal))}</div>
+            <div class="muted">Críticas: ${escapeHtml(String(report.counts.danger))} · Atenção: ${escapeHtml(String(report.counts.warn))} · Informativas: ${escapeHtml(String(report.counts.info))}</div>
+          </div>
+        </div>
 
-    const cards = groups.map(({ section, items }) => {
-      const body = items.map((row) => {
-        const inputHtml = (() => {
-          if (row.type === "bool") {
-            return `<label class="pill"><input type="checkbox" data-setting-input="${escapeHtml(row.key)}" ${row.value ? "checked" : ""} /> Ativo</label>`;
-          }
-          if (row.type === "enum") {
-            const options = (row.options || []).map((opt) => `<option value="${escapeHtml(opt)}" ${String(opt) === String(row.value) ? "selected" : ""}>${escapeHtml(opt)}</option>`).join("");
-            return `<select data-setting-input="${escapeHtml(row.key)}">${options}</select>`;
-          }
-          if (row.type === "int") {
-            const min = Number.isFinite(row.min) ? ` min="${escapeHtml(String(row.min))}"` : "";
-            const max = Number.isFinite(row.max) ? ` max="${escapeHtml(String(row.max))}"` : "";
-            return `<input type="number" data-setting-input="${escapeHtml(row.key)}" value="${escapeHtml(String(row.value))}"${min}${max} />`;
-          }
-          return `<input type="text" data-setting-input="${escapeHtml(row.key)}" value="${escapeHtml(String(row.value || ""))}" />`;
-        })();
-
-        return `
-          <tr>
-            <td>
-              <div><b>${escapeHtml(row.label)}</b></div>
-              <div class="muted" style="font-size:12px;">${escapeHtml(row.key)}</div>
-              <div class="muted" style="font-size:12px;margin-top:4px;">${escapeHtml(row.help || "")}</div>
-            </td>
-            <td>${inputHtml}</td>
-            <td><code>${escapeHtml(String(row.defaultValue ?? ""))}</code></td>
-            <td>${row.isCustom ? '<span class="badge warn">custom</span>' : '<span class="badge soft">default</span>'}</td>
-            <td>
-              <div class="row">
-                <button type="button" class="primary" data-save-setting="${escapeHtml(row.key)}">Salvar</button>
-                <button type="button" data-reset-setting="${escapeHtml(row.key)}">Resetar</button>
-              </div>
-            </td>
-          </tr>
-        `;
-      }).join("");
-
-      return `
         <div class="card pad" style="margin-bottom:14px;">
           <div class="row" style="justify-content:space-between;">
             <div>
-              <h3 style="margin:0 0 6px 0;">${escapeHtml(section)}</h3>
-              <div class="muted">Configurações globais persistidas no Redis.</div>
+              <h3 style="margin:0 0 6px 0;">🧠 Painel de Inconsistências</h3>
+              <div class="muted">Esta tela reúne sinais automáticos de problemas operacionais, comerciais e cadastrais para você agir sem depender de logs manuais.</div>
+            </div>
+            <div class="row">
+              <a class="pill" href="/admin/inconsistencies">Ver JSON</a>
+              <a class="pill" href="/admin/inconsistencies-ui">Recarregar</a>
             </div>
           </div>
-          <div class="hr"></div>
+        </div>
+
+        <div class="card pad">
           <table>
             <thead>
               <tr>
-                <th>Configuração</th>
-                <th>Valor atual</th>
-                <th>Padrão</th>
-                <th>Origem</th>
+                <th>Usuário</th>
+                <th>Resumo</th>
+                <th>Inconsistências detectadas</th>
                 <th>Ação</th>
               </tr>
             </thead>
-            <tbody>${body}</tbody>
+            <tbody>${rowsHtml}</tbody>
           </table>
         </div>
-      `;
-    }).join("");
-
-    const html = layoutBase({
-      title: "Configurações Globais",
-      activePath: "/admin/settings-ui",
-      content: `
-        <div class="card pad" style="margin-bottom:14px;">
-          <div class="row" style="justify-content:space-between;">
-            <div>
-              <h3 style="margin:0 0 6px 0;">🛠️ Configurações Globais</h3>
-              <div class="muted">Controle operacional centralizado do sistema. Essas regras não substituem os planos; elas complementam o comportamento global.</div>
-            </div>
-            <div class="pill">Persistência: <b>Redis</b></div>
-          </div>
-        </div>
-        ${cards}
-        <div class="card pad">
-          <details>
-            <summary class="muted">Ver JSON resolvido</summary>
-            <pre id="settingsRaw" style="white-space:pre-wrap;">${escapeHtml(JSON.stringify(rows, null, 2))}</pre>
-          </details>
-        </div>
-      `,
-      scriptExtra: `
-        <script>
-          (function(){
-            async function postJson(url, body){
-              const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-              const j = await r.json().catch(()=>({}));
-              return { r, j };
-            }
-            function readSettingValue(key){
-              const el = document.querySelector('[data-setting-input="' + CSS.escape(key) + '"]');
-              if (!el) return '';
-              if (el.type === 'checkbox') return !!el.checked;
-              return el.value;
-            }
-            async function saveSetting(key){
-              const value = readSettingValue(key);
-              const out = await postJson('/admin/settings', { key, value });
-              if (!out.r.ok || !out.j.ok) {
-                alert('Falha ao salvar configuração.');
-                return;
-              }
-              window.location.reload();
-            }
-            async function resetSetting(key){
-              const out = await postJson('/admin/settings/reset', { key });
-              if (!out.r.ok || !out.j.ok) {
-                alert('Falha ao resetar configuração.');
-                return;
-              }
-              window.location.reload();
-            }
-            document.addEventListener('click', function(ev){
-              const saveBtn = ev.target.closest('[data-save-setting]');
-              if (saveBtn) {
-                saveSetting(saveBtn.getAttribute('data-save-setting'));
-                return;
-              }
-              const resetBtn = ev.target.closest('[data-reset-setting]');
-              if (resetBtn) {
-                resetSetting(resetBtn.getAttribute('data-reset-setting'));
-              }
-            });
-          })();
-        </script>
       `,
     });
 
@@ -1217,23 +1144,32 @@ router.get("/", async (req, res) => {
               <div class="muted">Visualize rapidamente: Nome, waId, Plano e Janela 24h. Expanda para ver todos os dados salvos no fluxo.</div>
             </div>
             <div class="row">
-              <button type="button" onclick="reloadUsers()">Recarregar</button>
+              <button type="button" id="uReloadBtn">Recarregar</button>
             </div>
           </div>
 
           <div class="hr"></div>
 
           <div class="row" style="gap:10px; flex-wrap:wrap;">
-            <input id="uSearch" placeholder="Buscar por nome ou waId..." style="min-width:320px" oninput="renderUsers()" />
-            <input id="uLimit" type="number" min="1" max="500" value="200" style="width:110px" />
-            <button type="button" class="primary" onclick="reloadUsers()">Carregar</button>
+            <input id="uSearch" placeholder="Buscar por nome ou waId..." style="min-width:320px" />
+            <input id="uLimit" type="number" min="1" max="500" value="50" style="width:110px" />
+            <button type="button" class="primary" id="uLoadBtn">Carregar</button>
+            <div class="pill">Página: <b id="uPageLabel">1</b></div>
             <div class="muted" id="uMeta" style="margin-left:auto;"></div>
+          </div>
+
+          <div class="row" style="margin-top:10px; justify-content:space-between;">
+            <div class="row">
+              <button type="button" id="uPrevBtn">← Anterior</button>
+              <button type="button" id="uNextBtn">Próxima →</button>
+            </div>
+            <div class="muted" id="uPageMeta"></div>
           </div>
 
           <div class="hr"></div>
 
           <div style="overflow:auto;">
-            <table class="table" style="min-width:900px;">
+            <table class="table" style="min-width:980px;">
               <thead>
                 <tr>
                   <th>Nome</th>
@@ -1254,41 +1190,110 @@ router.get("/", async (req, res) => {
 
     const scriptExtra = `
       <script>
-        (function(){
-          let users = [];
-          let usersMeta = { total: 0, offset: 0, limit: 0 };
+        (function () {
+          const state = {
+            users: [],
+            total: 0,
+            offset: 0,
+            limit: 50,
+            filteredCount: 0,
+          };
+
+          function byId(id) {
+            return document.getElementById(id);
+          }
+
+          function escHtml(value) {
+            return String(value ?? '')
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;');
+          }
 
           function fmtTs(ts) {
-            if (!ts) return "—";
+            if (!ts) return '—';
             const d = new Date(ts);
-            if (Number.isNaN(d.getTime())) return "—";
-            return d.toLocaleString("pt-BR");
+            if (Number.isNaN(d.getTime())) return '—';
+            return d.toLocaleString('pt-BR');
           }
 
-          function windowLabel(user) {
-            if (!user || !user.lastInboundTs) return "—";
-            const exp = user.windowExpiresAt ? fmtTs(user.windowExpiresAt) : "—";
-            return user.inWindow ? ("Ativa (até " + exp + ")") : ("Fora (expirou em " + exp + ")");
+          function detailsRowId(waId) {
+            return 'exp_' + encodeURIComponent(String(waId || ''));
           }
 
-          function escapeHtml(value) {
-            return String(value ?? "")
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;")
-              .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#39;");
+          function getLimit() {
+            const raw = Number(byId('uLimit')?.value || state.limit || 50);
+            const parsed = Number.isFinite(raw) ? raw : 50;
+            return Math.max(1, Math.min(500, parsed));
           }
 
-          function escapeJsSingle(value) {
-            return String(value ?? "")
-              .replace(/\/g, "\\")
-              .replace(/'/g, "\'");
+          function currentPage() {
+            return Math.floor(state.offset / Math.max(1, state.limit)) + 1;
+          }
+
+          function totalPages() {
+            return Math.max(1, Math.ceil((state.total || 0) / Math.max(1, state.limit)));
+          }
+
+          function planBadge(plan) {
+            const code = String(plan || '').trim().toUpperCase();
+            if (!code) return '<span class="badge soft">—</span>';
+            let cls = 'info';
+            if (code.includes('TRIAL') || code.includes('FREE')) cls = 'soft';
+            else if (code.includes('PRO') || code.includes('PLUS') || code.includes('PREMIUM')) cls = 'ok';
+            else if (code.includes('BASIC') || code.includes('START')) cls = 'info';
+            return '<span class="badge ' + cls + '">' + escHtml(plan) + '</span>';
+          }
+
+          function statusBadge(status) {
+            const code = String(status || '').trim().toUpperCase();
+            if (!code) return '<span class="badge soft">—</span>';
+            let cls = 'soft';
+            if (code === 'ACTIVE') cls = 'ok';
+            else if (code === 'TRIAL') cls = 'info';
+            else if (code === 'WAIT_PLAN' || code === 'PAYMENT_PENDING') cls = 'warn';
+            else if (code === 'BLOCKED' || code === 'CANCELED' || code === 'INACTIVE') cls = 'danger';
+            return '<span class="badge ' + cls + '">' + escHtml(status) + '</span>';
+          }
+
+          function windowBadge(user) {
+            if (!user || !user.lastInboundTs) {
+              return '<span class="badge soft">Sem inbound</span>';
+            }
+            const exp = user.windowExpiresAt ? fmtTs(user.windowExpiresAt) : '—';
+            if (user.inWindow) {
+              return '<span class="badge ok">Ativa</span><div class="muted" style="font-size:12px;margin-top:4px;">até ' + escHtml(exp) + '</div>';
+            }
+            return '<span class="badge danger">Expirada</span><div class="muted" style="font-size:12px;margin-top:4px;">em ' + escHtml(exp) + '</div>';
           }
 
           function setTbody(html) {
-            const tbody = document.getElementById("uTbody");
+            const tbody = byId('uTbody');
             if (tbody) tbody.innerHTML = html;
+          }
+
+          function updatePaginationUi() {
+            const page = currentPage();
+            const pages = totalPages();
+            const from = state.total ? state.offset + 1 : 0;
+            const to = Math.min(state.offset + state.limit, state.total);
+
+            const pageLabel = byId('uPageLabel');
+            const pageMeta = byId('uPageMeta');
+            const prevBtn = byId('uPrevBtn');
+            const nextBtn = byId('uNextBtn');
+            const metaEl = byId('uMeta');
+
+            if (pageLabel) pageLabel.textContent = String(page) + ' / ' + String(pages);
+            if (pageMeta) pageMeta.textContent = state.total ? ('Mostrando ' + from + '–' + to + ' de ' + state.total) : 'Nenhum usuário indexado';
+            if (prevBtn) prevBtn.disabled = state.offset <= 0;
+            if (nextBtn) nextBtn.disabled = state.offset + state.limit >= state.total;
+
+            if (metaEl) {
+              metaEl.textContent = String(state.filteredCount) + ' exibidos nesta página • Total indexado: ' + String(state.total);
+            }
           }
 
           async function fetchJson(url, opt) {
@@ -1298,14 +1303,16 @@ router.get("/", async (req, res) => {
           }
 
           function renderUsers() {
-            const q = String(document.getElementById("uSearch")?.value || "").trim().toLowerCase();
-            const filtered = !users.length ? [] : users.filter((user) => {
-              if (!q) return true;
-              return String(user.waId || "").includes(q) || String(user.fullName || "").toLowerCase().includes(q);
-            });
+            const q = String(byId('uSearch')?.value || '').trim().toLowerCase();
+            const filtered = !state.users.length
+              ? []
+              : state.users.filter((user) => {
+                  if (!q) return true;
+                  return String(user.waId || '').includes(q) || String(user.fullName || '').toLowerCase().includes(q);
+                });
 
-            const metaEl = document.getElementById("uMeta");
-            if (metaEl) metaEl.textContent = String(filtered.length) + " exibidos • Total: " + String(usersMeta.total);
+            state.filteredCount = filtered.length;
+            updatePaginationUi();
 
             if (!filtered.length) {
               setTbody('<tr><td colspan="6" class="muted">Nenhum usuário encontrado.</td></tr>');
@@ -1314,57 +1321,53 @@ router.get("/", async (req, res) => {
 
             const rows = [];
             for (const user of filtered) {
-              const name = escapeHtml(user.fullName || "—");
-              const wa = String(user.waId || "");
-              const waHtml = escapeHtml(wa);
-              const waJs = escapeJsSingle(wa);
-              const status = escapeHtml(user.status || "");
-              const plan = escapeHtml(user.plan || "");
-              const win = escapeHtml(windowLabel(user));
-              const expId = "exp_" + wa;
-              const expIdHtml = escapeHtml(expId);
+              const wa = String(user.waId || '');
+              const rowId = detailsRowId(wa);
 
               rows.push(
-                "<tr>" +
-                  "<td>" + name + "</td>" +
-                  "<td><code>" + waHtml + "</code></td>" +
-                  "<td>" + status + "</td>" +
-                  "<td>" + (plan || "—") + "</td>" +
-                  "<td>" + win + "</td>" +
-                  "<td>" +
-                    "<button type="button" onclick="expandUser('" + waJs + "')">Expandir</button> " +
-                    "<button type="button" onclick="openActions('" + waJs + "')">Abrir</button>" +
-                  "</td>" +
-                "</tr>"
+                '<tr>' +
+                  '<td>' + escHtml(user.fullName || '—') + '</td>' +
+                  '<td><code>' + escHtml(wa) + '</code></td>' +
+                  '<td>' + statusBadge(user.status || '—') + '</td>' +
+                  '<td>' + planBadge(user.plan || '') + '</td>' +
+                  '<td>' + windowBadge(user) + '</td>' +
+                  '<td>' +
+                    '<button type="button" data-action="expand" data-wa="' + escHtml(wa) + '">Expandir</button> ' +
+                    '<button type="button" data-action="open" data-wa="' + escHtml(wa) + '">Abrir</button>' +
+                  '</td>' +
+                '</tr>'
               );
+
               rows.push(
-                "<tr id="" + expIdHtml + "" style="display:none;">" +
-                  "<td colspan="6"><div class="muted">Carregando...</div></td>" +
-                "</tr>"
+                '<tr id="' + escHtml(rowId) + '" style="display:none;">' +
+                  '<td colspan="6"><div class="muted">Carregando...</div></td>' +
+                '</tr>'
               );
             }
 
-            setTbody(rows.join(""));
+            setTbody(rows.join(''));
           }
 
-          async function reloadUsers() {
-            const limitEl = document.getElementById("uLimit");
-            const limit = Math.max(1, Math.min(500, Number(limitEl?.value || 200) || 200));
-            const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
+          async function reloadUsers(options) {
+            const opts = options || {};
+            state.limit = getLimit();
+            if (opts.resetOffset) state.offset = 0;
+            if (typeof opts.offset === 'number') state.offset = Math.max(0, opts.offset);
+
+            const url = '/admin/users/list?limit=' + encodeURIComponent(state.limit) + '&offset=' + encodeURIComponent(state.offset);
             setTbody('<tr><td colspan="6" class="muted">Carregando...</td></tr>');
 
             try {
-              const out = await fetchJson(url);
-              const response = out.response;
-              const json = out.json;
-
-              if (!response.ok || !json.ok) {
+              const result = await fetchJson(url);
+              if (!result.response.ok || !result.json.ok) {
                 setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
                 return;
               }
 
-              users = Array.isArray(json.items) ? json.items : [];
-              usersMeta = { total: json.total || 0, offset: json.offset || 0, limit: json.limit || limit };
+              state.users = Array.isArray(result.json.items) ? result.json.items : [];
+              state.total = Number(result.json.total || 0);
+              state.offset = Number(result.json.offset || 0);
+              state.limit = Number(result.json.limit || state.limit);
               renderUsers();
             } catch (_) {
               setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
@@ -1372,93 +1375,138 @@ router.get("/", async (req, res) => {
           }
 
           async function expandUser(wa) {
-            const row = document.getElementById("exp_" + String(wa));
+            const row = byId(detailsRowId(wa));
             if (!row) return;
 
-            if (row.style.display === "none") {
-              row.style.display = "";
-              row.querySelector("td").innerHTML = '<div class="muted">Carregando...</div>';
-
-              try {
-                const out = await fetchJson("/admin/users/details?waId=" + encodeURIComponent(wa));
-                const response = out.response;
-                const json = out.json;
-                if (!response.ok || !json.ok) {
-                  row.querySelector("td").innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
-                  return;
-                }
-
-                const s = json.snapshot || {};
-                const safeWa = escapeJsSingle(wa);
-                const header = (
-                  '<div class="row" style="justify-content:space-between; align-items:center;">' +
-                    '<div>' +
-                      '<div><b>' + escapeHtml(s.fullName || "—") + '</b> <span class="muted">(' + escapeHtml(wa) + ')</span></div>' +
-                      '<div class="muted">Status: <b>' + escapeHtml(s.status || "—") + '</b> • Plano: <b>' + escapeHtml(s.plan || "—") + '</b> • Janela 24h: <b>' + escapeHtml(json.inWindow ? "Ativa" : "Fora") + '</b></div>' +
-                    '</div>' +
-                    '<div class="row">' +
-                      '<button type="button" onclick="openActions('' + safeWa + '')">Abrir nas ações</button> ' +
-                      '<button type="button" onclick="toggleRow('' + safeWa + '')">Fechar</button>' +
-                    '</div>' +
-                  '</div>'
-                );
-
-                const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + " • " + (s.doc.docLast4 || "")) : "—";
-                const details = (
-                  '<div class="hr"></div>' +
-                  '<div class="grid cols2">' +
-                    '<div class="kpi">' +
-                      '<div class="t">Dados pessoais</div>' +
-                      '<div class="muted">Nome: <b>' + escapeHtml(s.fullName || "—") + '</b></div>' +
-                      '<div class="muted">Documento: <b>' + escapeHtml(docLine) + '</b></div>' +
-                      '<div class="muted">Cidade/UF: <b>' + escapeHtml(s.billingCityState || "—") + '</b></div>' +
-                      '<div class="muted">Endereço: <b>' + escapeHtml(s.billingAddress || "—") + '</b></div>' +
-                    '</div>' +
-                    '<div class="kpi">' +
-                      '<div class="t">Assinatura / Cobrança</div>' +
-                      '<div class="muted">Status: <b>' + escapeHtml(s.status || "—") + '</b></div>' +
-                      '<div class="muted">Plano: <b>' + escapeHtml(s.plan || "—") + '</b></div>' +
-                      '<div class="muted">Payment: <b>' + escapeHtml(s.paymentMethod || "—") + '</b></div>' +
-                      '<div class="muted">Asaas Customer: <code>' + escapeHtml(s.asaasCustomerId || "—") + '</code></div>' +
-                      '<div class="muted">Asaas Subscription: <code>' + escapeHtml(s.asaasSubscriptionId || "—") + '</code></div>' +
-                    '</div>' +
-                  '</div>' +
-                  '<div class="hr"></div>' +
-                  '<details>' +
-                    '<summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>' +
-                    '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(s, null, 2)) + '</pre>' +
-                  '</details>'
-                );
-
-                row.querySelector("td").innerHTML = header + details;
-              } catch (_) {
-                row.querySelector("td").innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
-              }
+            if (row.style.display && row.style.display !== 'none') {
+              row.style.display = 'none';
               return;
             }
 
-            row.style.display = "none";
-          }
+            row.style.display = '';
+            const cell = row.querySelector('td');
+            if (cell) cell.innerHTML = '<div class="muted">Carregando...</div>';
 
-          function toggleRow(wa) {
-            const row = document.getElementById("exp_" + String(wa));
-            if (!row) return;
-            row.style.display = "none";
+            try {
+              const result = await fetchJson('/admin/users/details?waId=' + encodeURIComponent(wa));
+              if (!result.response.ok || !result.json.ok) {
+                if (cell) cell.innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
+                return;
+              }
+
+              const s = result.json.snapshot || {};
+              const header =
+                '<div class="row" style="justify-content:space-between; align-items:center;">' +
+                  '<div>' +
+                    '<div><b>' + escHtml(s.fullName || '—') + '</b> <span class="muted">(' + escHtml(wa) + ')</span></div>' +
+                    '<div class="muted">Status: ' + statusBadge(s.status || '—') + ' &nbsp; Plano: ' + planBadge(s.plan || '') + '</div>' +
+                  '</div>' +
+                  '<div class="row">' +
+                    '<button type="button" data-action="open" data-wa="' + escHtml(wa) + '">Abrir nas ações</button> ' +
+                    '<button type="button" data-action="collapse" data-wa="' + escHtml(wa) + '">Fechar</button>' +
+                  '</div>' +
+                '</div>';
+
+              const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + ' • ' + (s.doc.docLast4 || '')) : '—';
+              const details =
+                '<div class="hr"></div>' +
+                '<div class="grid cols2">' +
+                  '<div class="kpi">' +
+                    '<div class="t">Dados pessoais</div>' +
+                    '<div class="muted">Nome: <b>' + escHtml(s.fullName || '—') + '</b></div>' +
+                    '<div class="muted">Documento: <b>' + escHtml(docLine) + '</b></div>' +
+                    '<div class="muted">Cidade/UF: <b>' + escHtml(s.billingCityState || '—') + '</b></div>' +
+                    '<div class="muted">Endereço: <b>' + escHtml(s.billingAddress || '—') + '</b></div>' +
+                  '</div>' +
+                  '<div class="kpi">' +
+                    '<div class="t">Assinatura / Cobrança</div>' +
+                    '<div class="muted">Status: <b>' + escHtml(s.status || '—') + '</b></div>' +
+                    '<div class="muted">Plano: <b>' + escHtml(s.plan || '—') + '</b></div>' +
+                    '<div class="muted">Payment: <b>' + escHtml(s.paymentMethod || '—') + '</b></div>' +
+                    '<div class="muted">Asaas Customer: <code>' + escHtml(s.asaasCustomerId || '—') + '</code></div>' +
+                    '<div class="muted">Asaas Subscription: <code>' + escHtml(s.asaasSubscriptionId || '—') + '</code></div>' +
+                    '<div class="muted" style="margin-top:6px;">Janela 24h: ' + windowBadge(result.json) + '</div>' +
+                  '</div>' +
+                '</div>' +
+                '<div class="hr"></div>' +
+                '<details>' +
+                  '<summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>' +
+                  '<pre style="white-space:pre-wrap;">' + escHtml(JSON.stringify(s, null, 2)) + '</pre>' +
+                '</details>';
+
+              if (cell) cell.innerHTML = header + details;
+            } catch (_) {
+              if (cell) cell.innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
+            }
           }
 
           function openActions(wa) {
-            window.location.href = "/admin/users-ui?waId=" + encodeURIComponent(wa);
+            window.location.href = '/admin/users-ui?waId=' + encodeURIComponent(wa);
           }
 
-          window.reloadUsers = reloadUsers;
-          window.renderUsers = renderUsers;
-          window.expandUser = expandUser;
-          window.toggleRow = toggleRow;
-          window.openActions = openActions;
+          function handleTbodyClick(event) {
+            const btn = event.target.closest('button[data-action]');
+            if (!btn) return;
 
-          Promise.resolve().then(() => reloadUsers()).catch(() => {
-            setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
-          });
+            const action = btn.getAttribute('data-action');
+            const wa = btn.getAttribute('data-wa') || '';
+
+            if (action === 'expand') {
+              expandUser(wa);
+              return;
+            }
+
+            if (action === 'collapse') {
+              const row = byId(detailsRowId(wa));
+              if (row) row.style.display = 'none';
+              return;
+            }
+
+            if (action === 'open') {
+              openActions(wa);
+            }
+          }
+
+          function goPrevPage() {
+            if (state.offset <= 0) return;
+            reloadUsers({ offset: Math.max(0, state.offset - state.limit) });
+          }
+
+          function goNextPage() {
+            if (state.offset + state.limit >= state.total) return;
+            reloadUsers({ offset: state.offset + state.limit });
+          }
+
+          function initUsersListPage() {
+            const search = byId('uSearch');
+            const reloadBtn = byId('uReloadBtn');
+            const loadBtn = byId('uLoadBtn');
+            const prevBtn = byId('uPrevBtn');
+            const nextBtn = byId('uNextBtn');
+            const tbody = byId('uTbody');
+            const limit = byId('uLimit');
+
+            if (search) search.addEventListener('input', renderUsers);
+            if (reloadBtn) reloadBtn.addEventListener('click', function () { reloadUsers(); });
+            if (loadBtn) loadBtn.addEventListener('click', function () { reloadUsers({ resetOffset: true }); });
+            if (prevBtn) prevBtn.addEventListener('click', goPrevPage);
+            if (nextBtn) nextBtn.addEventListener('click', goNextPage);
+            if (limit) limit.addEventListener('change', function () { reloadUsers({ resetOffset: true }); });
+            if (tbody) tbody.addEventListener('click', handleTbodyClick);
+
+            window.reloadUsers = reloadUsers;
+            window.renderUsers = renderUsers;
+            window.expandUser = expandUser;
+            window.openActions = openActions;
+
+            reloadUsers();
+          }
+
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initUsersListPage, { once: true });
+          } else {
+            initUsersListPage();
+          }
         })();
       </script>
     `;
@@ -2938,8 +2986,35 @@ router.get("/window24h-ui", async (req, res) => {
   });
 
   router.get("/window24h", async (req, res) => {
-    const items = await listWindow24hActive({ limit: 500 });
-    return res.json({ ok: true, nowMs: nowMs(), count: items.length, returned: items.length, items });
+    try {
+      const filter = String(req.query?.filter || "").trim();
+      const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 500) || 500));
+      const now = nowMs();
+      const waIds = await listWindow24hActive(now, limit);
+
+      const users = await mapLimit(waIds, 20, async (waId) => {
+        const lastInboundAtMs = Number(await getLastInboundTs(waId)) || 0;
+        return {
+          waId,
+          lastInboundAtMs,
+          lastSeen: lastInboundAtMs ? new Date(lastInboundAtMs).toLocaleString("pt-BR") : "—",
+        };
+      });
+
+      const filteredUsers = filter
+        ? users.filter((u) => String(u?.waId || "").includes(filter))
+        : users;
+
+      return res.json({
+        ok: true,
+        nowMs: now,
+        count: filteredUsers.length,
+        returned: filteredUsers.length,
+        users: filteredUsers,
+      });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message || String(err) });
+    }
   });
 
   router.get("/send-test", async (req, res) => {
