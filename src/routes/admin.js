@@ -2598,3 +2598,11 @@ router.get("/window24h-ui", async (req, res) => {
 
   return router;
 }
+
+// --- safety init for users list UI ---
+if (typeof reloadUsers === 'function') {
+  window.reloadUsers = reloadUsers;
+  if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => { try { reloadUsers(); } catch(e) {} });
+  }
+}
