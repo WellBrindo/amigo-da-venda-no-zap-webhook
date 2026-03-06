@@ -1332,6 +1332,30 @@ router.get("/", async (req, res) => {
     }
   });
 
+  router.get("/users/snapshot", async (req, res) => {
+    try {
+      const waId = String(req.query?.waId || "").trim();
+      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+
+      const snap = await getUserSnapshot(waId);
+      const now = nowMs();
+      const lastInboundTs = await getLastInboundTs(waId);
+      const inWindow = lastInboundTs ? now - Number(lastInboundTs) < 24 * 60 * 60 * 1000 : false;
+      const windowExpiresAt = lastInboundTs ? Number(lastInboundTs) + 24 * 60 * 60 * 1000 : 0;
+
+      return res.status(200).json({
+        ok: true,
+        waId,
+        inWindow,
+        lastInboundTs: Number(lastInboundTs) || 0,
+        windowExpiresAt,
+        snapshot: snap,
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
   router.get("/users/details", async (req, res) => {
     try {
       const waId = String(req.query?.waId || "").trim();
@@ -2581,34 +2605,8 @@ router.get("/window24h-ui", async (req, res) => {
   });
 
   router.get("/window24h", async (req, res) => {
-    try {
-      const filter = String(req.query?.filter || "").trim();
-      const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 500)));
-
-      const waIds = await listWindow24hActive(nowMs(), limit);
-      const filteredWaIds = filter
-        ? waIds.filter((waId) => String(waId || "").includes(filter))
-        : waIds;
-
-      const users = await mapLimit(filteredWaIds, 20, async (waId) => {
-        const lastInboundAtMs = await getLastInboundTs(waId);
-        return {
-          waId,
-          lastInboundAtMs: Number(lastInboundAtMs) || 0,
-          lastSeen: lastInboundAtMs ? new Date(Number(lastInboundAtMs)).toLocaleString("pt-BR") : "—",
-        };
-      });
-
-      return res.json({
-        ok: true,
-        nowMs: nowMs(),
-        count: filteredWaIds.length,
-        returned: users.length,
-        users,
-      });
-    } catch (err) {
-      return res.status(err.statusCode || 500).json({ ok: false, error: String(err?.message || err) });
-    }
+    const items = await listWindow24hActive({ limit: 500 });
+    return res.json({ ok: true, nowMs: nowMs(), count: items.length, returned: items.length, items });
   });
 
   router.get("/send-test", async (req, res) => {
