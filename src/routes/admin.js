@@ -1134,7 +1134,7 @@ router.get("/", async (req, res) => {
           document.addEventListener("DOMContentLoaded", () => {
             reloadUsers().catch(() => {
               const tbody = document.getElementById("uTbody");
-              if (tbody) tbody.innerHTML = "<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>";
+              if (tbody) tbody.innerHTML = "<tr><td colspan=\"6\" class=\"muted\">Erro ao carregar usuários.</td></tr>";
             });
           });
 </script>
