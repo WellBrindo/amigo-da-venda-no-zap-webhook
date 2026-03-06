@@ -951,8 +951,8 @@ router.get("/", async (req, res) => {
     const scriptExtra = `
       <script>
         (function(){
-          let _users = [];
-          let _usersMeta = { total: 0, offset: 0, limit: 0 };
+          let users = [];
+          let usersMeta = { total: 0, offset: 0, limit: 0 };
 
           function fmtTs(ts){
             if (!ts) return "—";
@@ -961,15 +961,14 @@ router.get("/", async (req, res) => {
             return d.toLocaleString("pt-BR");
           }
 
-          function windowLabel(u){
-            if (!u || !u.lastInboundTs) return "—";
-            const exp = u.windowExpiresAt ? fmtTs(u.windowExpiresAt) : "—";
-            return u.inWindow ? ("Ativa (até " + exp + ")") : ("Fora (expirou em " + exp + ")");
+          function windowLabel(user){
+            if (!user || !user.lastInboundTs) return "—";
+            const exp = user.windowExpiresAt ? fmtTs(user.windowExpiresAt) : "—";
+            return user.inWindow ? ("Ativa (até " + exp + ")") : ("Fora (expirou em " + exp + ")");
           }
 
-          function escapeHtml(s){
-            const v = String(s ?? "");
-            return v
+          function escapeHtml(value){
+            return String(value ?? "")
               .replace(/&/g, "&amp;")
               .replace(/</g, "&lt;")
               .replace(/>/g, "&gt;")
@@ -977,10 +976,10 @@ router.get("/", async (req, res) => {
               .replace(/'/g, "&#39;");
           }
 
-          async function fetchJson(url, opt){
-            const r = await fetch(url, opt);
-            const j = await r.json().catch(() => ({}));
-            return { r, j };
+          function escapeJsSingle(value){
+            return String(value ?? "")
+              .replace(/\/g, "\\")
+              .replace(/'/g, "\'");
           }
 
           function setTbody(html){
@@ -988,64 +987,44 @@ router.get("/", async (req, res) => {
             if (tbody) tbody.innerHTML = html;
           }
 
-          async function reloadUsers(){
-            const limitEl = document.getElementById("uLimit");
-            const limit = Math.max(1, Math.min(500, Number(limitEl?.value || 200) || 200));
-            const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
-
-            setTbody('<tr><td colspan="6" class="muted">Carregando...</td></tr>');
-
-            let out;
-            try {
-              out = await fetchJson(url);
-            } catch (err) {
-              setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
-              return;
-            }
-
-            const r = out.r;
-            const j = out.j;
-            if (!r.ok || !j.ok) {
-              setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
-              return;
-            }
-
-            _users = Array.isArray(j.items) ? j.items : [];
-            _usersMeta = { total: j.total || 0, offset: j.offset || 0, limit: j.limit || limit };
-            renderUsers();
+          async function fetchJson(url, opt){
+            const response = await fetch(url, opt);
+            const json = await response.json().catch(() => ({}));
+            return { response, json };
           }
 
           function renderUsers(){
             const q = String(document.getElementById("uSearch")?.value || "").trim().toLowerCase();
-            const items = !_users.length ? [] : _users.filter((u) => {
+            const filtered = !users.length ? [] : users.filter((user) => {
               if (!q) return true;
-              return String(u.waId || "").includes(q) || String(u.fullName || "").toLowerCase().includes(q);
+              return String(user.waId || "").includes(q) || String(user.fullName || "").toLowerCase().includes(q);
             });
 
             const metaEl = document.getElementById("uMeta");
-            if (metaEl) metaEl.textContent = String(items.length) + " exibidos • Total: " + String(_usersMeta.total);
+            if (metaEl) metaEl.textContent = String(filtered.length) + " exibidos • Total: " + String(usersMeta.total);
 
-            if (!items.length){
+            if (!filtered.length) {
               setTbody('<tr><td colspan="6" class="muted">Nenhum usuário encontrado.</td></tr>');
               return;
             }
 
             const rows = [];
-            for (const u of items){
-              const name = escapeHtml(u.fullName || "—");
-              const wa = String(u.waId || "");
+            for (const user of filtered) {
+              const name = escapeHtml(user.fullName || "—");
+              const wa = String(user.waId || "");
               const waHtml = escapeHtml(wa);
-              const waJs = wa.replace(/\/g, "\\").replace(/'/g, "\'");
-              const st = escapeHtml(u.status || "");
-              const pl = escapeHtml(u.plan || "");
-              const win = escapeHtml(windowLabel(u));
+              const waJs = escapeJsSingle(wa);
+              const status = escapeHtml(user.status || "");
+              const plan = escapeHtml(user.plan || "");
+              const win = escapeHtml(windowLabel(user));
+              const expId = "exp_" + waHtml;
 
               rows.push(
                 "<tr>" +
                   "<td>" + name + "</td>" +
                   "<td><code>" + waHtml + "</code></td>" +
-                  "<td>" + st + "</td>" +
-                  "<td>" + (pl || "—") + "</td>" +
+                  "<td>" + status + "</td>" +
+                  "<td>" + (plan || "—") + "</td>" +
                   "<td>" + win + "</td>" +
                   "<td>" +
                     "<button type="button" onclick="expandUser('" + waJs + "')">Expandir</button> " +
@@ -1054,7 +1033,7 @@ router.get("/", async (req, res) => {
                 "</tr>"
               );
               rows.push(
-                "<tr id="exp_" + waHtml + "" style="display:none;">" +
+                "<tr id="" + expId + "" style="display:none;">" +
                   "<td colspan="6"><div class="muted">Carregando...</div></td>" +
                 "</tr>"
               );
@@ -1063,66 +1042,93 @@ router.get("/", async (req, res) => {
             setTbody(rows.join(""));
           }
 
+          async function reloadUsers(){
+            const limitEl = document.getElementById("uLimit");
+            const limit = Math.max(1, Math.min(500, Number(limitEl?.value || 200) || 200));
+            const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
+            setTbody('<tr><td colspan="6" class="muted">Carregando...</td></tr>');
+
+            try {
+              const out = await fetchJson(url);
+              const response = out.response;
+              const json = out.json;
+
+              if (!response.ok || !json.ok) {
+                setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
+                return;
+              }
+
+              users = Array.isArray(json.items) ? json.items : [];
+              usersMeta = { total: json.total || 0, offset: json.offset || 0, limit: json.limit || limit };
+              renderUsers();
+            } catch (_) {
+              setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
+            }
+          }
+
           async function expandUser(wa){
             const row = document.getElementById("exp_" + String(wa));
             if (!row) return;
 
-            if (row.style.display === "none"){
+            if (row.style.display === "none") {
               row.style.display = "";
               row.querySelector("td").innerHTML = '<div class="muted">Carregando...</div>';
 
-              const url = "/admin/users/details?waId=" + encodeURIComponent(wa);
-              const out = await fetchJson(url);
-              const r = out.r;
-              const j = out.j;
-              if (!r.ok || !j.ok) {
+              try {
+                const out = await fetchJson("/admin/users/details?waId=" + encodeURIComponent(wa));
+                const response = out.response;
+                const json = out.json;
+                if (!response.ok || !json.ok) {
+                  row.querySelector("td").innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
+                  return;
+                }
+
+                const s = json.snapshot || {};
+                const safeWa = escapeJsSingle(wa);
+                const header = (
+                  '<div class="row" style="justify-content:space-between; align-items:center;">' +
+                    '<div>' +
+                      '<div><b>' + escapeHtml(s.fullName || "—") + '</b> <span class="muted">(' + escapeHtml(wa) + ')</span></div>' +
+                      '<div class="muted">Status: <b>' + escapeHtml(s.status || "—") + '</b> • Plano: <b>' + escapeHtml(s.plan || "—") + '</b> • Janela 24h: <b>' + escapeHtml(json.inWindow ? "Ativa" : "Fora") + '</b></div>' +
+                    '</div>' +
+                    '<div class="row">' +
+                      '<button type="button" onclick="openActions('' + safeWa + '')">Abrir nas ações</button> ' +
+                      '<button type="button" onclick="toggleRow('' + safeWa + '')">Fechar</button>' +
+                    '</div>' +
+                  '</div>'
+                );
+
+                const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + " • " + (s.doc.docLast4 || "")) : "—";
+                const details = (
+                  '<div class="hr"></div>' +
+                  '<div class="grid cols2">' +
+                    '<div class="kpi">' +
+                      '<div class="t">Dados pessoais</div>' +
+                      '<div class="muted">Nome: <b>' + escapeHtml(s.fullName || "—") + '</b></div>' +
+                      '<div class="muted">Documento: <b>' + escapeHtml(docLine) + '</b></div>' +
+                      '<div class="muted">Cidade/UF: <b>' + escapeHtml(s.billingCityState || "—") + '</b></div>' +
+                      '<div class="muted">Endereço: <b>' + escapeHtml(s.billingAddress || "—") + '</b></div>' +
+                    '</div>' +
+                    '<div class="kpi">' +
+                      '<div class="t">Assinatura / Cobrança</div>' +
+                      '<div class="muted">Status: <b>' + escapeHtml(s.status || "—") + '</b></div>' +
+                      '<div class="muted">Plano: <b>' + escapeHtml(s.plan || "—") + '</b></div>' +
+                      '<div class="muted">Payment: <b>' + escapeHtml(s.paymentMethod || "—") + '</b></div>' +
+                      '<div class="muted">Asaas Customer: <code>' + escapeHtml(s.asaasCustomerId || "—") + '</code></div>' +
+                      '<div class="muted">Asaas Subscription: <code>' + escapeHtml(s.asaasSubscriptionId || "—") + '</code></div>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div class="hr"></div>' +
+                  '<details>' +
+                    '<summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>' +
+                    '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(s, null, 2)) + '</pre>' +
+                  '</details>'
+                );
+
+                row.querySelector("td").innerHTML = header + details;
+              } catch (_) {
                 row.querySelector("td").innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
-                return;
               }
-
-              const s = j.snapshot || {};
-              const safeWa = String(wa).replace(/\/g, "\\").replace(/'/g, "\'");
-              const header = (
-                "<div class="row" style="justify-content:space-between; align-items:center;">" +
-                  "<div>" +
-                    "<div><b>" + escapeHtml(s.fullName || "—") + "</b> <span class="muted">(" + escapeHtml(wa) + ")</span></div>" +
-                    "<div class="muted">Status: <b>" + escapeHtml(s.status || "—") + "</b> • Plano: <b>" + escapeHtml(s.plan || "—") + "</b> • Janela 24h: <b>" + escapeHtml(j.inWindow ? "Ativa" : "Fora") + "</b></div>" +
-                  "</div>" +
-                  "<div class="row">" +
-                    "<button type="button" onclick="openActions('" + safeWa + "')">Abrir nas ações</button> " +
-                    "<button type="button" onclick="toggleRow('" + safeWa + "')">Fechar</button>" +
-                  "</div>" +
-                "</div>"
-              );
-
-              const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + " • " + (s.doc.docLast4 || "")) : "—";
-              const details = (
-                '<div class="hr"></div>' +
-                '<div class="grid cols2">' +
-                  '<div class="kpi">' +
-                    '<div class="t">Dados pessoais</div>' +
-                    '<div class="muted">Nome: <b>' + escapeHtml(s.fullName || "—") + '</b></div>' +
-                    '<div class="muted">Documento: <b>' + escapeHtml(docLine) + '</b></div>' +
-                    '<div class="muted">Cidade/UF: <b>' + escapeHtml(s.billingCityState || "—") + '</b></div>' +
-                    '<div class="muted">Endereço: <b>' + escapeHtml(s.billingAddress || "—") + '</b></div>' +
-                  '</div>' +
-                  '<div class="kpi">' +
-                    '<div class="t">Assinatura / Cobrança</div>' +
-                    '<div class="muted">Status: <b>' + escapeHtml(s.status || "—") + '</b></div>' +
-                    '<div class="muted">Plano: <b>' + escapeHtml(s.plan || "—") + '</b></div>' +
-                    '<div class="muted">Payment: <b>' + escapeHtml(s.paymentMethod || "—") + '</b></div>' +
-                    '<div class="muted">Asaas Customer: <code>' + escapeHtml(s.asaasCustomerId || "—") + '</code></div>' +
-                    '<div class="muted">Asaas Subscription: <code>' + escapeHtml(s.asaasSubscriptionId || "—") + '</code></div>' +
-                  '</div>' +
-                '</div>' +
-                '<div class="hr"></div>' +
-                '<details>' +
-                  '<summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>' +
-                  '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(s, null, 2)) + '</pre>' +
-                '</details>'
-              );
-
-              row.querySelector("td").innerHTML = header + details;
               return;
             }
 
@@ -1145,9 +1151,11 @@ router.get("/", async (req, res) => {
           window.toggleRow = toggleRow;
           window.openActions = openActions;
 
-          Promise.resolve().then(() => reloadUsers()).catch(() => {
-            setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
-          });
+          if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", reloadUsers, { once: true });
+          } else {
+            reloadUsers();
+          }
         })();
       </script>
     `;
@@ -2643,12 +2651,4 @@ router.get("/window24h-ui", async (req, res) => {
   });
 
   return router;
-}
-
-// --- safety init for users list UI ---
-if (typeof reloadUsers === 'function') {
-  window.reloadUsers = reloadUsers;
-  if (typeof document !== 'undefined') {
-    document.addEventListener('DOMContentLoaded', () => { try { reloadUsers(); } catch(e) {} });
-  }
 }
