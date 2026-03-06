@@ -313,8 +313,7 @@ const GLOBAL_SETTINGS_CATALOG = [
     defaultValue: 5,
     min: 1,
     max: 1000,
-    help: "Define quantos anúncios um usuário pode gerar durante o período de teste gratuito. "
-          "Se você aumentar esse número, os usuários poderão criar mais anúncios antes de precisar assinar um plano."
+    help: "Define quantos anúncios um usuário pode gerar durante o período de teste gratuito. Se você aumentar esse número, os usuários poderão criar mais anúncios antes de precisar assinar um plano."
   },
   {
     key: "trial.maxRefinements",
@@ -333,9 +332,7 @@ const GLOBAL_SETTINGS_CATALOG = [
     type: "enum",
     defaultValue: "FIXED",
     options: ["FIXED", "FREE"],
-    help: "Define como o anúncio será criado por padrão. "
-          "FIXED = usa um modelo estruturado do sistema. "
-          "FREE = permite texto mais livre e criativo."
+    help: "Define como o anúncio será criado por padrão. FIXED = usa um modelo estruturado do sistema. FREE = permite texto mais livre e criativo."
   },
   {
     key: "flow.requireNameOnStart",
@@ -351,8 +348,7 @@ const GLOBAL_SETTINGS_CATALOG = [
     section: "Funcionalidades",
     type: "bool",
     defaultValue: true,
-    help: "Se ativado, o sistema pedirá dados da empresa do usuário (nome do negócio, cidade, etc.) "
-          "para melhorar os anúncios gerados."
+    help: "Se ativado, o sistema pedirá dados da empresa do usuário (nome do negócio, cidade, etc.) para melhorar os anúncios gerados."
   },
   {
     key: "feature.refinement",
