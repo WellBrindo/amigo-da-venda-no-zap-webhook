@@ -2755,8 +2755,35 @@ router.get("/window24h-ui", async (req, res) => {
   });
 
   router.get("/window24h", async (req, res) => {
-    const items = await listWindow24hActive({ limit: 500 });
-    return res.json({ ok: true, nowMs: nowMs(), count: items.length, returned: items.length, items });
+    try {
+      const filter = String(req.query?.filter || "").trim();
+      const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 500) || 500));
+      const now = nowMs();
+      const waIds = await listWindow24hActive(now, limit);
+
+      const users = await mapLimit(waIds, 20, async (waId) => {
+        const lastInboundAtMs = Number(await getLastInboundTs(waId)) || 0;
+        return {
+          waId,
+          lastInboundAtMs,
+          lastSeen: lastInboundAtMs ? new Date(lastInboundAtMs).toLocaleString("pt-BR") : "—",
+        };
+      });
+
+      const filteredUsers = filter
+        ? users.filter((u) => String(u?.waId || "").includes(filter))
+        : users;
+
+      return res.json({
+        ok: true,
+        nowMs: now,
+        count: filteredUsers.length,
+        returned: filteredUsers.length,
+        users: filteredUsers,
+      });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message || String(err) });
+    }
   });
 
   router.get("/send-test", async (req, res) => {
