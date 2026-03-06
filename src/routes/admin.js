@@ -913,16 +913,16 @@ router.get("/", async (req, res) => {
               <div class="muted">Visualize rapidamente: Nome, waId, Plano e Janela 24h. Expanda para ver todos os dados salvos no fluxo.</div>
             </div>
             <div class="row">
-              <button type="button" onclick="reloadUsers()">Recarregar</button>
+              <button type="button" id="uReloadBtn">Recarregar</button>
             </div>
           </div>
 
           <div class="hr"></div>
 
           <div class="row" style="gap:10px; flex-wrap:wrap;">
-            <input id="uSearch" placeholder="Buscar por nome ou waId..." style="min-width:320px" oninput="renderUsers()" />
+            <input id="uSearch" placeholder="Buscar por nome ou waId..." style="min-width:320px" />
             <input id="uLimit" type="number" min="1" max="500" value="200" style="width:110px" />
-            <button type="button" class="primary" onclick="reloadUsers()">Carregar</button>
+            <button type="button" class="primary" id="uLoadBtn">Carregar</button>
             <div class="muted" id="uMeta" style="margin-left:auto;"></div>
           </div>
 
@@ -950,9 +950,15 @@ router.get("/", async (req, res) => {
 
     const scriptExtra = `
       <script>
-        (function(){
-          let users = [];
-          let usersMeta = { total: 0, offset: 0, limit: 0 };
+        (function () {
+          const state = {
+            users: [],
+            meta: { total: 0, offset: 0, limit: 0 },
+          };
+
+          function byId(id) {
+            return document.getElementById(id);
+          }
 
           function fmtTs(ts) {
             if (!ts) return "—";
@@ -967,7 +973,7 @@ router.get("/", async (req, res) => {
             return user.inWindow ? ("Ativa (até " + exp + ")") : ("Fora (expirou em " + exp + ")");
           }
 
-          function escapeHtml(value) {
+          function escHtml(value) {
             return String(value ?? "")
               .replace(/&/g, "&amp;")
               .replace(/</g, "&lt;")
@@ -976,14 +982,12 @@ router.get("/", async (req, res) => {
               .replace(/'/g, "&#39;");
           }
 
-          function escapeJsSingle(value) {
-            return String(value ?? "")
-              .replace(/\/g, "\\")
-              .replace(/'/g, "\'");
+          function detailsRowId(waId) {
+            return "exp_" + encodeURIComponent(String(waId || ""));
           }
 
           function setTbody(html) {
-            const tbody = document.getElementById("uTbody");
+            const tbody = byId("uTbody");
             if (tbody) tbody.innerHTML = html;
           }
 
@@ -994,14 +998,18 @@ router.get("/", async (req, res) => {
           }
 
           function renderUsers() {
-            const q = String(document.getElementById("uSearch")?.value || "").trim().toLowerCase();
-            const filtered = !users.length ? [] : users.filter((user) => {
-              if (!q) return true;
-              return String(user.waId || "").includes(q) || String(user.fullName || "").toLowerCase().includes(q);
-            });
+            const q = String(byId("uSearch")?.value || "").trim().toLowerCase();
+            const filtered = !state.users.length
+              ? []
+              : state.users.filter((user) => {
+                  if (!q) return true;
+                  return String(user.waId || "").includes(q) || String(user.fullName || "").toLowerCase().includes(q);
+                });
 
-            const metaEl = document.getElementById("uMeta");
-            if (metaEl) metaEl.textContent = String(filtered.length) + " exibidos • Total: " + String(usersMeta.total);
+            const metaEl = byId("uMeta");
+            if (metaEl) {
+              metaEl.textContent = String(filtered.length) + " exibidos • Total: " + String(state.meta.total);
+            }
 
             if (!filtered.length) {
               setTbody('<tr><td colspan="6" class="muted">Nenhum usuário encontrado.</td></tr>');
@@ -1010,57 +1018,53 @@ router.get("/", async (req, res) => {
 
             const rows = [];
             for (const user of filtered) {
-              const name = escapeHtml(user.fullName || "—");
               const wa = String(user.waId || "");
-              const waHtml = escapeHtml(wa);
-              const waJs = escapeJsSingle(wa);
-              const status = escapeHtml(user.status || "");
-              const plan = escapeHtml(user.plan || "");
-              const win = escapeHtml(windowLabel(user));
-              const expId = "exp_" + wa;
-              const expIdHtml = escapeHtml(expId);
+              const rowId = detailsRowId(wa);
 
               rows.push(
-                "<tr>" +
-                  "<td>" + name + "</td>" +
-                  "<td><code>" + waHtml + "</code></td>" +
-                  "<td>" + status + "</td>" +
-                  "<td>" + (plan || "—") + "</td>" +
-                  "<td>" + win + "</td>" +
-                  "<td>" +
-                    "<button type="button" onclick="expandUser('" + waJs + "')">Expandir</button> " +
-                    "<button type="button" onclick="openActions('" + waJs + "')">Abrir</button>" +
-                  "</td>" +
-                "</tr>"
+                '<tr>' +
+                  '<td>' + escHtml(user.fullName || "—") + '</td>' +
+                  '<td><code>' + escHtml(wa) + '</code></td>' +
+                  '<td>' + escHtml(user.status || "—") + '</td>' +
+                  '<td>' + escHtml(user.plan || "—") + '</td>' +
+                  '<td>' + escHtml(windowLabel(user)) + '</td>' +
+                  '<td>' +
+                    '<button type="button" data-action="expand" data-wa="' + escHtml(wa) + '">Expandir</button> ' +
+                    '<button type="button" data-action="open" data-wa="' + escHtml(wa) + '">Abrir</button>' +
+                  '</td>' +
+                '</tr>'
               );
+
               rows.push(
-                "<tr id="" + expIdHtml + "" style="display:none;">" +
-                  "<td colspan="6"><div class="muted">Carregando...</div></td>" +
-                "</tr>"
+                '<tr id="' + escHtml(rowId) + '" style="display:none;">' +
+                  '<td colspan="6"><div class="muted">Carregando...</div></td>' +
+                '</tr>'
               );
             }
 
-            setTbody(rows.join(""));
+            setTbody(rows.join(''));
           }
 
           async function reloadUsers() {
-            const limitEl = document.getElementById("uLimit");
-            const limit = Math.max(1, Math.min(500, Number(limitEl?.value || 200) || 200));
+            const rawLimit = Number(byId("uLimit")?.value || 200);
+            const limit = Math.max(1, Math.min(500, Number.isFinite(rawLimit) ? rawLimit : 200));
             const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
+
             setTbody('<tr><td colspan="6" class="muted">Carregando...</td></tr>');
 
             try {
-              const out = await fetchJson(url);
-              const response = out.response;
-              const json = out.json;
-
+              const { response, json } = await fetchJson(url);
               if (!response.ok || !json.ok) {
                 setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
                 return;
               }
 
-              users = Array.isArray(json.items) ? json.items : [];
-              usersMeta = { total: json.total || 0, offset: json.offset || 0, limit: json.limit || limit };
+              state.users = Array.isArray(json.items) ? json.items : [];
+              state.meta = {
+                total: Number(json.total || 0),
+                offset: Number(json.offset || 0),
+                limit: Number(json.limit || limit),
+              };
               renderUsers();
             } catch (_) {
               setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
@@ -1068,93 +1072,126 @@ router.get("/", async (req, res) => {
           }
 
           async function expandUser(wa) {
-            const row = document.getElementById("exp_" + String(wa));
+            const row = byId(detailsRowId(wa));
             if (!row) return;
 
-            if (row.style.display === "none") {
-              row.style.display = "";
-              row.querySelector("td").innerHTML = '<div class="muted">Carregando...</div>';
-
-              try {
-                const out = await fetchJson("/admin/users/details?waId=" + encodeURIComponent(wa));
-                const response = out.response;
-                const json = out.json;
-                if (!response.ok || !json.ok) {
-                  row.querySelector("td").innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
-                  return;
-                }
-
-                const s = json.snapshot || {};
-                const safeWa = escapeJsSingle(wa);
-                const header = (
-                  '<div class="row" style="justify-content:space-between; align-items:center;">' +
-                    '<div>' +
-                      '<div><b>' + escapeHtml(s.fullName || "—") + '</b> <span class="muted">(' + escapeHtml(wa) + ')</span></div>' +
-                      '<div class="muted">Status: <b>' + escapeHtml(s.status || "—") + '</b> • Plano: <b>' + escapeHtml(s.plan || "—") + '</b> • Janela 24h: <b>' + escapeHtml(json.inWindow ? "Ativa" : "Fora") + '</b></div>' +
-                    '</div>' +
-                    '<div class="row">' +
-                      '<button type="button" onclick="openActions('' + safeWa + '')">Abrir nas ações</button> ' +
-                      '<button type="button" onclick="toggleRow('' + safeWa + '')">Fechar</button>' +
-                    '</div>' +
-                  '</div>'
-                );
-
-                const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + " • " + (s.doc.docLast4 || "")) : "—";
-                const details = (
-                  '<div class="hr"></div>' +
-                  '<div class="grid cols2">' +
-                    '<div class="kpi">' +
-                      '<div class="t">Dados pessoais</div>' +
-                      '<div class="muted">Nome: <b>' + escapeHtml(s.fullName || "—") + '</b></div>' +
-                      '<div class="muted">Documento: <b>' + escapeHtml(docLine) + '</b></div>' +
-                      '<div class="muted">Cidade/UF: <b>' + escapeHtml(s.billingCityState || "—") + '</b></div>' +
-                      '<div class="muted">Endereço: <b>' + escapeHtml(s.billingAddress || "—") + '</b></div>' +
-                    '</div>' +
-                    '<div class="kpi">' +
-                      '<div class="t">Assinatura / Cobrança</div>' +
-                      '<div class="muted">Status: <b>' + escapeHtml(s.status || "—") + '</b></div>' +
-                      '<div class="muted">Plano: <b>' + escapeHtml(s.plan || "—") + '</b></div>' +
-                      '<div class="muted">Payment: <b>' + escapeHtml(s.paymentMethod || "—") + '</b></div>' +
-                      '<div class="muted">Asaas Customer: <code>' + escapeHtml(s.asaasCustomerId || "—") + '</code></div>' +
-                      '<div class="muted">Asaas Subscription: <code>' + escapeHtml(s.asaasSubscriptionId || "—") + '</code></div>' +
-                    '</div>' +
-                  '</div>' +
-                  '<div class="hr"></div>' +
-                  '<details>' +
-                    '<summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>' +
-                    '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(s, null, 2)) + '</pre>' +
-                  '</details>'
-                );
-
-                row.querySelector("td").innerHTML = header + details;
-              } catch (_) {
-                row.querySelector("td").innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
-              }
+            if (row.style.display && row.style.display !== "none") {
+              row.style.display = "none";
               return;
             }
 
-            row.style.display = "none";
-          }
+            row.style.display = "";
+            const cell = row.querySelector("td");
+            if (cell) {
+              cell.innerHTML = '<div class="muted">Carregando...</div>';
+            }
 
-          function toggleRow(wa) {
-            const row = document.getElementById("exp_" + String(wa));
-            if (!row) return;
-            row.style.display = "none";
+            try {
+              const { response, json } = await fetchJson("/admin/users/details?waId=" + encodeURIComponent(wa));
+              if (!response.ok || !json.ok) {
+                if (cell) cell.innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
+                return;
+              }
+
+              const s = json.snapshot || {};
+              const header =
+                '<div class="row" style="justify-content:space-between; align-items:center;">' +
+                  '<div>' +
+                    '<div><b>' + escHtml(s.fullName || "—") + '</b> <span class="muted">(' + escHtml(wa) + ')</span></div>' +
+                    '<div class="muted">Status: <b>' + escHtml(s.status || "—") + '</b> • Plano: <b>' + escHtml(s.plan || "—") + '</b> • Janela 24h: <b>' + escHtml(json.inWindow ? "Ativa" : "Fora") + '</b></div>' +
+                  '</div>' +
+                  '<div class="row">' +
+                    '<button type="button" data-action="open" data-wa="' + escHtml(wa) + '">Abrir nas ações</button> ' +
+                    '<button type="button" data-action="collapse" data-wa="' + escHtml(wa) + '">Fechar</button>' +
+                  '</div>' +
+                '</div>';
+
+              const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + " • " + (s.doc.docLast4 || "")) : "—";
+
+              const details =
+                '<div class="hr"></div>' +
+                '<div class="grid cols2">' +
+                  '<div class="kpi">' +
+                    '<div class="t">Dados pessoais</div>' +
+                    '<div class="muted">Nome: <b>' + escHtml(s.fullName || "—") + '</b></div>' +
+                    '<div class="muted">Documento: <b>' + escHtml(docLine) + '</b></div>' +
+                    '<div class="muted">Cidade/UF: <b>' + escHtml(s.billingCityState || "—") + '</b></div>' +
+                    '<div class="muted">Endereço: <b>' + escHtml(s.billingAddress || "—") + '</b></div>' +
+                  '</div>' +
+                  '<div class="kpi">' +
+                    '<div class="t">Assinatura / Cobrança</div>' +
+                    '<div class="muted">Status: <b>' + escHtml(s.status || "—") + '</b></div>' +
+                    '<div class="muted">Plano: <b>' + escHtml(s.plan || "—") + '</b></div>' +
+                    '<div class="muted">Payment: <b>' + escHtml(s.paymentMethod || "—") + '</b></div>' +
+                    '<div class="muted">Asaas Customer: <code>' + escHtml(s.asaasCustomerId || "—") + '</code></div>' +
+                    '<div class="muted">Asaas Subscription: <code>' + escHtml(s.asaasSubscriptionId || "—") + '</code></div>' +
+                  '</div>' +
+                '</div>' +
+                '<div class="hr"></div>' +
+                '<details>' +
+                  '<summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>' +
+                  '<pre style="white-space:pre-wrap;">' + escHtml(JSON.stringify(s, null, 2)) + '</pre>' +
+                '</details>';
+
+              if (cell) {
+                cell.innerHTML = header + details;
+              }
+            } catch (_) {
+              if (cell) cell.innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
+            }
           }
 
           function openActions(wa) {
             window.location.href = "/admin/users-ui?waId=" + encodeURIComponent(wa);
           }
 
-          window.reloadUsers = reloadUsers;
-          window.renderUsers = renderUsers;
-          window.expandUser = expandUser;
-          window.toggleRow = toggleRow;
-          window.openActions = openActions;
+          function handleTbodyClick(event) {
+            const btn = event.target.closest("button[data-action]");
+            if (!btn) return;
 
-          Promise.resolve().then(() => reloadUsers()).catch(() => {
-            setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
-          });
+            const action = btn.getAttribute("data-action");
+            const wa = btn.getAttribute("data-wa") || "";
+
+            if (action === "expand") {
+              expandUser(wa);
+              return;
+            }
+
+            if (action === "collapse") {
+              const row = byId(detailsRowId(wa));
+              if (row) row.style.display = "none";
+              return;
+            }
+
+            if (action === "open") {
+              openActions(wa);
+            }
+          }
+
+          function initUsersListPage() {
+            const search = byId("uSearch");
+            const reloadBtn = byId("uReloadBtn");
+            const loadBtn = byId("uLoadBtn");
+            const tbody = byId("uTbody");
+
+            if (search) search.addEventListener("input", renderUsers);
+            if (reloadBtn) reloadBtn.addEventListener("click", reloadUsers);
+            if (loadBtn) loadBtn.addEventListener("click", reloadUsers);
+            if (tbody) tbody.addEventListener("click", handleTbodyClick);
+
+            window.reloadUsers = reloadUsers;
+            window.renderUsers = renderUsers;
+            window.expandUser = expandUser;
+            window.openActions = openActions;
+
+            reloadUsers();
+          }
+
+          if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", initUsersListPage, { once: true });
+          } else {
+            initUsersListPage();
+          }
         })();
       </script>
     `;
