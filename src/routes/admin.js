@@ -954,20 +954,20 @@ router.get("/", async (req, res) => {
           let users = [];
           let usersMeta = { total: 0, offset: 0, limit: 0 };
 
-          function fmtTs(ts){
+          function fmtTs(ts) {
             if (!ts) return "—";
             const d = new Date(ts);
             if (Number.isNaN(d.getTime())) return "—";
             return d.toLocaleString("pt-BR");
           }
 
-          function windowLabel(user){
+          function windowLabel(user) {
             if (!user || !user.lastInboundTs) return "—";
             const exp = user.windowExpiresAt ? fmtTs(user.windowExpiresAt) : "—";
             return user.inWindow ? ("Ativa (até " + exp + ")") : ("Fora (expirou em " + exp + ")");
           }
 
-          function escapeHtml(value){
+          function escapeHtml(value) {
             return String(value ?? "")
               .replace(/&/g, "&amp;")
               .replace(/</g, "&lt;")
@@ -976,24 +976,24 @@ router.get("/", async (req, res) => {
               .replace(/'/g, "&#39;");
           }
 
-          function escapeJsSingle(value){
+          function escapeJsSingle(value) {
             return String(value ?? "")
               .replace(/\/g, "\\")
               .replace(/'/g, "\'");
           }
 
-          function setTbody(html){
+          function setTbody(html) {
             const tbody = document.getElementById("uTbody");
             if (tbody) tbody.innerHTML = html;
           }
 
-          async function fetchJson(url, opt){
+          async function fetchJson(url, opt) {
             const response = await fetch(url, opt);
             const json = await response.json().catch(() => ({}));
             return { response, json };
           }
 
-          function renderUsers(){
+          function renderUsers() {
             const q = String(document.getElementById("uSearch")?.value || "").trim().toLowerCase();
             const filtered = !users.length ? [] : users.filter((user) => {
               if (!q) return true;
@@ -1017,7 +1017,8 @@ router.get("/", async (req, res) => {
               const status = escapeHtml(user.status || "");
               const plan = escapeHtml(user.plan || "");
               const win = escapeHtml(windowLabel(user));
-              const expId = "exp_" + waHtml;
+              const expId = "exp_" + wa;
+              const expIdHtml = escapeHtml(expId);
 
               rows.push(
                 "<tr>" +
@@ -1033,7 +1034,7 @@ router.get("/", async (req, res) => {
                 "</tr>"
               );
               rows.push(
-                "<tr id="" + expId + "" style="display:none;">" +
+                "<tr id="" + expIdHtml + "" style="display:none;">" +
                   "<td colspan="6"><div class="muted">Carregando...</div></td>" +
                 "</tr>"
               );
@@ -1042,7 +1043,7 @@ router.get("/", async (req, res) => {
             setTbody(rows.join(""));
           }
 
-          async function reloadUsers(){
+          async function reloadUsers() {
             const limitEl = document.getElementById("uLimit");
             const limit = Math.max(1, Math.min(500, Number(limitEl?.value || 200) || 200));
             const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
@@ -1066,7 +1067,7 @@ router.get("/", async (req, res) => {
             }
           }
 
-          async function expandUser(wa){
+          async function expandUser(wa) {
             const row = document.getElementById("exp_" + String(wa));
             if (!row) return;
 
@@ -1135,13 +1136,13 @@ router.get("/", async (req, res) => {
             row.style.display = "none";
           }
 
-          function toggleRow(wa){
+          function toggleRow(wa) {
             const row = document.getElementById("exp_" + String(wa));
             if (!row) return;
             row.style.display = "none";
           }
 
-          function openActions(wa){
+          function openActions(wa) {
             window.location.href = "/admin/users-ui?waId=" + encodeURIComponent(wa);
           }
 
@@ -1152,7 +1153,7 @@ router.get("/", async (req, res) => {
           window.openActions = openActions;
 
           if (document.readyState === "loading") {
-            document.addEventListener("DOMContentLoaded", reloadUsers, { once: true });
+            document.addEventListener("DOMContentLoaded", function(){ reloadUsers(); }, { once: true });
           } else {
             reloadUsers();
           }
