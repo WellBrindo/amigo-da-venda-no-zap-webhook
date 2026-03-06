@@ -1152,11 +1152,9 @@ router.get("/", async (req, res) => {
           window.toggleRow = toggleRow;
           window.openActions = openActions;
 
-          if (document.readyState === "loading") {
-            document.addEventListener("DOMContentLoaded", function(){ reloadUsers(); }, { once: true });
-          } else {
-            reloadUsers();
-          }
+          Promise.resolve().then(() => reloadUsers()).catch(() => {
+            setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
+          });
         })();
       </script>
     `;
@@ -2652,4 +2650,12 @@ router.get("/window24h-ui", async (req, res) => {
   });
 
   return router;
+}
+
+// --- safety init for users list UI ---
+if (typeof reloadUsers === 'function') {
+  window.reloadUsers = reloadUsers;
+  if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => { try { reloadUsers(); } catch(e) {} });
+  }
 }
