@@ -1125,14 +1125,18 @@ router.get("/", async (req, res) => {
             window.location.href = "/admin/users-ui?waId=" + encodeURIComponent(wa);
           }
 
-          // auto-load
-          setTimeout(() => { reloadUsers().catch(()=>{}); }, 50);
-        
+          window.reloadUsers = reloadUsers;
+          window.renderUsers = renderUsers;
+          window.expandUser = expandUser;
+          window.toggleRow = toggleRow;
+          window.openActions = openActions;
 
-          // Auto-load na primeira renderização
-          (function initUsersList(){
-            try { reloadUsers(); } catch (_) {}
-          })();
+          document.addEventListener("DOMContentLoaded", () => {
+            reloadUsers().catch(() => {
+              const tbody = document.getElementById("uTbody");
+              if (tbody) tbody.innerHTML = "<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>";
+            });
+          });
 </script>
       `,
     });
