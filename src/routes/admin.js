@@ -303,18 +303,67 @@ function requireWaId(req) {
 
 const GLOBAL_SETTINGS_PREFIX = "cfg:global:";
 
+
 const GLOBAL_SETTINGS_CATALOG = [
-  { key: "trial.maxDescriptions", label: "Trial · Máximo de descrições", section: "Trial", type: "int", defaultValue: 5, min: 1, max: 1000, help: "Quantidade global de descrições permitidas no trial." },
-  { key: "trial.maxRefinements", label: "Trial · Máximo de refinamentos", section: "Trial", type: "int", defaultValue: 2, min: 0, max: 100, help: "Quantidade global de refinamentos gratuitos no trial." },
-  { key: "flow.defaultTemplateMode", label: "Fluxo · Template padrão", section: "Fluxo", type: "enum", defaultValue: "FIXED", options: ["FIXED", "FREE"], help: "Modo padrão do anúncio para novos usuários." },
-  { key: "flow.requireNameOnStart", label: "Fluxo · Exigir nome no início", section: "Fluxo", type: "bool", defaultValue: true, help: "Quando ativo, o onboarding solicita o nome antes das demais etapas." },
-  { key: "feature.companyProfileWizard", label: "Feature · Wizard de dados da empresa", section: "Features", type: "bool", defaultValue: true, help: "Liga/desliga o wizard de dados da empresa." },
-  { key: "feature.refinement", label: "Feature · Refinamento", section: "Features", type: "bool", defaultValue: true, help: "Liga/desliga o refinamento de anúncios." },
-  { key: "feature.broadcast", label: "Feature · Broadcast", section: "Features", type: "bool", defaultValue: true, help: "Liga/desliga a área de broadcasts administrativos." },
-  { key: "ops.window24h.defaultLimit", label: "Operação · Limite padrão Janela 24h", section: "Operação", type: "int", defaultValue: 500, min: 1, max: 5000, help: "Limite padrão de registros na tela Janela 24h." },
-  { key: "ops.usersList.defaultLimit", label: "Operação · Limite padrão Lista de Usuários", section: "Operação", type: "int", defaultValue: 50, min: 1, max: 500, help: "Quantidade padrão por página na lista de usuários." },
-  { key: "support.contactUrl", label: "Suporte · URL de contato", section: "Suporte", type: "string", defaultValue: "", help: "Link de contato rápido exibido em módulos administrativos futuros." },
+  {
+    key: "trial.maxDescriptions",
+    label: "Limite de anúncios no teste gratuito",
+    section: "Plano Trial",
+    type: "int",
+    defaultValue: 5,
+    min: 1,
+    max: 1000,
+    help: "Define quantos anúncios um usuário pode gerar durante o período de teste gratuito. "
+          "Se você aumentar esse número, os usuários poderão criar mais anúncios antes de precisar assinar um plano."
+  },
+  {
+    key: "trial.maxRefinements",
+    label: "Limite de melhorias do anúncio no teste",
+    section: "Plano Trial",
+    type: "int",
+    defaultValue: 2,
+    min: 0,
+    max: 100,
+    help: "Define quantas vezes o usuário pode pedir para o sistema melhorar ou ajustar um anúncio durante o teste gratuito."
+  },
+  {
+    key: "flow.defaultTemplateMode",
+    label: "Modo padrão de criação de anúncio",
+    section: "Fluxo do Bot",
+    type: "enum",
+    defaultValue: "FIXED",
+    options: ["FIXED", "FREE"],
+    help: "Define como o anúncio será criado por padrão. "
+          "FIXED = usa um modelo estruturado do sistema. "
+          "FREE = permite texto mais livre e criativo."
+  },
+  {
+    key: "flow.requireNameOnStart",
+    label: "Solicitar nome do usuário no início",
+    section: "Fluxo do Bot",
+    type: "bool",
+    defaultValue: true,
+    help: "Se ativado, o bot sempre pedirá o nome do usuário antes de iniciar o fluxo de criação de anúncios."
+  },
+  {
+    key: "feature.companyProfileWizard",
+    label: "Ativar cadastro de dados da empresa",
+    section: "Funcionalidades",
+    type: "bool",
+    defaultValue: true,
+    help: "Se ativado, o sistema pedirá dados da empresa do usuário (nome do negócio, cidade, etc.) "
+          "para melhorar os anúncios gerados."
+  },
+  {
+    key: "feature.refinement",
+    label: "Permitir melhoria automática de anúncios",
+    section: "Funcionalidades",
+    type: "bool",
+    defaultValue: true,
+    help: "Se ativado, o usuário pode pedir para o sistema melhorar ou ajustar o anúncio gerado."
+  }
 ];
+
 
 function settingRedisKey(key) {
   return `${GLOBAL_SETTINGS_PREFIX}${key}`;
