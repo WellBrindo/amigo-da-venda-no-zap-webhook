@@ -1134,7 +1134,7 @@ router.get("/", async (req, res) => {
           document.addEventListener("DOMContentLoaded", () => {
             reloadUsers().catch(() => {
               const tbody = document.getElementById("uTbody");
-              if (tbody) tbody.innerHTML = "<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>";
+              if (tbody) tbody.innerHTML = "<tr><td colspan=\"6\" class=\"muted\">Erro ao carregar usuários.</td></tr>";
             });
           });
 </script>
@@ -2609,7 +2609,8 @@ router.get("/window24h-ui", async (req, res) => {
   });
 
   router.get("/window24h", async (req, res) => {
-    const items = await listWindow24hActive({ limit: 500 });
+    const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 500)));
+    const items = await listWindow24hActive(nowMs(), limit);
     return res.json({ ok: true, nowMs: nowMs(), count: items.length, returned: items.length, items });
   });
 
@@ -2625,12 +2626,4 @@ router.get("/window24h-ui", async (req, res) => {
   });
 
   return router;
-}
-
-// --- safety init for users list UI ---
-if (typeof reloadUsers === 'function') {
-  window.reloadUsers = reloadUsers;
-  if (typeof document !== 'undefined') {
-    document.addEventListener('DOMContentLoaded', () => { try { reloadUsers(); } catch(e) {} });
-  }
 }
