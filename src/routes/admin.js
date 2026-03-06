@@ -59,6 +59,7 @@ import {
 } from "../services/copy.js";
 import { listPayments, getSubscription, cancelSubscription } from "../services/asaas/client.js";
 import { listAsaasEvents } from "../services/asaas/ledger.js";
+
 import { redisGet, redisSet, redisDel } from "../services/redis.js";
 
 
@@ -231,7 +232,7 @@ function renderSidebar(activePath){
   const ap = String(activePath||"");
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
-  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings") || ap.startsWith("/admin/inconsistencies");
+  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
 
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
@@ -281,7 +282,6 @@ function renderSidebar(activePath){
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
         ${item("/admin/settings-ui", "Configurações Globais", "🛠️")}
-        ${item("/admin/inconsistencies-ui", "Inconsistências", "🧠")}
         ${item("/admin/asaas-test-ui", "Asaas Teste", "🧪")}
       </details>
 
@@ -299,6 +299,128 @@ function requireWaId(req) {
     throw err;
   }
   return waId;
+}
+
+const GLOBAL_SETTINGS_PREFIX = "cfg:global:";
+
+
+const GLOBAL_SETTINGS_CATALOG = [
+  {
+    key: "trial.maxDescriptions",
+    label: "Limite de anúncios no teste gratuito",
+    section: "Plano Trial",
+    type: "int",
+    defaultValue: 5,
+    min: 1,
+    max: 1000,
+    help: "Define quantos anúncios um usuário pode gerar durante o período de teste gratuito. Se você aumentar esse número, os usuários poderão criar mais anúncios antes de precisar assinar um plano."
+  },
+  {
+    key: "trial.maxRefinements",
+    label: "Limite de melhorias do anúncio no teste",
+    section: "Plano Trial",
+    type: "int",
+    defaultValue: 2,
+    min: 0,
+    max: 100,
+    help: "Define quantas vezes o usuário pode pedir para o sistema melhorar ou ajustar um anúncio durante o teste gratuito."
+  },
+  {
+    key: "flow.defaultTemplateMode",
+    label: "Modo padrão de criação de anúncio",
+    section: "Fluxo do Bot",
+    type: "enum",
+    defaultValue: "FIXED",
+    options: ["FIXED", "FREE"],
+    help: "Define como o anúncio será criado por padrão. FIXED = usa um modelo estruturado do sistema. FREE = permite texto mais livre e criativo."
+  },
+  {
+    key: "flow.requireNameOnStart",
+    label: "Solicitar nome do usuário no início",
+    section: "Fluxo do Bot",
+    type: "bool",
+    defaultValue: true,
+    help: "Se ativado, o bot sempre pedirá o nome do usuário antes de iniciar o fluxo de criação de anúncios."
+  },
+  {
+    key: "feature.companyProfileWizard",
+    label: "Ativar cadastro de dados da empresa",
+    section: "Funcionalidades",
+    type: "bool",
+    defaultValue: true,
+    help: "Se ativado, o sistema pedirá dados da empresa do usuário (nome do negócio, cidade, etc.) para melhorar os anúncios gerados."
+  },
+  {
+    key: "feature.refinement",
+    label: "Permitir melhoria automática de anúncios",
+    section: "Funcionalidades",
+    type: "bool",
+    defaultValue: true,
+    help: "Se ativado, o usuário pode pedir para o sistema melhorar ou ajustar o anúncio gerado."
+  }
+];
+
+
+function settingRedisKey(key) {
+  return `${GLOBAL_SETTINGS_PREFIX}${key}`;
+}
+
+function normalizeSettingValue(def, rawValue) {
+  if (rawValue === undefined || rawValue === null || rawValue === "") {
+    return def.defaultValue;
+  }
+
+  if (def.type === "bool") {
+    if (typeof rawValue === "boolean") return rawValue;
+    const v = String(rawValue).trim().toLowerCase();
+    return v === "1" || v === "true" || v === "on" || v === "yes";
+  }
+
+  if (def.type === "int") {
+    const n = Number(rawValue);
+    let out = Number.isFinite(n) ? Math.trunc(n) : Number(def.defaultValue || 0);
+    if (Number.isFinite(def.min)) out = Math.max(def.min, out);
+    if (Number.isFinite(def.max)) out = Math.min(def.max, out);
+    return out;
+  }
+
+  if (def.type === "enum") {
+    const v = String(rawValue).trim();
+    return Array.isArray(def.options) && def.options.includes(v) ? v : def.defaultValue;
+  }
+
+  return String(rawValue);
+}
+
+function serializeSettingValue(def, value) {
+  if (def.type === "bool") return value ? "true" : "false";
+  if (def.type === "int") return String(Math.trunc(Number(value) || 0));
+  return String(value ?? "");
+}
+
+async function getResolvedGlobalSettings() {
+  const rows = [];
+  for (const def of GLOBAL_SETTINGS_CATALOG) {
+    const raw = await redisGet(settingRedisKey(def.key));
+    const resolved = normalizeSettingValue(def, raw);
+    rows.push({
+      ...def,
+      value: resolved,
+      storedValue: raw,
+      isCustom: raw !== null && raw !== undefined,
+    });
+  }
+  return rows;
+}
+
+function groupGlobalSettings(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const section = row.section || "Geral";
+    if (!groups.has(section)) groups.set(section, []);
+    groups.get(section).push(row);
+  }
+  return Array.from(groups.entries()).map(([section, items]) => ({ section, items }));
 }
 
 export function adminRouter() {
@@ -897,6 +1019,185 @@ router.get("/", async (req, res) => {
             <div class="muted">Observação: ações avançadas estão nas seções do menu.</div>
           </div>
         </div>
+      `,
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  // -----------------------------
+  // 🛠️ Configurações Globais
+  // -----------------------------
+  router.get("/settings", async (req, res) => {
+    try {
+      const rows = await getResolvedGlobalSettings();
+      return res.json({ ok: true, items: rows });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/settings", async (req, res) => {
+    try {
+      const key = String(req.body?.key || "").trim();
+      const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
+      if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
+
+      const normalized = normalizeSettingValue(def, req.body?.value);
+      await redisSet(settingRedisKey(def.key), serializeSettingValue(def, normalized));
+
+      return res.json({ ok: true, key: def.key, value: normalized });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/settings/reset", async (req, res) => {
+    try {
+      const key = String(req.body?.key || "").trim();
+      const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
+      if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
+
+      await redisDel(settingRedisKey(def.key));
+      return res.json({ ok: true, key: def.key, value: def.defaultValue, reset: true });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/settings-ui", async (req, res) => {
+    const rows = await getResolvedGlobalSettings();
+    const groups = groupGlobalSettings(rows);
+
+    const cards = groups.map(({ section, items }) => {
+      const body = items.map((row) => {
+        const inputHtml = (() => {
+          if (row.type === "bool") {
+            return `<label class="pill"><input type="checkbox" data-setting-input="${escapeHtml(row.key)}" ${row.value ? "checked" : ""} /> Ativo</label>`;
+          }
+          if (row.type === "enum") {
+            const options = (row.options || []).map((opt) => `<option value="${escapeHtml(opt)}" ${String(opt) === String(row.value) ? "selected" : ""}>${escapeHtml(opt)}</option>`).join("");
+            return `<select data-setting-input="${escapeHtml(row.key)}">${options}</select>`;
+          }
+          if (row.type === "int") {
+            const min = Number.isFinite(row.min) ? ` min="${escapeHtml(String(row.min))}"` : "";
+            const max = Number.isFinite(row.max) ? ` max="${escapeHtml(String(row.max))}"` : "";
+            return `<input type="number" data-setting-input="${escapeHtml(row.key)}" value="${escapeHtml(String(row.value))}"${min}${max} />`;
+          }
+          return `<input type="text" data-setting-input="${escapeHtml(row.key)}" value="${escapeHtml(String(row.value || ""))}" />`;
+        })();
+
+        return `
+          <tr>
+            <td>
+              <div><b>${escapeHtml(row.label)}</b></div>
+              <div class="muted" style="font-size:12px;">${escapeHtml(row.key)}</div>
+              <div class="muted" style="font-size:12px;margin-top:4px;">${escapeHtml(row.help || "")}</div>
+            </td>
+            <td>${inputHtml}</td>
+            <td><code>${escapeHtml(String(row.defaultValue ?? ""))}</code></td>
+            <td>${row.isCustom ? '<span class="badge warn">custom</span>' : '<span class="badge soft">default</span>'}</td>
+            <td>
+              <div class="row">
+                <button type="button" class="primary" data-save-setting="${escapeHtml(row.key)}">Salvar</button>
+                <button type="button" data-reset-setting="${escapeHtml(row.key)}">Resetar</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join("");
+
+      return `
+        <div class="card pad" style="margin-bottom:14px;">
+          <div class="row" style="justify-content:space-between;">
+            <div>
+              <h3 style="margin:0 0 6px 0;">${escapeHtml(section)}</h3>
+              <div class="muted">Configurações globais persistidas no Redis.</div>
+            </div>
+          </div>
+          <div class="hr"></div>
+          <table>
+            <thead>
+              <tr>
+                <th>Configuração</th>
+                <th>Valor atual</th>
+                <th>Padrão</th>
+                <th>Origem</th>
+                <th>Ação</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+    }).join("");
+
+    const html = layoutBase({
+      title: "Configurações Globais",
+      activePath: "/admin/settings-ui",
+      content: `
+        <div class="card pad" style="margin-bottom:14px;">
+          <div class="row" style="justify-content:space-between;">
+            <div>
+              <h3 style="margin:0 0 6px 0;">🛠️ Configurações Globais</h3>
+              <div class="muted">Controle operacional centralizado do sistema. Essas regras não substituem os planos; elas complementam o comportamento global.</div>
+            </div>
+            <div class="pill">Persistência: <b>Redis</b></div>
+          </div>
+        </div>
+        ${cards}
+        <div class="card pad">
+          <details>
+            <summary class="muted">Ver JSON resolvido</summary>
+            <pre id="settingsRaw" style="white-space:pre-wrap;">${escapeHtml(JSON.stringify(rows, null, 2))}</pre>
+          </details>
+        </div>
+      `,
+      scriptExtra: `
+        <script>
+          (function(){
+            async function postJson(url, body){
+              const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+              const j = await r.json().catch(()=>({}));
+              return { r, j };
+            }
+            function readSettingValue(key){
+              const el = document.querySelector('[data-setting-input="' + CSS.escape(key) + '"]');
+              if (!el) return '';
+              if (el.type === 'checkbox') return !!el.checked;
+              return el.value;
+            }
+            async function saveSetting(key){
+              const value = readSettingValue(key);
+              const out = await postJson('/admin/settings', { key, value });
+              if (!out.r.ok || !out.j.ok) {
+                alert('Falha ao salvar configuração.');
+                return;
+              }
+              window.location.reload();
+            }
+            async function resetSetting(key){
+              const out = await postJson('/admin/settings/reset', { key });
+              if (!out.r.ok || !out.j.ok) {
+                alert('Falha ao resetar configuração.');
+                return;
+              }
+              window.location.reload();
+            }
+            document.addEventListener('click', function(ev){
+              const saveBtn = ev.target.closest('[data-save-setting]');
+              if (saveBtn) {
+                saveSetting(saveBtn.getAttribute('data-save-setting'));
+                return;
+              }
+              const resetBtn = ev.target.closest('[data-reset-setting]');
+              if (resetBtn) {
+                resetSetting(resetBtn.getAttribute('data-reset-setting'));
+              }
+            });
+          })();
+        </script>
       `,
     });
 
@@ -2662,254 +2963,3 @@ if (typeof reloadUsers === 'function') {
     document.addEventListener('DOMContentLoaded', () => { try { reloadUsers(); } catch(e) {} });
   }
 }
-
-const GLOBAL_SETTINGS_PREFIX = "cfg:global:";
-
-const GLOBAL_SETTINGS_CATALOG = [
-  { key: "trial.maxDescriptions", label: "Quantidade de anúncios no teste grátis", section: "Plano Trial", type: "int", defaultValue: 5, min: 1, max: 1000, help: "Define quantos anúncios um usuário pode criar no período de teste gratuito antes de precisar assinar um plano." },
-  { key: "trial.maxRefinements", label: "Quantidade de melhorias no teste grátis", section: "Plano Trial", type: "int", defaultValue: 2, min: 0, max: 100, help: "Define quantas vezes o usuário em teste pode pedir ajustes ou melhorias em um anúncio já criado." },
-  { key: "flow.defaultTemplateMode", label: "Formato padrão do anúncio", section: "Fluxo do Bot", type: "enum", defaultValue: "FIXED", options: ["FIXED", "FREE"], help: "Escolhe o formato padrão dos anúncios novos. FIXED usa um modelo mais guiado. FREE deixa o texto mais livre." },
-  { key: "flow.requireNameOnStart", label: "Pedir o nome no início da conversa", section: "Fluxo do Bot", type: "bool", defaultValue: true, help: "Se ativado, o bot pedirá o nome do usuário logo no começo do atendimento." },
-  { key: "feature.companyProfileWizard", label: "Ativar cadastro de dados da empresa", section: "Funcionalidades", type: "bool", defaultValue: true, help: "Liga ou desliga o assistente que coleta dados da empresa para enriquecer os anúncios." },
-  { key: "feature.refinement", label: "Permitir melhorar anúncios já criados", section: "Funcionalidades", type: "bool", defaultValue: true, help: "Se ativado, o usuário pode pedir ajustes e melhorias depois que o anúncio for gerado." },
-  { key: "feature.broadcast", label: "Permitir uso de broadcast administrativo", section: "Funcionalidades", type: "bool", defaultValue: true, help: "Liga ou desliga a área administrativa de broadcasts e campanhas em massa." },
-  { key: "ops.window24h.defaultLimit", label: "Quantidade padrão na tela Janela 24h", section: "Operação", type: "int", defaultValue: 500, min: 1, max: 5000, help: "Define quantos registros a tela Janela 24h tenta carregar por padrão." },
-  { key: "ops.usersList.defaultLimit", label: "Quantidade padrão na lista de usuários", section: "Operação", type: "int", defaultValue: 50, min: 1, max: 500, help: "Define quantos usuários são carregados por página na lista de usuários do admin." },
-  { key: "support.contactUrl", label: "Link de contato do suporte", section: "Suporte", type: "string", defaultValue: "", help: "Permite salvar um link de contato rápido para ser usado em futuras telas administrativas." },
-];
-
-function settingRedisKey(key) {
-  return `${GLOBAL_SETTINGS_PREFIX}${key}`;
-}
-
-function normalizeSettingValue(def, rawValue) {
-  if (rawValue === undefined || rawValue === null || rawValue === "") return def.defaultValue;
-
-  if (def.type === "bool") {
-    if (typeof rawValue === "boolean") return rawValue;
-    const v = String(rawValue).trim().toLowerCase();
-    return v === "1" || v === "true" || v === "on" || v === "yes";
-  }
-
-  if (def.type === "int") {
-    let out = Number.isFinite(Number(rawValue)) ? Math.trunc(Number(rawValue)) : Math.trunc(Number(def.defaultValue || 0));
-    if (Number.isFinite(def.min)) out = Math.max(def.min, out);
-    if (Number.isFinite(def.max)) out = Math.min(def.max, out);
-    return out;
-  }
-
-  if (def.type === "enum") {
-    const v = String(rawValue).trim();
-    return Array.isArray(def.options) && def.options.includes(v) ? v : def.defaultValue;
-  }
-
-  return String(rawValue ?? "");
-}
-
-function serializeSettingValue(def, value) {
-  if (def.type === "bool") return value ? "true" : "false";
-  if (def.type === "int") return String(Math.trunc(Number(value) || 0));
-  return String(value ?? "");
-}
-
-async function getResolvedGlobalSettings() {
-  const rows = [];
-  for (const def of GLOBAL_SETTINGS_CATALOG) {
-    const raw = await redisGet(settingRedisKey(def.key));
-    rows.push({
-      ...def,
-      value: normalizeSettingValue(def, raw),
-      storedValue: raw,
-      isCustom: raw !== null && raw !== undefined,
-    });
-  }
-  return rows;
-}
-
-function groupGlobalSettings(rows) {
-  const groups = new Map();
-  for (const row of rows) {
-    const section = row.section || "Geral";
-    if (!groups.has(section)) groups.set(section, []);
-    groups.get(section).push(row);
-  }
-  return Array.from(groups.entries()).map(([section, items]) => ({ section, items }));
-}
-
-
-  // -----------------------------
-  // 🛠️ Configurações Globais
-  // -----------------------------
-  router.get("/settings", async (req, res) => {
-    try {
-      const rows = await getResolvedGlobalSettings();
-      return res.json({ ok: true, items: rows });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: String(err?.message || err) });
-    }
-  });
-
-  router.post("/settings", async (req, res) => {
-    try {
-      const key = String(req.body?.key || "").trim();
-      const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
-      if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
-
-      const normalized = normalizeSettingValue(def, req.body?.value);
-      await redisSet(settingRedisKey(def.key), serializeSettingValue(def, normalized));
-      return res.json({ ok: true, key: def.key, value: normalized });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: String(err?.message || err) });
-    }
-  });
-
-  router.post("/settings/reset", async (req, res) => {
-    try {
-      const key = String(req.body?.key || "").trim();
-      const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
-      if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
-
-      await redisDel(settingRedisKey(def.key));
-      return res.json({ ok: true, key: def.key, value: def.defaultValue, reset: true });
-    } catch (err) {
-      return res.status(500).json({ ok: false, error: String(err?.message || err) });
-    }
-  });
-
-  router.get("/settings-ui", async (req, res) => {
-    const rows = await getResolvedGlobalSettings();
-    const groups = groupGlobalSettings(rows);
-
-    const cards = groups.map(({ section, items }) => {
-      const body = items.map((row) => {
-        let inputHtml = "";
-        if (row.type === "bool") {
-          inputHtml = `<label class="pill"><input type="checkbox" data-setting-input="${escapeHtml(row.key)}" ${row.value ? "checked" : ""} /> Ativado</label>`;
-        } else if (row.type === "enum") {
-          const options = (row.options || []).map((opt) => `<option value="${escapeHtml(opt)}" ${String(opt) === String(row.value) ? "selected" : ""}>${escapeHtml(opt)}</option>`).join("");
-          inputHtml = `<select data-setting-input="${escapeHtml(row.key)}">${options}</select>`;
-        } else if (row.type === "int") {
-          const min = Number.isFinite(row.min) ? ` min="${escapeHtml(String(row.min))}"` : "";
-          const max = Number.isFinite(row.max) ? ` max="${escapeHtml(String(row.max))}"` : "";
-          inputHtml = `<input type="number" data-setting-input="${escapeHtml(row.key)}" value="${escapeHtml(String(row.value))}"${min}${max} />`;
-        } else {
-          inputHtml = `<input type="text" data-setting-input="${escapeHtml(row.key)}" value="${escapeHtml(String(row.value || ""))}" />`;
-        }
-
-        return `
-          <tr>
-            <td>
-              <div><b>${escapeHtml(row.label)}</b></div>
-              <div class="muted" style="font-size:12px;">${escapeHtml(row.key)}</div>
-              <div class="muted" style="font-size:12px;margin-top:4px;">${escapeHtml(row.help || "")}</div>
-            </td>
-            <td>${inputHtml}</td>
-            <td><code>${escapeHtml(String(row.defaultValue ?? ""))}</code></td>
-            <td>${row.isCustom ? '<span class="badge warn">personalizado</span>' : '<span class="badge soft">padrão</span>'}</td>
-            <td>
-              <div class="row">
-                <button type="button" class="primary" data-save-setting="${escapeHtml(row.key)}">Salvar</button>
-                <button type="button" data-reset-setting="${escapeHtml(row.key)}">Resetar</button>
-              </div>
-            </td>
-          </tr>
-        `;
-      }).join("");
-
-      return `
-        <div class="card pad" style="margin-bottom:14px;">
-          <div class="row" style="justify-content:space-between;">
-            <div>
-              <h3 style="margin:0 0 6px 0;">${escapeHtml(section)}</h3>
-              <div class="muted">Regras gerais do sistema salvas no Redis.</div>
-            </div>
-          </div>
-          <div class="hr"></div>
-          <table>
-            <thead>
-              <tr>
-                <th>Configuração</th>
-                <th>Valor atual</th>
-                <th>Valor padrão</th>
-                <th>Origem</th>
-                <th>Ação</th>
-              </tr>
-            </thead>
-            <tbody>${body}</tbody>
-          </table>
-        </div>
-      `;
-    }).join("");
-
-    const html = layoutBase({
-      title: "Configurações Globais",
-      activePath: "/admin/settings-ui",
-      content: `
-        <div class="card pad" style="margin-bottom:14px;">
-          <div class="row" style="justify-content:space-between;">
-            <div>
-              <h3 style="margin:0 0 6px 0;">🛠️ Configurações Globais</h3>
-              <div class="muted">Aqui você altera regras gerais do sistema. Essas configurações complementam os planos, mas não substituem o cadastro de planos.</div>
-            </div>
-            <div class="pill">Persistência: <b>Redis</b></div>
-          </div>
-        </div>
-        ${cards}
-        <div class="card pad">
-          <details>
-            <summary class="muted">Ver JSON resolvido</summary>
-            <pre id="settingsRaw" style="white-space:pre-wrap;">${escapeHtml(JSON.stringify(rows, null, 2))}</pre>
-          </details>
-        </div>
-      `,
-      scriptExtra: `
-        <script>
-          (function(){
-            async function postJson(url, body){
-              const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-              const j = await r.json().catch(()=>({}));
-              return { r, j };
-            }
-            function readSettingValue(key){
-              const el = document.querySelector('[data-setting-input="' + CSS.escape(key) + '"]');
-              if (!el) return '';
-              if (el.type === 'checkbox') return !!el.checked;
-              return el.value;
-            }
-            async function saveSetting(key){
-              const value = readSettingValue(key);
-              const out = await postJson('/admin/settings', { key, value });
-              if (!out.r.ok || !out.j.ok) {
-                alert('Falha ao salvar configuração.');
-                return;
-              }
-              window.location.reload();
-            }
-            async function resetSetting(key){
-              const out = await postJson('/admin/settings/reset', { key });
-              if (!out.r.ok || !out.j.ok) {
-                alert('Falha ao resetar configuração.');
-                return;
-              }
-              window.location.reload();
-            }
-            document.addEventListener('click', function(ev){
-              const saveBtn = ev.target.closest('[data-save-setting]');
-              if (saveBtn) {
-                saveSetting(saveBtn.getAttribute('data-save-setting'));
-                return;
-              }
-              const resetBtn = ev.target.closest('[data-reset-setting]');
-              if (resetBtn) {
-                resetSetting(resetBtn.getAttribute('data-reset-setting'));
-              }
-            });
-          })();
-        </script>
-      `,
-    });
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(html);
-  });
-
