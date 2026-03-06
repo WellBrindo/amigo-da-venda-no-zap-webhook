@@ -921,15 +921,24 @@ router.get("/", async (req, res) => {
 
           <div class="row" style="gap:10px; flex-wrap:wrap;">
             <input id="uSearch" placeholder="Buscar por nome ou waId..." style="min-width:320px" />
-            <input id="uLimit" type="number" min="1" max="500" value="200" style="width:110px" />
+            <input id="uLimit" type="number" min="1" max="500" value="50" style="width:110px" />
             <button type="button" class="primary" id="uLoadBtn">Carregar</button>
+            <div class="pill">Página: <b id="uPageLabel">1</b></div>
             <div class="muted" id="uMeta" style="margin-left:auto;"></div>
+          </div>
+
+          <div class="row" style="margin-top:10px; justify-content:space-between;">
+            <div class="row">
+              <button type="button" id="uPrevBtn">← Anterior</button>
+              <button type="button" id="uNextBtn">Próxima →</button>
+            </div>
+            <div class="muted" id="uPageMeta"></div>
           </div>
 
           <div class="hr"></div>
 
           <div style="overflow:auto;">
-            <table class="table" style="min-width:900px;">
+            <table class="table" style="min-width:980px;">
               <thead>
                 <tr>
                   <th>Nome</th>
@@ -953,42 +962,107 @@ router.get("/", async (req, res) => {
         (function () {
           const state = {
             users: [],
-            meta: { total: 0, offset: 0, limit: 0 },
+            total: 0,
+            offset: 0,
+            limit: 50,
+            filteredCount: 0,
           };
 
           function byId(id) {
             return document.getElementById(id);
           }
 
-          function fmtTs(ts) {
-            if (!ts) return "—";
-            const d = new Date(ts);
-            if (Number.isNaN(d.getTime())) return "—";
-            return d.toLocaleString("pt-BR");
-          }
-
-          function windowLabel(user) {
-            if (!user || !user.lastInboundTs) return "—";
-            const exp = user.windowExpiresAt ? fmtTs(user.windowExpiresAt) : "—";
-            return user.inWindow ? ("Ativa (até " + exp + ")") : ("Fora (expirou em " + exp + ")");
-          }
-
           function escHtml(value) {
-            return String(value ?? "")
-              .replace(/&/g, "&amp;")
-              .replace(/</g, "&lt;")
-              .replace(/>/g, "&gt;")
-              .replace(/"/g, "&quot;")
-              .replace(/'/g, "&#39;");
+            return String(value ?? '')
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;');
+          }
+
+          function fmtTs(ts) {
+            if (!ts) return '—';
+            const d = new Date(ts);
+            if (Number.isNaN(d.getTime())) return '—';
+            return d.toLocaleString('pt-BR');
           }
 
           function detailsRowId(waId) {
-            return "exp_" + encodeURIComponent(String(waId || ""));
+            return 'exp_' + encodeURIComponent(String(waId || ''));
+          }
+
+          function getLimit() {
+            const raw = Number(byId('uLimit')?.value || state.limit || 50);
+            const parsed = Number.isFinite(raw) ? raw : 50;
+            return Math.max(1, Math.min(500, parsed));
+          }
+
+          function currentPage() {
+            return Math.floor(state.offset / Math.max(1, state.limit)) + 1;
+          }
+
+          function totalPages() {
+            return Math.max(1, Math.ceil((state.total || 0) / Math.max(1, state.limit)));
+          }
+
+          function planBadge(plan) {
+            const code = String(plan || '').trim().toUpperCase();
+            if (!code) return '<span class="badge soft">—</span>';
+            let cls = 'info';
+            if (code.includes('TRIAL') || code.includes('FREE')) cls = 'soft';
+            else if (code.includes('PRO') || code.includes('PLUS') || code.includes('PREMIUM')) cls = 'ok';
+            else if (code.includes('BASIC') || code.includes('START')) cls = 'info';
+            return '<span class="badge ' + cls + '">' + escHtml(plan) + '</span>';
+          }
+
+          function statusBadge(status) {
+            const code = String(status || '').trim().toUpperCase();
+            if (!code) return '<span class="badge soft">—</span>';
+            let cls = 'soft';
+            if (code === 'ACTIVE') cls = 'ok';
+            else if (code === 'TRIAL') cls = 'info';
+            else if (code === 'WAIT_PLAN' || code === 'PAYMENT_PENDING') cls = 'warn';
+            else if (code === 'BLOCKED' || code === 'CANCELED' || code === 'INACTIVE') cls = 'danger';
+            return '<span class="badge ' + cls + '">' + escHtml(status) + '</span>';
+          }
+
+          function windowBadge(user) {
+            if (!user || !user.lastInboundTs) {
+              return '<span class="badge soft">Sem inbound</span>';
+            }
+            const exp = user.windowExpiresAt ? fmtTs(user.windowExpiresAt) : '—';
+            if (user.inWindow) {
+              return '<span class="badge ok">Ativa</span><div class="muted" style="font-size:12px;margin-top:4px;">até ' + escHtml(exp) + '</div>';
+            }
+            return '<span class="badge danger">Expirada</span><div class="muted" style="font-size:12px;margin-top:4px;">em ' + escHtml(exp) + '</div>';
           }
 
           function setTbody(html) {
-            const tbody = byId("uTbody");
+            const tbody = byId('uTbody');
             if (tbody) tbody.innerHTML = html;
+          }
+
+          function updatePaginationUi() {
+            const page = currentPage();
+            const pages = totalPages();
+            const from = state.total ? state.offset + 1 : 0;
+            const to = Math.min(state.offset + state.limit, state.total);
+
+            const pageLabel = byId('uPageLabel');
+            const pageMeta = byId('uPageMeta');
+            const prevBtn = byId('uPrevBtn');
+            const nextBtn = byId('uNextBtn');
+            const metaEl = byId('uMeta');
+
+            if (pageLabel) pageLabel.textContent = String(page) + ' / ' + String(pages);
+            if (pageMeta) pageMeta.textContent = state.total ? ('Mostrando ' + from + '–' + to + ' de ' + state.total) : 'Nenhum usuário indexado';
+            if (prevBtn) prevBtn.disabled = state.offset <= 0;
+            if (nextBtn) nextBtn.disabled = state.offset + state.limit >= state.total;
+
+            if (metaEl) {
+              metaEl.textContent = String(state.filteredCount) + ' exibidos nesta página • Total indexado: ' + String(state.total);
+            }
           }
 
           async function fetchJson(url, opt) {
@@ -998,18 +1072,16 @@ router.get("/", async (req, res) => {
           }
 
           function renderUsers() {
-            const q = String(byId("uSearch")?.value || "").trim().toLowerCase();
+            const q = String(byId('uSearch')?.value || '').trim().toLowerCase();
             const filtered = !state.users.length
               ? []
               : state.users.filter((user) => {
                   if (!q) return true;
-                  return String(user.waId || "").includes(q) || String(user.fullName || "").toLowerCase().includes(q);
+                  return String(user.waId || '').includes(q) || String(user.fullName || '').toLowerCase().includes(q);
                 });
 
-            const metaEl = byId("uMeta");
-            if (metaEl) {
-              metaEl.textContent = String(filtered.length) + " exibidos • Total: " + String(state.meta.total);
-            }
+            state.filteredCount = filtered.length;
+            updatePaginationUi();
 
             if (!filtered.length) {
               setTbody('<tr><td colspan="6" class="muted">Nenhum usuário encontrado.</td></tr>');
@@ -1018,16 +1090,16 @@ router.get("/", async (req, res) => {
 
             const rows = [];
             for (const user of filtered) {
-              const wa = String(user.waId || "");
+              const wa = String(user.waId || '');
               const rowId = detailsRowId(wa);
 
               rows.push(
                 '<tr>' +
-                  '<td>' + escHtml(user.fullName || "—") + '</td>' +
+                  '<td>' + escHtml(user.fullName || '—') + '</td>' +
                   '<td><code>' + escHtml(wa) + '</code></td>' +
-                  '<td>' + escHtml(user.status || "—") + '</td>' +
-                  '<td>' + escHtml(user.plan || "—") + '</td>' +
-                  '<td>' + escHtml(windowLabel(user)) + '</td>' +
+                  '<td>' + statusBadge(user.status || '—') + '</td>' +
+                  '<td>' + planBadge(user.plan || '') + '</td>' +
+                  '<td>' + windowBadge(user) + '</td>' +
                   '<td>' +
                     '<button type="button" data-action="expand" data-wa="' + escHtml(wa) + '">Expandir</button> ' +
                     '<button type="button" data-action="open" data-wa="' + escHtml(wa) + '">Abrir</button>' +
@@ -1045,26 +1117,26 @@ router.get("/", async (req, res) => {
             setTbody(rows.join(''));
           }
 
-          async function reloadUsers() {
-            const rawLimit = Number(byId("uLimit")?.value || 200);
-            const limit = Math.max(1, Math.min(500, Number.isFinite(rawLimit) ? rawLimit : 200));
-            const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
+          async function reloadUsers(options) {
+            const opts = options || {};
+            state.limit = getLimit();
+            if (opts.resetOffset) state.offset = 0;
+            if (typeof opts.offset === 'number') state.offset = Math.max(0, opts.offset);
 
+            const url = '/admin/users/list?limit=' + encodeURIComponent(state.limit) + '&offset=' + encodeURIComponent(state.offset);
             setTbody('<tr><td colspan="6" class="muted">Carregando...</td></tr>');
 
             try {
-              const { response, json } = await fetchJson(url);
-              if (!response.ok || !json.ok) {
+              const result = await fetchJson(url);
+              if (!result.response.ok || !result.json.ok) {
                 setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
                 return;
               }
 
-              state.users = Array.isArray(json.items) ? json.items : [];
-              state.meta = {
-                total: Number(json.total || 0),
-                offset: Number(json.offset || 0),
-                limit: Number(json.limit || limit),
-              };
+              state.users = Array.isArray(result.json.items) ? result.json.items : [];
+              state.total = Number(result.json.total || 0);
+              state.offset = Number(result.json.offset || 0);
+              state.limit = Number(result.json.limit || state.limit);
               renderUsers();
             } catch (_) {
               setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
@@ -1075,30 +1147,28 @@ router.get("/", async (req, res) => {
             const row = byId(detailsRowId(wa));
             if (!row) return;
 
-            if (row.style.display && row.style.display !== "none") {
-              row.style.display = "none";
+            if (row.style.display && row.style.display !== 'none') {
+              row.style.display = 'none';
               return;
             }
 
-            row.style.display = "";
-            const cell = row.querySelector("td");
-            if (cell) {
-              cell.innerHTML = '<div class="muted">Carregando...</div>';
-            }
+            row.style.display = '';
+            const cell = row.querySelector('td');
+            if (cell) cell.innerHTML = '<div class="muted">Carregando...</div>';
 
             try {
-              const { response, json } = await fetchJson("/admin/users/details?waId=" + encodeURIComponent(wa));
-              if (!response.ok || !json.ok) {
+              const result = await fetchJson('/admin/users/details?waId=' + encodeURIComponent(wa));
+              if (!result.response.ok || !result.json.ok) {
                 if (cell) cell.innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
                 return;
               }
 
-              const s = json.snapshot || {};
+              const s = result.json.snapshot || {};
               const header =
                 '<div class="row" style="justify-content:space-between; align-items:center;">' +
                   '<div>' +
-                    '<div><b>' + escHtml(s.fullName || "—") + '</b> <span class="muted">(' + escHtml(wa) + ')</span></div>' +
-                    '<div class="muted">Status: <b>' + escHtml(s.status || "—") + '</b> • Plano: <b>' + escHtml(s.plan || "—") + '</b> • Janela 24h: <b>' + escHtml(json.inWindow ? "Ativa" : "Fora") + '</b></div>' +
+                    '<div><b>' + escHtml(s.fullName || '—') + '</b> <span class="muted">(' + escHtml(wa) + ')</span></div>' +
+                    '<div class="muted">Status: ' + statusBadge(s.status || '—') + ' &nbsp; Plano: ' + planBadge(s.plan || '') + '</div>' +
                   '</div>' +
                   '<div class="row">' +
                     '<button type="button" data-action="open" data-wa="' + escHtml(wa) + '">Abrir nas ações</button> ' +
@@ -1106,25 +1176,25 @@ router.get("/", async (req, res) => {
                   '</div>' +
                 '</div>';
 
-              const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + " • " + (s.doc.docLast4 || "")) : "—";
-
+              const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + ' • ' + (s.doc.docLast4 || '')) : '—';
               const details =
                 '<div class="hr"></div>' +
                 '<div class="grid cols2">' +
                   '<div class="kpi">' +
                     '<div class="t">Dados pessoais</div>' +
-                    '<div class="muted">Nome: <b>' + escHtml(s.fullName || "—") + '</b></div>' +
+                    '<div class="muted">Nome: <b>' + escHtml(s.fullName || '—') + '</b></div>' +
                     '<div class="muted">Documento: <b>' + escHtml(docLine) + '</b></div>' +
-                    '<div class="muted">Cidade/UF: <b>' + escHtml(s.billingCityState || "—") + '</b></div>' +
-                    '<div class="muted">Endereço: <b>' + escHtml(s.billingAddress || "—") + '</b></div>' +
+                    '<div class="muted">Cidade/UF: <b>' + escHtml(s.billingCityState || '—') + '</b></div>' +
+                    '<div class="muted">Endereço: <b>' + escHtml(s.billingAddress || '—') + '</b></div>' +
                   '</div>' +
                   '<div class="kpi">' +
                     '<div class="t">Assinatura / Cobrança</div>' +
-                    '<div class="muted">Status: <b>' + escHtml(s.status || "—") + '</b></div>' +
-                    '<div class="muted">Plano: <b>' + escHtml(s.plan || "—") + '</b></div>' +
-                    '<div class="muted">Payment: <b>' + escHtml(s.paymentMethod || "—") + '</b></div>' +
-                    '<div class="muted">Asaas Customer: <code>' + escHtml(s.asaasCustomerId || "—") + '</code></div>' +
-                    '<div class="muted">Asaas Subscription: <code>' + escHtml(s.asaasSubscriptionId || "—") + '</code></div>' +
+                    '<div class="muted">Status: <b>' + escHtml(s.status || '—') + '</b></div>' +
+                    '<div class="muted">Plano: <b>' + escHtml(s.plan || '—') + '</b></div>' +
+                    '<div class="muted">Payment: <b>' + escHtml(s.paymentMethod || '—') + '</b></div>' +
+                    '<div class="muted">Asaas Customer: <code>' + escHtml(s.asaasCustomerId || '—') + '</code></div>' +
+                    '<div class="muted">Asaas Subscription: <code>' + escHtml(s.asaasSubscriptionId || '—') + '</code></div>' +
+                    '<div class="muted" style="margin-top:6px;">Janela 24h: ' + windowBadge(result.json) + '</div>' +
                   '</div>' +
                 '</div>' +
                 '<div class="hr"></div>' +
@@ -1133,51 +1203,65 @@ router.get("/", async (req, res) => {
                   '<pre style="white-space:pre-wrap;">' + escHtml(JSON.stringify(s, null, 2)) + '</pre>' +
                 '</details>';
 
-              if (cell) {
-                cell.innerHTML = header + details;
-              }
+              if (cell) cell.innerHTML = header + details;
             } catch (_) {
               if (cell) cell.innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
             }
           }
 
           function openActions(wa) {
-            window.location.href = "/admin/users-ui?waId=" + encodeURIComponent(wa);
+            window.location.href = '/admin/users-ui?waId=' + encodeURIComponent(wa);
           }
 
           function handleTbodyClick(event) {
-            const btn = event.target.closest("button[data-action]");
+            const btn = event.target.closest('button[data-action]');
             if (!btn) return;
 
-            const action = btn.getAttribute("data-action");
-            const wa = btn.getAttribute("data-wa") || "";
+            const action = btn.getAttribute('data-action');
+            const wa = btn.getAttribute('data-wa') || '';
 
-            if (action === "expand") {
+            if (action === 'expand') {
               expandUser(wa);
               return;
             }
 
-            if (action === "collapse") {
+            if (action === 'collapse') {
               const row = byId(detailsRowId(wa));
-              if (row) row.style.display = "none";
+              if (row) row.style.display = 'none';
               return;
             }
 
-            if (action === "open") {
+            if (action === 'open') {
               openActions(wa);
             }
           }
 
-          function initUsersListPage() {
-            const search = byId("uSearch");
-            const reloadBtn = byId("uReloadBtn");
-            const loadBtn = byId("uLoadBtn");
-            const tbody = byId("uTbody");
+          function goPrevPage() {
+            if (state.offset <= 0) return;
+            reloadUsers({ offset: Math.max(0, state.offset - state.limit) });
+          }
 
-            if (search) search.addEventListener("input", renderUsers);
-            if (reloadBtn) reloadBtn.addEventListener("click", reloadUsers);
-            if (loadBtn) loadBtn.addEventListener("click", reloadUsers);
-            if (tbody) tbody.addEventListener("click", handleTbodyClick);
+          function goNextPage() {
+            if (state.offset + state.limit >= state.total) return;
+            reloadUsers({ offset: state.offset + state.limit });
+          }
+
+          function initUsersListPage() {
+            const search = byId('uSearch');
+            const reloadBtn = byId('uReloadBtn');
+            const loadBtn = byId('uLoadBtn');
+            const prevBtn = byId('uPrevBtn');
+            const nextBtn = byId('uNextBtn');
+            const tbody = byId('uTbody');
+            const limit = byId('uLimit');
+
+            if (search) search.addEventListener('input', renderUsers);
+            if (reloadBtn) reloadBtn.addEventListener('click', function () { reloadUsers(); });
+            if (loadBtn) loadBtn.addEventListener('click', function () { reloadUsers({ resetOffset: true }); });
+            if (prevBtn) prevBtn.addEventListener('click', goPrevPage);
+            if (nextBtn) nextBtn.addEventListener('click', goNextPage);
+            if (limit) limit.addEventListener('change', function () { reloadUsers({ resetOffset: true }); });
+            if (tbody) tbody.addEventListener('click', handleTbodyClick);
 
             window.reloadUsers = reloadUsers;
             window.renderUsers = renderUsers;
@@ -1187,8 +1271,8 @@ router.get("/", async (req, res) => {
             reloadUsers();
           }
 
-          if (document.readyState === "loading") {
-            document.addEventListener("DOMContentLoaded", initUsersListPage, { once: true });
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initUsersListPage, { once: true });
           } else {
             initUsersListPage();
           }
