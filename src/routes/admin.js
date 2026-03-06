@@ -60,6 +60,8 @@ import {
 import { listPayments, getSubscription, cancelSubscription } from "../services/asaas/client.js";
 import { listAsaasEvents } from "../services/asaas/ledger.js";
 
+import { redisGet, redisSet, redisDel } from "../services/redis.js";
+
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -230,7 +232,7 @@ function renderSidebar(activePath){
   const ap = String(activePath||"");
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
-  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test");
+  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
 
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
@@ -279,6 +281,7 @@ function renderSidebar(activePath){
         <summary>⚙️ Sistema <span>▾</span></summary>
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
+        ${item("/admin/settings-ui", "Configurações Globais", "🛠️")}
         ${item("/admin/asaas-test-ui", "Asaas Teste", "🧪")}
       </details>
 
@@ -296,6 +299,83 @@ function requireWaId(req) {
     throw err;
   }
   return waId;
+}
+
+const GLOBAL_SETTINGS_PREFIX = "cfg:global:";
+
+const GLOBAL_SETTINGS_CATALOG = [
+  { key: "trial.maxDescriptions", label: "Trial · Máximo de descrições", section: "Trial", type: "int", defaultValue: 5, min: 1, max: 1000, help: "Quantidade global de descrições permitidas no trial." },
+  { key: "trial.maxRefinements", label: "Trial · Máximo de refinamentos", section: "Trial", type: "int", defaultValue: 2, min: 0, max: 100, help: "Quantidade global de refinamentos gratuitos no trial." },
+  { key: "flow.defaultTemplateMode", label: "Fluxo · Template padrão", section: "Fluxo", type: "enum", defaultValue: "FIXED", options: ["FIXED", "FREE"], help: "Modo padrão do anúncio para novos usuários." },
+  { key: "flow.requireNameOnStart", label: "Fluxo · Exigir nome no início", section: "Fluxo", type: "bool", defaultValue: true, help: "Quando ativo, o onboarding solicita o nome antes das demais etapas." },
+  { key: "feature.companyProfileWizard", label: "Feature · Wizard de dados da empresa", section: "Features", type: "bool", defaultValue: true, help: "Liga/desliga o wizard de dados da empresa." },
+  { key: "feature.refinement", label: "Feature · Refinamento", section: "Features", type: "bool", defaultValue: true, help: "Liga/desliga o refinamento de anúncios." },
+  { key: "feature.broadcast", label: "Feature · Broadcast", section: "Features", type: "bool", defaultValue: true, help: "Liga/desliga a área de broadcasts administrativos." },
+  { key: "ops.window24h.defaultLimit", label: "Operação · Limite padrão Janela 24h", section: "Operação", type: "int", defaultValue: 500, min: 1, max: 5000, help: "Limite padrão de registros na tela Janela 24h." },
+  { key: "ops.usersList.defaultLimit", label: "Operação · Limite padrão Lista de Usuários", section: "Operação", type: "int", defaultValue: 50, min: 1, max: 500, help: "Quantidade padrão por página na lista de usuários." },
+  { key: "support.contactUrl", label: "Suporte · URL de contato", section: "Suporte", type: "string", defaultValue: "", help: "Link de contato rápido exibido em módulos administrativos futuros." },
+];
+
+function settingRedisKey(key) {
+  return `${GLOBAL_SETTINGS_PREFIX}${key}`;
+}
+
+function normalizeSettingValue(def, rawValue) {
+  if (rawValue === undefined || rawValue === null || rawValue === "") {
+    return def.defaultValue;
+  }
+
+  if (def.type === "bool") {
+    if (typeof rawValue === "boolean") return rawValue;
+    const v = String(rawValue).trim().toLowerCase();
+    return v === "1" || v === "true" || v === "on" || v === "yes";
+  }
+
+  if (def.type === "int") {
+    const n = Number(rawValue);
+    let out = Number.isFinite(n) ? Math.trunc(n) : Number(def.defaultValue || 0);
+    if (Number.isFinite(def.min)) out = Math.max(def.min, out);
+    if (Number.isFinite(def.max)) out = Math.min(def.max, out);
+    return out;
+  }
+
+  if (def.type === "enum") {
+    const v = String(rawValue).trim();
+    return Array.isArray(def.options) && def.options.includes(v) ? v : def.defaultValue;
+  }
+
+  return String(rawValue);
+}
+
+function serializeSettingValue(def, value) {
+  if (def.type === "bool") return value ? "true" : "false";
+  if (def.type === "int") return String(Math.trunc(Number(value) || 0));
+  return String(value ?? "");
+}
+
+async function getResolvedGlobalSettings() {
+  const rows = [];
+  for (const def of GLOBAL_SETTINGS_CATALOG) {
+    const raw = await redisGet(settingRedisKey(def.key));
+    const resolved = normalizeSettingValue(def, raw);
+    rows.push({
+      ...def,
+      value: resolved,
+      storedValue: raw,
+      isCustom: raw !== null && raw !== undefined,
+    });
+  }
+  return rows;
+}
+
+function groupGlobalSettings(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const section = row.section || "Geral";
+    if (!groups.has(section)) groups.set(section, []);
+    groups.get(section).push(row);
+  }
+  return Array.from(groups.entries()).map(([section, items]) => ({ section, items }));
 }
 
 export function adminRouter() {
@@ -902,6 +982,185 @@ router.get("/", async (req, res) => {
   });
 
   // -----------------------------
+  // 🛠️ Configurações Globais
+  // -----------------------------
+  router.get("/settings", async (req, res) => {
+    try {
+      const rows = await getResolvedGlobalSettings();
+      return res.json({ ok: true, items: rows });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/settings", async (req, res) => {
+    try {
+      const key = String(req.body?.key || "").trim();
+      const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
+      if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
+
+      const normalized = normalizeSettingValue(def, req.body?.value);
+      await redisSet(settingRedisKey(def.key), serializeSettingValue(def, normalized));
+
+      return res.json({ ok: true, key: def.key, value: normalized });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/settings/reset", async (req, res) => {
+    try {
+      const key = String(req.body?.key || "").trim();
+      const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
+      if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
+
+      await redisDel(settingRedisKey(def.key));
+      return res.json({ ok: true, key: def.key, value: def.defaultValue, reset: true });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/settings-ui", async (req, res) => {
+    const rows = await getResolvedGlobalSettings();
+    const groups = groupGlobalSettings(rows);
+
+    const cards = groups.map(({ section, items }) => {
+      const body = items.map((row) => {
+        const inputHtml = (() => {
+          if (row.type === "bool") {
+            return `<label class="pill"><input type="checkbox" data-setting-input="${escapeHtml(row.key)}" ${row.value ? "checked" : ""} /> Ativo</label>`;
+          }
+          if (row.type === "enum") {
+            const options = (row.options || []).map((opt) => `<option value="${escapeHtml(opt)}" ${String(opt) === String(row.value) ? "selected" : ""}>${escapeHtml(opt)}</option>`).join("");
+            return `<select data-setting-input="${escapeHtml(row.key)}">${options}</select>`;
+          }
+          if (row.type === "int") {
+            const min = Number.isFinite(row.min) ? ` min="${escapeHtml(String(row.min))}"` : "";
+            const max = Number.isFinite(row.max) ? ` max="${escapeHtml(String(row.max))}"` : "";
+            return `<input type="number" data-setting-input="${escapeHtml(row.key)}" value="${escapeHtml(String(row.value))}"${min}${max} />`;
+          }
+          return `<input type="text" data-setting-input="${escapeHtml(row.key)}" value="${escapeHtml(String(row.value || ""))}" />`;
+        })();
+
+        return `
+          <tr>
+            <td>
+              <div><b>${escapeHtml(row.label)}</b></div>
+              <div class="muted" style="font-size:12px;">${escapeHtml(row.key)}</div>
+              <div class="muted" style="font-size:12px;margin-top:4px;">${escapeHtml(row.help || "")}</div>
+            </td>
+            <td>${inputHtml}</td>
+            <td><code>${escapeHtml(String(row.defaultValue ?? ""))}</code></td>
+            <td>${row.isCustom ? '<span class="badge warn">custom</span>' : '<span class="badge soft">default</span>'}</td>
+            <td>
+              <div class="row">
+                <button type="button" class="primary" data-save-setting="${escapeHtml(row.key)}">Salvar</button>
+                <button type="button" data-reset-setting="${escapeHtml(row.key)}">Resetar</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join("");
+
+      return `
+        <div class="card pad" style="margin-bottom:14px;">
+          <div class="row" style="justify-content:space-between;">
+            <div>
+              <h3 style="margin:0 0 6px 0;">${escapeHtml(section)}</h3>
+              <div class="muted">Configurações globais persistidas no Redis.</div>
+            </div>
+          </div>
+          <div class="hr"></div>
+          <table>
+            <thead>
+              <tr>
+                <th>Configuração</th>
+                <th>Valor atual</th>
+                <th>Padrão</th>
+                <th>Origem</th>
+                <th>Ação</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+    }).join("");
+
+    const html = layoutBase({
+      title: "Configurações Globais",
+      activePath: "/admin/settings-ui",
+      content: `
+        <div class="card pad" style="margin-bottom:14px;">
+          <div class="row" style="justify-content:space-between;">
+            <div>
+              <h3 style="margin:0 0 6px 0;">🛠️ Configurações Globais</h3>
+              <div class="muted">Controle operacional centralizado do sistema. Essas regras não substituem os planos; elas complementam o comportamento global.</div>
+            </div>
+            <div class="pill">Persistência: <b>Redis</b></div>
+          </div>
+        </div>
+        ${cards}
+        <div class="card pad">
+          <details>
+            <summary class="muted">Ver JSON resolvido</summary>
+            <pre id="settingsRaw" style="white-space:pre-wrap;">${escapeHtml(JSON.stringify(rows, null, 2))}</pre>
+          </details>
+        </div>
+      `,
+      scriptExtra: `
+        <script>
+          (function(){
+            async function postJson(url, body){
+              const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+              const j = await r.json().catch(()=>({}));
+              return { r, j };
+            }
+            function readSettingValue(key){
+              const el = document.querySelector('[data-setting-input="' + CSS.escape(key) + '"]');
+              if (!el) return '';
+              if (el.type === 'checkbox') return !!el.checked;
+              return el.value;
+            }
+            async function saveSetting(key){
+              const value = readSettingValue(key);
+              const out = await postJson('/admin/settings', { key, value });
+              if (!out.r.ok || !out.j.ok) {
+                alert('Falha ao salvar configuração.');
+                return;
+              }
+              window.location.reload();
+            }
+            async function resetSetting(key){
+              const out = await postJson('/admin/settings/reset', { key });
+              if (!out.r.ok || !out.j.ok) {
+                alert('Falha ao resetar configuração.');
+                return;
+              }
+              window.location.reload();
+            }
+            document.addEventListener('click', function(ev){
+              const saveBtn = ev.target.closest('[data-save-setting]');
+              if (saveBtn) {
+                saveSetting(saveBtn.getAttribute('data-save-setting'));
+                return;
+              }
+              const resetBtn = ev.target.closest('[data-reset-setting]');
+              if (resetBtn) {
+                resetSetting(resetBtn.getAttribute('data-reset-setting'));
+              }
+            });
+          })();
+        </script>
+      `,
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  // -----------------------------
   // 👥 Usuários — Lista (UI)
   // -----------------------------
   router.get("/users-list-ui", async (req, res) => {
@@ -913,32 +1172,23 @@ router.get("/", async (req, res) => {
               <div class="muted">Visualize rapidamente: Nome, waId, Plano e Janela 24h. Expanda para ver todos os dados salvos no fluxo.</div>
             </div>
             <div class="row">
-              <button type="button" id="uReloadBtn">Recarregar</button>
+              <button type="button" onclick="reloadUsers()">Recarregar</button>
             </div>
           </div>
 
           <div class="hr"></div>
 
           <div class="row" style="gap:10px; flex-wrap:wrap;">
-            <input id="uSearch" placeholder="Buscar por nome ou waId..." style="min-width:320px" />
-            <input id="uLimit" type="number" min="1" max="500" value="50" style="width:110px" />
-            <button type="button" class="primary" id="uLoadBtn">Carregar</button>
-            <div class="pill">Página: <b id="uPageLabel">1</b></div>
+            <input id="uSearch" placeholder="Buscar por nome ou waId..." style="min-width:320px" oninput="renderUsers()" />
+            <input id="uLimit" type="number" min="1" max="500" value="200" style="width:110px" />
+            <button type="button" class="primary" onclick="reloadUsers()">Carregar</button>
             <div class="muted" id="uMeta" style="margin-left:auto;"></div>
-          </div>
-
-          <div class="row" style="margin-top:10px; justify-content:space-between;">
-            <div class="row">
-              <button type="button" id="uPrevBtn">← Anterior</button>
-              <button type="button" id="uNextBtn">Próxima →</button>
-            </div>
-            <div class="muted" id="uPageMeta"></div>
           </div>
 
           <div class="hr"></div>
 
           <div style="overflow:auto;">
-            <table class="table" style="min-width:980px;">
+            <table class="table" style="min-width:900px;">
               <thead>
                 <tr>
                   <th>Nome</th>
@@ -959,110 +1209,41 @@ router.get("/", async (req, res) => {
 
     const scriptExtra = `
       <script>
-        (function () {
-          const state = {
-            users: [],
-            total: 0,
-            offset: 0,
-            limit: 50,
-            filteredCount: 0,
-          };
-
-          function byId(id) {
-            return document.getElementById(id);
-          }
-
-          function escHtml(value) {
-            return String(value ?? '')
-              .replace(/&/g, '&amp;')
-              .replace(/</g, '&lt;')
-              .replace(/>/g, '&gt;')
-              .replace(/"/g, '&quot;')
-              .replace(/'/g, '&#39;');
-          }
+        (function(){
+          let users = [];
+          let usersMeta = { total: 0, offset: 0, limit: 0 };
 
           function fmtTs(ts) {
-            if (!ts) return '—';
+            if (!ts) return "—";
             const d = new Date(ts);
-            if (Number.isNaN(d.getTime())) return '—';
-            return d.toLocaleString('pt-BR');
+            if (Number.isNaN(d.getTime())) return "—";
+            return d.toLocaleString("pt-BR");
           }
 
-          function detailsRowId(waId) {
-            return 'exp_' + encodeURIComponent(String(waId || ''));
+          function windowLabel(user) {
+            if (!user || !user.lastInboundTs) return "—";
+            const exp = user.windowExpiresAt ? fmtTs(user.windowExpiresAt) : "—";
+            return user.inWindow ? ("Ativa (até " + exp + ")") : ("Fora (expirou em " + exp + ")");
           }
 
-          function getLimit() {
-            const raw = Number(byId('uLimit')?.value || state.limit || 50);
-            const parsed = Number.isFinite(raw) ? raw : 50;
-            return Math.max(1, Math.min(500, parsed));
+          function escapeHtml(value) {
+            return String(value ?? "")
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;")
+              .replace(/"/g, "&quot;")
+              .replace(/'/g, "&#39;");
           }
 
-          function currentPage() {
-            return Math.floor(state.offset / Math.max(1, state.limit)) + 1;
-          }
-
-          function totalPages() {
-            return Math.max(1, Math.ceil((state.total || 0) / Math.max(1, state.limit)));
-          }
-
-          function planBadge(plan) {
-            const code = String(plan || '').trim().toUpperCase();
-            if (!code) return '<span class="badge soft">—</span>';
-            let cls = 'info';
-            if (code.includes('TRIAL') || code.includes('FREE')) cls = 'soft';
-            else if (code.includes('PRO') || code.includes('PLUS') || code.includes('PREMIUM')) cls = 'ok';
-            else if (code.includes('BASIC') || code.includes('START')) cls = 'info';
-            return '<span class="badge ' + cls + '">' + escHtml(plan) + '</span>';
-          }
-
-          function statusBadge(status) {
-            const code = String(status || '').trim().toUpperCase();
-            if (!code) return '<span class="badge soft">—</span>';
-            let cls = 'soft';
-            if (code === 'ACTIVE') cls = 'ok';
-            else if (code === 'TRIAL') cls = 'info';
-            else if (code === 'WAIT_PLAN' || code === 'PAYMENT_PENDING') cls = 'warn';
-            else if (code === 'BLOCKED' || code === 'CANCELED' || code === 'INACTIVE') cls = 'danger';
-            return '<span class="badge ' + cls + '">' + escHtml(status) + '</span>';
-          }
-
-          function windowBadge(user) {
-            if (!user || !user.lastInboundTs) {
-              return '<span class="badge soft">Sem inbound</span>';
-            }
-            const exp = user.windowExpiresAt ? fmtTs(user.windowExpiresAt) : '—';
-            if (user.inWindow) {
-              return '<span class="badge ok">Ativa</span><div class="muted" style="font-size:12px;margin-top:4px;">até ' + escHtml(exp) + '</div>';
-            }
-            return '<span class="badge danger">Expirada</span><div class="muted" style="font-size:12px;margin-top:4px;">em ' + escHtml(exp) + '</div>';
+          function escapeJsSingle(value) {
+            return String(value ?? "")
+              .replace(/\/g, "\\")
+              .replace(/'/g, "\'");
           }
 
           function setTbody(html) {
-            const tbody = byId('uTbody');
+            const tbody = document.getElementById("uTbody");
             if (tbody) tbody.innerHTML = html;
-          }
-
-          function updatePaginationUi() {
-            const page = currentPage();
-            const pages = totalPages();
-            const from = state.total ? state.offset + 1 : 0;
-            const to = Math.min(state.offset + state.limit, state.total);
-
-            const pageLabel = byId('uPageLabel');
-            const pageMeta = byId('uPageMeta');
-            const prevBtn = byId('uPrevBtn');
-            const nextBtn = byId('uNextBtn');
-            const metaEl = byId('uMeta');
-
-            if (pageLabel) pageLabel.textContent = String(page) + ' / ' + String(pages);
-            if (pageMeta) pageMeta.textContent = state.total ? ('Mostrando ' + from + '–' + to + ' de ' + state.total) : 'Nenhum usuário indexado';
-            if (prevBtn) prevBtn.disabled = state.offset <= 0;
-            if (nextBtn) nextBtn.disabled = state.offset + state.limit >= state.total;
-
-            if (metaEl) {
-              metaEl.textContent = String(state.filteredCount) + ' exibidos nesta página • Total indexado: ' + String(state.total);
-            }
           }
 
           async function fetchJson(url, opt) {
@@ -1072,16 +1253,14 @@ router.get("/", async (req, res) => {
           }
 
           function renderUsers() {
-            const q = String(byId('uSearch')?.value || '').trim().toLowerCase();
-            const filtered = !state.users.length
-              ? []
-              : state.users.filter((user) => {
-                  if (!q) return true;
-                  return String(user.waId || '').includes(q) || String(user.fullName || '').toLowerCase().includes(q);
-                });
+            const q = String(document.getElementById("uSearch")?.value || "").trim().toLowerCase();
+            const filtered = !users.length ? [] : users.filter((user) => {
+              if (!q) return true;
+              return String(user.waId || "").includes(q) || String(user.fullName || "").toLowerCase().includes(q);
+            });
 
-            state.filteredCount = filtered.length;
-            updatePaginationUi();
+            const metaEl = document.getElementById("uMeta");
+            if (metaEl) metaEl.textContent = String(filtered.length) + " exibidos • Total: " + String(usersMeta.total);
 
             if (!filtered.length) {
               setTbody('<tr><td colspan="6" class="muted">Nenhum usuário encontrado.</td></tr>');
@@ -1090,53 +1269,57 @@ router.get("/", async (req, res) => {
 
             const rows = [];
             for (const user of filtered) {
-              const wa = String(user.waId || '');
-              const rowId = detailsRowId(wa);
+              const name = escapeHtml(user.fullName || "—");
+              const wa = String(user.waId || "");
+              const waHtml = escapeHtml(wa);
+              const waJs = escapeJsSingle(wa);
+              const status = escapeHtml(user.status || "");
+              const plan = escapeHtml(user.plan || "");
+              const win = escapeHtml(windowLabel(user));
+              const expId = "exp_" + wa;
+              const expIdHtml = escapeHtml(expId);
 
               rows.push(
-                '<tr>' +
-                  '<td>' + escHtml(user.fullName || '—') + '</td>' +
-                  '<td><code>' + escHtml(wa) + '</code></td>' +
-                  '<td>' + statusBadge(user.status || '—') + '</td>' +
-                  '<td>' + planBadge(user.plan || '') + '</td>' +
-                  '<td>' + windowBadge(user) + '</td>' +
-                  '<td>' +
-                    '<button type="button" data-action="expand" data-wa="' + escHtml(wa) + '">Expandir</button> ' +
-                    '<button type="button" data-action="open" data-wa="' + escHtml(wa) + '">Abrir</button>' +
-                  '</td>' +
-                '</tr>'
+                "<tr>" +
+                  "<td>" + name + "</td>" +
+                  "<td><code>" + waHtml + "</code></td>" +
+                  "<td>" + status + "</td>" +
+                  "<td>" + (plan || "—") + "</td>" +
+                  "<td>" + win + "</td>" +
+                  "<td>" +
+                    "<button type="button" onclick="expandUser('" + waJs + "')">Expandir</button> " +
+                    "<button type="button" onclick="openActions('" + waJs + "')">Abrir</button>" +
+                  "</td>" +
+                "</tr>"
               );
-
               rows.push(
-                '<tr id="' + escHtml(rowId) + '" style="display:none;">' +
-                  '<td colspan="6"><div class="muted">Carregando...</div></td>' +
-                '</tr>'
+                "<tr id="" + expIdHtml + "" style="display:none;">" +
+                  "<td colspan="6"><div class="muted">Carregando...</div></td>" +
+                "</tr>"
               );
             }
 
-            setTbody(rows.join(''));
+            setTbody(rows.join(""));
           }
 
-          async function reloadUsers(options) {
-            const opts = options || {};
-            state.limit = getLimit();
-            if (opts.resetOffset) state.offset = 0;
-            if (typeof opts.offset === 'number') state.offset = Math.max(0, opts.offset);
-
-            const url = '/admin/users/list?limit=' + encodeURIComponent(state.limit) + '&offset=' + encodeURIComponent(state.offset);
+          async function reloadUsers() {
+            const limitEl = document.getElementById("uLimit");
+            const limit = Math.max(1, Math.min(500, Number(limitEl?.value || 200) || 200));
+            const url = "/admin/users/list?limit=" + encodeURIComponent(limit);
             setTbody('<tr><td colspan="6" class="muted">Carregando...</td></tr>');
 
             try {
-              const result = await fetchJson(url);
-              if (!result.response.ok || !result.json.ok) {
+              const out = await fetchJson(url);
+              const response = out.response;
+              const json = out.json;
+
+              if (!response.ok || !json.ok) {
                 setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
                 return;
               }
 
-              state.users = Array.isArray(result.json.items) ? result.json.items : [];
-              state.total = Number(result.json.total || 0);
-              state.offset = Number(result.json.offset || 0);
-              state.limit = Number(result.json.limit || state.limit);
+              users = Array.isArray(json.items) ? json.items : [];
+              usersMeta = { total: json.total || 0, offset: json.offset || 0, limit: json.limit || limit };
               renderUsers();
             } catch (_) {
               setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
@@ -1144,138 +1327,93 @@ router.get("/", async (req, res) => {
           }
 
           async function expandUser(wa) {
-            const row = byId(detailsRowId(wa));
+            const row = document.getElementById("exp_" + String(wa));
             if (!row) return;
 
-            if (row.style.display && row.style.display !== 'none') {
-              row.style.display = 'none';
+            if (row.style.display === "none") {
+              row.style.display = "";
+              row.querySelector("td").innerHTML = '<div class="muted">Carregando...</div>';
+
+              try {
+                const out = await fetchJson("/admin/users/details?waId=" + encodeURIComponent(wa));
+                const response = out.response;
+                const json = out.json;
+                if (!response.ok || !json.ok) {
+                  row.querySelector("td").innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
+                  return;
+                }
+
+                const s = json.snapshot || {};
+                const safeWa = escapeJsSingle(wa);
+                const header = (
+                  '<div class="row" style="justify-content:space-between; align-items:center;">' +
+                    '<div>' +
+                      '<div><b>' + escapeHtml(s.fullName || "—") + '</b> <span class="muted">(' + escapeHtml(wa) + ')</span></div>' +
+                      '<div class="muted">Status: <b>' + escapeHtml(s.status || "—") + '</b> • Plano: <b>' + escapeHtml(s.plan || "—") + '</b> • Janela 24h: <b>' + escapeHtml(json.inWindow ? "Ativa" : "Fora") + '</b></div>' +
+                    '</div>' +
+                    '<div class="row">' +
+                      '<button type="button" onclick="openActions('' + safeWa + '')">Abrir nas ações</button> ' +
+                      '<button type="button" onclick="toggleRow('' + safeWa + '')">Fechar</button>' +
+                    '</div>' +
+                  '</div>'
+                );
+
+                const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + " • " + (s.doc.docLast4 || "")) : "—";
+                const details = (
+                  '<div class="hr"></div>' +
+                  '<div class="grid cols2">' +
+                    '<div class="kpi">' +
+                      '<div class="t">Dados pessoais</div>' +
+                      '<div class="muted">Nome: <b>' + escapeHtml(s.fullName || "—") + '</b></div>' +
+                      '<div class="muted">Documento: <b>' + escapeHtml(docLine) + '</b></div>' +
+                      '<div class="muted">Cidade/UF: <b>' + escapeHtml(s.billingCityState || "—") + '</b></div>' +
+                      '<div class="muted">Endereço: <b>' + escapeHtml(s.billingAddress || "—") + '</b></div>' +
+                    '</div>' +
+                    '<div class="kpi">' +
+                      '<div class="t">Assinatura / Cobrança</div>' +
+                      '<div class="muted">Status: <b>' + escapeHtml(s.status || "—") + '</b></div>' +
+                      '<div class="muted">Plano: <b>' + escapeHtml(s.plan || "—") + '</b></div>' +
+                      '<div class="muted">Payment: <b>' + escapeHtml(s.paymentMethod || "—") + '</b></div>' +
+                      '<div class="muted">Asaas Customer: <code>' + escapeHtml(s.asaasCustomerId || "—") + '</code></div>' +
+                      '<div class="muted">Asaas Subscription: <code>' + escapeHtml(s.asaasSubscriptionId || "—") + '</code></div>' +
+                    '</div>' +
+                  '</div>' +
+                  '<div class="hr"></div>' +
+                  '<details>' +
+                    '<summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>' +
+                    '<pre style="white-space:pre-wrap;">' + escapeHtml(JSON.stringify(s, null, 2)) + '</pre>' +
+                  '</details>'
+                );
+
+                row.querySelector("td").innerHTML = header + details;
+              } catch (_) {
+                row.querySelector("td").innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
+              }
               return;
             }
 
-            row.style.display = '';
-            const cell = row.querySelector('td');
-            if (cell) cell.innerHTML = '<div class="muted">Carregando...</div>';
+            row.style.display = "none";
+          }
 
-            try {
-              const result = await fetchJson('/admin/users/details?waId=' + encodeURIComponent(wa));
-              if (!result.response.ok || !result.json.ok) {
-                if (cell) cell.innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
-                return;
-              }
-
-              const s = result.json.snapshot || {};
-              const header =
-                '<div class="row" style="justify-content:space-between; align-items:center;">' +
-                  '<div>' +
-                    '<div><b>' + escHtml(s.fullName || '—') + '</b> <span class="muted">(' + escHtml(wa) + ')</span></div>' +
-                    '<div class="muted">Status: ' + statusBadge(s.status || '—') + ' &nbsp; Plano: ' + planBadge(s.plan || '') + '</div>' +
-                  '</div>' +
-                  '<div class="row">' +
-                    '<button type="button" data-action="open" data-wa="' + escHtml(wa) + '">Abrir nas ações</button> ' +
-                    '<button type="button" data-action="collapse" data-wa="' + escHtml(wa) + '">Fechar</button>' +
-                  '</div>' +
-                '</div>';
-
-              const docLine = (s.doc && s.doc.docType) ? (s.doc.docType + ' • ' + (s.doc.docLast4 || '')) : '—';
-              const details =
-                '<div class="hr"></div>' +
-                '<div class="grid cols2">' +
-                  '<div class="kpi">' +
-                    '<div class="t">Dados pessoais</div>' +
-                    '<div class="muted">Nome: <b>' + escHtml(s.fullName || '—') + '</b></div>' +
-                    '<div class="muted">Documento: <b>' + escHtml(docLine) + '</b></div>' +
-                    '<div class="muted">Cidade/UF: <b>' + escHtml(s.billingCityState || '—') + '</b></div>' +
-                    '<div class="muted">Endereço: <b>' + escHtml(s.billingAddress || '—') + '</b></div>' +
-                  '</div>' +
-                  '<div class="kpi">' +
-                    '<div class="t">Assinatura / Cobrança</div>' +
-                    '<div class="muted">Status: <b>' + escHtml(s.status || '—') + '</b></div>' +
-                    '<div class="muted">Plano: <b>' + escHtml(s.plan || '—') + '</b></div>' +
-                    '<div class="muted">Payment: <b>' + escHtml(s.paymentMethod || '—') + '</b></div>' +
-                    '<div class="muted">Asaas Customer: <code>' + escHtml(s.asaasCustomerId || '—') + '</code></div>' +
-                    '<div class="muted">Asaas Subscription: <code>' + escHtml(s.asaasSubscriptionId || '—') + '</code></div>' +
-                    '<div class="muted" style="margin-top:6px;">Janela 24h: ' + windowBadge(result.json) + '</div>' +
-                  '</div>' +
-                '</div>' +
-                '<div class="hr"></div>' +
-                '<details>' +
-                  '<summary class="muted">Ver JSON completo (inclui perfil da empresa)</summary>' +
-                  '<pre style="white-space:pre-wrap;">' + escHtml(JSON.stringify(s, null, 2)) + '</pre>' +
-                '</details>';
-
-              if (cell) cell.innerHTML = header + details;
-            } catch (_) {
-              if (cell) cell.innerHTML = '<div class="muted">Erro ao carregar detalhes.</div>';
-            }
+          function toggleRow(wa) {
+            const row = document.getElementById("exp_" + String(wa));
+            if (!row) return;
+            row.style.display = "none";
           }
 
           function openActions(wa) {
-            window.location.href = '/admin/users-ui?waId=' + encodeURIComponent(wa);
+            window.location.href = "/admin/users-ui?waId=" + encodeURIComponent(wa);
           }
 
-          function handleTbodyClick(event) {
-            const btn = event.target.closest('button[data-action]');
-            if (!btn) return;
+          window.reloadUsers = reloadUsers;
+          window.renderUsers = renderUsers;
+          window.expandUser = expandUser;
+          window.toggleRow = toggleRow;
+          window.openActions = openActions;
 
-            const action = btn.getAttribute('data-action');
-            const wa = btn.getAttribute('data-wa') || '';
-
-            if (action === 'expand') {
-              expandUser(wa);
-              return;
-            }
-
-            if (action === 'collapse') {
-              const row = byId(detailsRowId(wa));
-              if (row) row.style.display = 'none';
-              return;
-            }
-
-            if (action === 'open') {
-              openActions(wa);
-            }
-          }
-
-          function goPrevPage() {
-            if (state.offset <= 0) return;
-            reloadUsers({ offset: Math.max(0, state.offset - state.limit) });
-          }
-
-          function goNextPage() {
-            if (state.offset + state.limit >= state.total) return;
-            reloadUsers({ offset: state.offset + state.limit });
-          }
-
-          function initUsersListPage() {
-            const search = byId('uSearch');
-            const reloadBtn = byId('uReloadBtn');
-            const loadBtn = byId('uLoadBtn');
-            const prevBtn = byId('uPrevBtn');
-            const nextBtn = byId('uNextBtn');
-            const tbody = byId('uTbody');
-            const limit = byId('uLimit');
-
-            if (search) search.addEventListener('input', renderUsers);
-            if (reloadBtn) reloadBtn.addEventListener('click', function () { reloadUsers(); });
-            if (loadBtn) loadBtn.addEventListener('click', function () { reloadUsers({ resetOffset: true }); });
-            if (prevBtn) prevBtn.addEventListener('click', goPrevPage);
-            if (nextBtn) nextBtn.addEventListener('click', goNextPage);
-            if (limit) limit.addEventListener('change', function () { reloadUsers({ resetOffset: true }); });
-            if (tbody) tbody.addEventListener('click', handleTbodyClick);
-
-            window.reloadUsers = reloadUsers;
-            window.renderUsers = renderUsers;
-            window.expandUser = expandUser;
-            window.openActions = openActions;
-
-            reloadUsers();
-          }
-
-          if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', initUsersListPage, { once: true });
-          } else {
-            initUsersListPage();
-          }
+          Promise.resolve().then(() => reloadUsers()).catch(() => {
+            setTbody('<tr><td colspan="6" class="muted">Erro ao carregar usuários.</td></tr>');
+          });
         })();
       </script>
     `;
@@ -2755,35 +2893,8 @@ router.get("/window24h-ui", async (req, res) => {
   });
 
   router.get("/window24h", async (req, res) => {
-    try {
-      const filter = String(req.query?.filter || "").trim();
-      const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 500) || 500));
-      const now = nowMs();
-      const waIds = await listWindow24hActive(now, limit);
-
-      const users = await mapLimit(waIds, 20, async (waId) => {
-        const lastInboundAtMs = Number(await getLastInboundTs(waId)) || 0;
-        return {
-          waId,
-          lastInboundAtMs,
-          lastSeen: lastInboundAtMs ? new Date(lastInboundAtMs).toLocaleString("pt-BR") : "—",
-        };
-      });
-
-      const filteredUsers = filter
-        ? users.filter((u) => String(u?.waId || "").includes(filter))
-        : users;
-
-      return res.json({
-        ok: true,
-        nowMs: now,
-        count: filteredUsers.length,
-        returned: filteredUsers.length,
-        users: filteredUsers,
-      });
-    } catch (err) {
-      return res.status(err.statusCode || 500).json({ ok: false, error: err.message || String(err) });
-    }
+    const items = await listWindow24hActive({ limit: 500 });
+    return res.json({ ok: true, nowMs: nowMs(), count: items.length, returned: items.length, items });
   });
 
   router.get("/send-test", async (req, res) => {
