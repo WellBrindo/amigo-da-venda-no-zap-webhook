@@ -235,6 +235,7 @@ function renderSidebar(activePath){
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm") || ap.startsWith("/admin/bulk");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
   const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
+  const reportsOpen = ap.startsWith("/admin/reports");
 
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
@@ -280,6 +281,11 @@ function renderSidebar(activePath){
       <details ${financeOpen ? "open" : ""}>
         <summary>💰 Financeiro <span>▾</span></summary>
         ${item("/admin/finance-asaas-ui", "Asaas (Reconciliação)", "🧾")}
+      </details>
+
+      <details ${reportsOpen ? "open" : ""}>
+        <summary>📑 Relatórios <span>▾</span></summary>
+        ${item("/admin/reports-ui", "Relatórios e Exportação", "📑")}
       </details>
 
       <details ${systemOpen ? "open" : ""}>
@@ -492,6 +498,171 @@ async function safeRecordAdminAudit(req, entry) {
       module: String(entry?.module || ""),
     }));
   }
+}
+
+function formatMoneyCents(cents) {
+  const value = (Number(cents) || 0) / 100;
+  try {
+    return value.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  } catch (_) {
+    return `R$ ${value.toFixed(2)}`;
+  }
+}
+
+function normalizeExportFormat(value) {
+  const format = String(value || "csv").trim().toLowerCase();
+  return format === "json" ? "json" : "csv";
+}
+
+function csvCell(value) {
+  if (value === null || value === undefined) return '""';
+  const str = String(value).replace(/
+?
+/g, " ");
+  return '"' + str.replace(/"/g, '""') + '"';
+}
+
+function rowsToCsv(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return "";
+  const headers = Array.from(new Set(list.flatMap((row) => Object.keys(row || {}))));
+  const lines = [headers.map(csvCell).join(",")];
+  for (const row of list) {
+    lines.push(headers.map((key) => csvCell(row?.[key] ?? "")).join(","));
+  }
+  return lines.join("
+");
+}
+
+function sendExport(res, filenameBase, format, payload) {
+  if (format === "json") {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.json"`);
+    return res.status(200).send(JSON.stringify(payload, null, 2));
+  }
+
+  const rows = Array.isArray(payload) ? payload : [];
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.csv"`);
+  return res.status(200).send(rowsToCsv(rows));
+}
+
+async function buildExportUsersRows() {
+  const usersRaw = await listUsers();
+  const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
+  const plans = await listPlans({ includeInactive: true });
+  const planMap = buildPlanMap(plans);
+  const now = nowMs();
+  const users = await mapLimit(waIds, 20, async (waId) => enrichUserForCrm(waId, planMap, now));
+
+  return users.map((user) => ({
+    waId: String(user.waId || ""),
+    fullName: String(user.fullName || ""),
+    status: String(user.status || ""),
+    plan: String(user.plan || ""),
+    planName: String(user.planName || ""),
+    planDescription: String(user.planDescription || ""),
+    paymentMethod: String(user.paymentMethod || ""),
+    quotaUsed: Number(user.quotaUsed || 0),
+    trialUsed: Number(user.trialUsed || 0),
+    templateMode: String(user.templateMode || ""),
+    billingCityState: String(user.billingCityState || ""),
+    billingAddress: String(user.billingAddress || ""),
+    hasBizProfile: user.hasBizProfile ? "yes" : "no",
+    hasPendingBizProfile: user.hasPendingBizProfile ? "yes" : "no",
+    inWindow24h: user.inWindow ? "yes" : "no",
+    lastInboundTs: Number(user.lastInboundTs || 0),
+    windowExpiresAt: Number(user.windowExpiresAt || 0),
+    issueCount: Number(user.issueCount || 0),
+    issueKeys: (user.issueKeys || []).join(" | "),
+    asaasCustomerId: String(user.asaasCustomerId || ""),
+    asaasSubscriptionId: String(user.asaasSubscriptionId || ""),
+    cardValidUntil: String(user.cardValidUntil || ""),
+    cardCanceledAt: String(user.cardCanceledAt || ""),
+    docType: String(user?.doc?.docType || ""),
+    docLast4: String(user?.doc?.docLast4 || ""),
+  }));
+}
+
+async function buildExportInconsistencyRows() {
+  const data = await collectInconsistencies();
+  const rows = [];
+  for (const [key, bucket] of Object.entries(data.items || {})) {
+    for (const item of bucket.items || []) {
+      rows.push({
+        bucketKey: key,
+        label: String(bucket.label || ""),
+        severity: String(bucket.severity || ""),
+        description: String(bucket.description || ""),
+        waId: String(item.waId || ""),
+        fullName: String(item.fullName || ""),
+        status: String(item.status || ""),
+        plan: String(item.plan || ""),
+        paymentMethod: String(item.paymentMethod || ""),
+        asaasCustomerId: String(item.asaasCustomerId || ""),
+        asaasSubscriptionId: String(item.asaasSubscriptionId || ""),
+        quotaUsed: Number(item.quotaUsed || 0),
+        trialUsed: Number(item.trialUsed || 0),
+        cardValidUntil: String(item.cardValidUntil || ""),
+        cardCanceledAt: String(item.cardCanceledAt || ""),
+      });
+    }
+  }
+  return rows;
+}
+
+async function buildExportAuditRows() {
+  const items = await listAdminAudit({ limit: 1000 });
+  return (Array.isArray(items) ? items : []).map((item) => ({
+    id: String(item?.id || ""),
+    ts: String(item?.ts || ""),
+    module: String(item?.module || ""),
+    action: String(item?.action || ""),
+    waId: String(item?.waId || ""),
+    targetId: String(item?.targetId || ""),
+    targetLabel: String(item?.targetLabel || ""),
+    summary: String(item?.summary || ""),
+    actorUser: String(item?.actor?.user || ""),
+    actorIp: String(item?.actor?.ip || ""),
+    actorType: String(item?.actor?.type || ""),
+    before: JSON.stringify(item?.before || {}),
+    after: JSON.stringify(item?.after || {}),
+    meta: JSON.stringify(item?.meta || {}),
+  }));
+}
+
+async function buildReportsCenterData() {
+  const [executive, auditItems, auditTotal] = await Promise.all([
+    buildExecutiveDashboardData(),
+    listAdminAudit({ limit: 30 }),
+    getAdminAuditCount(),
+  ]);
+
+  const recentAudit = Array.isArray(auditItems) ? auditItems : [];
+  const moduleCounts = new Map();
+  const actionCounts = new Map();
+  for (const item of recentAudit) {
+    const moduleName = String(item?.module || "—").trim() || "—";
+    const actionName = String(item?.action || "—").trim() || "—";
+    moduleCounts.set(moduleName, (moduleCounts.get(moduleName) || 0) + 1);
+    actionCounts.set(actionName, (actionCounts.get(actionName) || 0) + 1);
+  }
+
+  const modules = Array.from(moduleCounts.entries()).map(([name, count]) => ({ name, count })).sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name));
+  const actions = Array.from(actionCounts.entries()).map(([name, count]) => ({ name, count })).sort((a, b) => (b.count - a.count) || a.name.localeCompare(b.name)).slice(0, 10);
+
+  return {
+    ok: true,
+    ts: Date.now(),
+    executive,
+    audit: {
+      totalStored: Number(auditTotal || 0),
+      recentCount: recentAudit.length,
+      modules,
+      actions,
+      items: recentAudit,
+    },
+  };
 }
 
 export function adminRouter() {
@@ -1714,6 +1885,10 @@ router.get("/", async (req, res) => {
                 <div class="muted" style="font-weight:700;">📣 Broadcast</div>
                 <div class="muted">Criar envios por plano e janela.</div>
               </a>
+              <a class="card pad" href="/admin/reports-ui" style="display:block;">
+                <div class="muted" style="font-weight:700;">📑 Relatórios e Exportação</div>
+                <div class="muted">Relatórios gerenciais, gráficos e downloads do sistema.</div>
+              </a>
             </div>
           </div>
 
@@ -1728,6 +1903,7 @@ router.get("/", async (req, res) => {
               <a class="pill" href="/admin/alerts-ui">🚨 Alertas</a>
               <a class="pill" href="/admin/audit-ui">📚 Auditoria</a>
               <a class="pill" href="/admin/executive-ui">🧠 Dashboard Executivo</a>
+              <a class="pill" href="/admin/reports-ui">📑 Relatórios</a>
               <a class="pill" href="/admin/asaas-test-ui">🧪 Asaas Teste</a>
             </div>
             <div class="hr"></div>
@@ -4084,6 +4260,412 @@ async function toggle(code, active){
       headExtra,
       scriptExtra,
     });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  router.get("/reports/data", async (req, res) => {
+    try {
+      const data = await buildReportsCenterData();
+      return res.status(200).json(data);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/export/users", async (req, res) => {
+    try {
+      const format = normalizeExportFormat(req.query?.format);
+      const rows = await buildExportUsersRows();
+      if (format === "json") {
+        return sendExport(res, "amigo_usuarios", "json", { ok: true, exportedAt: new Date().toISOString(), count: rows.length, items: rows });
+      }
+      return sendExport(res, "amigo_usuarios", "csv", rows);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/export/inconsistencies", async (req, res) => {
+    try {
+      const format = normalizeExportFormat(req.query?.format);
+      const rows = await buildExportInconsistencyRows();
+      if (format === "json") {
+        return sendExport(res, "amigo_inconsistencias", "json", { ok: true, exportedAt: new Date().toISOString(), count: rows.length, items: rows });
+      }
+      return sendExport(res, "amigo_inconsistencias", "csv", rows);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/export/audit", async (req, res) => {
+    try {
+      const format = normalizeExportFormat(req.query?.format);
+      const rows = await buildExportAuditRows();
+      if (format === "json") {
+        return sendExport(res, "amigo_auditoria", "json", { ok: true, exportedAt: new Date().toISOString(), count: rows.length, items: rows });
+      }
+      return sendExport(res, "amigo_auditoria", "csv", rows);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/export/executive", async (req, res) => {
+    try {
+      const format = normalizeExportFormat(req.query?.format);
+      const data = await buildReportsCenterData();
+      if (format === "json") {
+        return sendExport(res, "amigo_relatorio_executivo", "json", data);
+      }
+
+      const rows = [];
+      const overview = data?.executive?.overview || {};
+      const revenue = data?.executive?.revenue || {};
+      const usage = data?.executive?.usage || {};
+      const quality = data?.executive?.quality || {};
+      const pushMetric = (section, metric, value) => rows.push({ section, metric, value });
+      pushMetric("overview", "totalUsers", overview.totalUsers || 0);
+      pushMetric("overview", "activeUsers", overview.activeUsers || 0);
+      pushMetric("overview", "trialUsers", overview.trialUsers || 0);
+      pushMetric("overview", "paymentPendingUsers", overview.paymentPendingUsers || 0);
+      pushMetric("overview", "waitPlanUsers", overview.waitPlanUsers || 0);
+      pushMetric("overview", "blockedUsers", overview.blockedUsers || 0);
+      pushMetric("overview", "activeSharePct", overview.activeSharePct || 0);
+      pushMetric("overview", "trialToPaidPct", overview.trialToPaidPct || 0);
+      pushMetric("revenue", "mrrCents", revenue.mrrCents || 0);
+      pushMetric("revenue", "mrrFormatted", formatMoneyCents(revenue.mrrCents || 0));
+      pushMetric("revenue", "avgTicketCents", revenue.avgTicketCents || 0);
+      pushMetric("revenue", "avgTicketFormatted", formatMoneyCents(revenue.avgTicketCents || 0));
+      pushMetric("usage", "descriptionsToday", usage.descriptionsToday || 0);
+      pushMetric("usage", "descriptionsMonth", usage.descriptionsMonth || 0);
+      pushMetric("usage", "window24hCount", usage.window24hCount || 0);
+      pushMetric("usage", "avgDescriptionsPerActive", usage.avgDescriptionsPerActive || 0);
+      pushMetric("quality", "withName", quality.withName || 0);
+      pushMetric("quality", "withBizProfile", quality.withBizProfile || 0);
+      pushMetric("quality", "issueUsers", quality.issueUsers || 0);
+      pushMetric("quality", "profileCoveragePct", quality.profileCoveragePct || 0);
+      pushMetric("quality", "nameCoveragePct", quality.nameCoveragePct || 0);
+      pushMetric("quality", "inconsistencyPct", quality.inconsistencyPct || 0);
+      return sendExport(res, "amigo_relatorio_executivo", "csv", rows);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/reports-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad" style="margin-bottom:14px;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">📑 Central de Relatórios e Exportação</h3>
+            <div class="muted">Relatórios executivos, visão operacional da base e exportação de dados do sistema.</div>
+          </div>
+          <div class="row">
+            <a class="pill" href="/admin/executive-ui">Dashboard Executivo</a>
+            <a class="pill" href="/admin/audit-ui">Auditoria</a>
+            <a class="pill" href="/admin/inconsistencies-ui">Inconsistências</a>
+            <button type="button" class="primary" id="reportsReloadBtn">Atualizar</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid cols3">
+        <div class="kpi"><div class="t">Usuários totais</div><div class="v" id="rpTotalUsers">—</div><div class="muted" id="rpActiveShare">—</div></div>
+        <div class="kpi"><div class="t">MRR estimado</div><div class="v" id="rpMrr">—</div><div class="muted" id="rpAvgTicket">—</div></div>
+        <div class="kpi"><div class="t">Auditoria armazenada</div><div class="v" id="rpAuditTotal">—</div><div class="muted" id="rpAuditRecent">—</div></div>
+      </div>
+
+      <div class="grid cols3" style="margin-top:12px;">
+        <div class="kpi"><div class="t">Descrições no mês</div><div class="v" id="rpDescMonth">—</div><div class="muted" id="rp24hUsers">—</div></div>
+        <div class="kpi"><div class="t">Perfis com empresa salva</div><div class="v" id="rpBizProfiles">—</div><div class="muted" id="rpBizCoverage">—</div></div>
+        <div class="kpi"><div class="t">Usuários com inconsistência</div><div class="v" id="rpIssueUsers">—</div><div class="muted" id="rpIssuePct">—</div></div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;">
+            <h4 style="margin:0;">Exportações rápidas</h4>
+            <span class="muted">CSV ou JSON</span>
+          </div>
+          <div class="hr"></div>
+          <div class="grid cols2">
+            <div class="card pad">
+              <b>Usuários do CRM</b>
+              <div class="muted" style="margin:6px 0 10px 0;">Base completa dos usuários com status, plano, pagamento e saúde.</div>
+              <div class="row">
+                <a class="pill" href="/admin/export/users?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/users?format=json">JSON</a>
+              </div>
+            </div>
+            <div class="card pad">
+              <b>Inconsistências</b>
+              <div class="muted" style="margin:6px 0 10px 0;">Ocorrências operacionais detalhadas por usuário.</div>
+              <div class="row">
+                <a class="pill" href="/admin/export/inconsistencies?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/inconsistencies?format=json">JSON</a>
+              </div>
+            </div>
+            <div class="card pad">
+              <b>Auditoria administrativa</b>
+              <div class="muted" style="margin:6px 0 10px 0;">Eventos mais recentes do painel administrativo.</div>
+              <div class="row">
+                <a class="pill" href="/admin/export/audit?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/audit?format=json">JSON</a>
+              </div>
+            </div>
+            <div class="card pad">
+              <b>Resumo executivo</b>
+              <div class="muted" style="margin:6px 0 10px 0;">Indicadores consolidados para acompanhamento gerencial.</div>
+              <div class="row">
+                <a class="pill" href="/admin/export/executive?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/executive?format=json">JSON</a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;">
+            <h4 style="margin:0;">Resumo operacional</h4>
+            <span class="muted">Status e cobertura</span>
+          </div>
+          <div class="hr"></div>
+          <canvas id="reportsStatusChart" width="900" height="280" style="width:100%; border:1px solid var(--border); border-radius:12px;"></canvas>
+          <div class="hr"></div>
+          <canvas id="reportsPlansChart" width="900" height="280" style="width:100%; border:1px solid var(--border); border-radius:12px;"></canvas>
+        </div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Planos e MRR</h4><span class="muted">Ranking atual</span></div>
+          <div class="hr"></div>
+          <div style="overflow:auto;"><table><thead><tr><th>Plano</th><th>Usuários</th><th>MRR</th><th>Descrição</th></tr></thead><tbody id="reportsPlansRows"><tr><td colspan="4" class="muted">Carregando...</td></tr></tbody></table></div>
+        </div>
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Top cidades / região</h4><span class="muted">billingCityState</span></div>
+          <div class="hr"></div>
+          <div style="overflow:auto;"><table><thead><tr><th>Local</th><th>Usuários</th></tr></thead><tbody id="reportsCitiesRows"><tr><td colspan="2" class="muted">Carregando...</td></tr></tbody></table></div>
+        </div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Módulos mais auditados</h4><span class="muted">Últimos eventos</span></div>
+          <div class="hr"></div>
+          <div id="reportsModulePills" class="muted">Carregando...</div>
+          <div class="hr"></div>
+          <div id="reportsActionPills" class="muted">Carregando...</div>
+        </div>
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Resumo de inconsistências</h4><span class="muted">Painel consolidado</span></div>
+          <div class="hr"></div>
+          <div style="overflow:auto;"><table><thead><tr><th>Indicador</th><th>Nível</th><th>Qtd.</th></tr></thead><tbody id="reportsIssuesRows"><tr><td colspan="3" class="muted">Carregando...</td></tr></tbody></table></div>
+        </div>
+      </div>
+
+      <div class="card pad" style="margin-top:14px;">
+        <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Últimos eventos de auditoria</h4><span class="muted">Leitura rápida</span></div>
+        <div class="hr"></div>
+        <div style="overflow:auto;"><table><thead><tr><th>Quando</th><th>Módulo</th><th>Ação</th><th>Alvo</th><th>Resumo</th><th>Responsável</th></tr></thead><tbody id="reportsAuditRows"><tr><td colspan="6" class="muted">Carregando...</td></tr></tbody></table></div>
+      </div>
+
+      <div class="card pad" style="margin-top:14px;">
+        <details>
+          <summary class="muted">Ver JSON bruto</summary>
+          <pre id="reportsRaw" style="white-space:pre-wrap; overflow:auto; max-height:360px;"></pre>
+        </details>
+      </div>
+    `;
+
+    const scriptExtra = `
+      <script>
+        document.addEventListener("DOMContentLoaded", function(){
+          function esc(value){
+            return String(value ?? "")
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;")
+              .replace(/"/g, "&quot;")
+              .replace(/'/g, "&#39;");
+          }
+          function setText(id, value){
+            const el = document.getElementById(id);
+            if (el) el.textContent = String(value ?? "—");
+          }
+          function fmtBRL(cents){
+            const value = (Number(cents) || 0) / 100;
+            try { return value.toLocaleString("pt-BR", { style:"currency", currency:"BRL" }); }
+            catch (_) { return "R$ " + value.toFixed(2); }
+          }
+          function fmtPct(value){
+            const n = Number(value || 0);
+            return n.toFixed(1).replace(".", ",") + "%";
+          }
+          function fmtTs(value){
+            if (!value) return "—";
+            const d = new Date(value);
+            if (Number.isNaN(d.getTime())) return String(value);
+            return d.toLocaleString("pt-BR");
+          }
+          function severityBadge(severity){
+            const s = String(severity || "soft").toLowerCase();
+            const cls = ["danger","warn","info","ok"].includes(s) ? s : "soft";
+            const label = cls === "danger" ? "Crítico" : cls === "warn" ? "Atenção" : cls === "info" ? "Info" : "OK";
+            return '<span class="badge ' + cls + '">' + label + '</span>';
+          }
+          function renderPills(containerId, items, formatter){
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            if (!Array.isArray(items) || !items.length) {
+              el.innerHTML = '<span class="muted">Sem dados.</span>';
+              return;
+            }
+            el.innerHTML = items.map(function(item){ return formatter(item); }).join(' ');
+          }
+          function drawBarChart(canvasId, labels, values){
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) return;
+            const ctx = canvas.getContext("2d");
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+            if (!labels.length) {
+              ctx.fillStyle = "#64748b";
+              ctx.font = "14px system-ui";
+              ctx.fillText("Sem dados", 12, 22);
+              return;
+            }
+            const max = Math.max(1, ...values.map(function(v){ return Number(v || 0); }));
+            const pad = { top: 20, right: 12, bottom: 56, left: 40 };
+            const innerW = w - pad.left - pad.right;
+            const innerH = h - pad.top - pad.bottom;
+            const step = innerW / labels.length;
+            const barW = Math.max(24, Math.min(84, step * 0.62));
+            ctx.strokeStyle = "#cbd5e1";
+            ctx.beginPath();
+            ctx.moveTo(pad.left, pad.top);
+            ctx.lineTo(pad.left, pad.top + innerH);
+            ctx.lineTo(pad.left + innerW, pad.top + innerH);
+            ctx.stroke();
+            labels.forEach(function(label, index){
+              const value = Number(values[index] || 0);
+              const x = pad.left + step * index + (step - barW) / 2;
+              const barH = innerH * (value / max);
+              const y = pad.top + innerH - barH;
+              ctx.fillStyle = "rgba(37,99,235,.28)";
+              ctx.strokeStyle = "rgba(37,99,235,.60)";
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              ctx.roundRect(x, y, barW, barH, 10);
+              ctx.fill();
+              ctx.stroke();
+              ctx.fillStyle = "#0f172a";
+              ctx.font = "12px system-ui";
+              const valLabel = String(value);
+              const valW = ctx.measureText(valLabel).width;
+              ctx.fillText(valLabel, x + (barW - valW) / 2, Math.max(14, y - 6));
+              const shortLabel = String(label || "").length > 14 ? String(label).slice(0, 14) + "…" : String(label || "");
+              const labelW = ctx.measureText(shortLabel).width;
+              ctx.fillText(shortLabel, x + (barW - labelW) / 2, pad.top + innerH + 18);
+            });
+          }
+          async function loadReports(){
+            const response = await fetch("/admin/reports/data");
+            const data = await response.json().catch(function(){ return {}; });
+            document.getElementById("reportsRaw").textContent = JSON.stringify(data, null, 2);
+            if (!response.ok || !data.ok) {
+              return;
+            }
+            const executive = data.executive || {};
+            const overview = executive.overview || {};
+            const revenue = executive.revenue || {};
+            const usage = executive.usage || {};
+            const quality = executive.quality || {};
+            const plans = Array.isArray(executive.plans) ? executive.plans : [];
+            const cities = Array.isArray(executive.cities) ? executive.cities : [];
+            const issues = Array.isArray(executive?.inconsistencies?.summary) ? executive.inconsistencies.summary : [];
+            const audit = data.audit || {};
+            const auditItems = Array.isArray(audit.items) ? audit.items : [];
+            const modules = Array.isArray(audit.modules) ? audit.modules : [];
+            const actions = Array.isArray(audit.actions) ? audit.actions : [];
+
+            setText("rpTotalUsers", overview.totalUsers || 0);
+            setText("rpActiveShare", "Ativação da base: " + fmtPct(overview.activeSharePct || 0));
+            setText("rpMrr", fmtBRL(revenue.mrrCents || 0));
+            setText("rpAvgTicket", "Ticket médio: " + fmtBRL(revenue.avgTicketCents || 0));
+            setText("rpAuditTotal", audit.totalStored || 0);
+            setText("rpAuditRecent", "Últimos eventos carregados: " + (audit.recentCount || 0));
+            setText("rpDescMonth", usage.descriptionsMonth || 0);
+            setText("rp24hUsers", "Usuários ativos 24h: " + String(usage.window24hCount || 0));
+            setText("rpBizProfiles", quality.withBizProfile || 0);
+            setText("rpBizCoverage", "Cobertura: " + fmtPct(quality.profileCoveragePct || 0));
+            setText("rpIssueUsers", quality.issueUsers || 0);
+            setText("rpIssuePct", "Impacto: " + fmtPct(quality.inconsistencyPct || 0));
+
+            drawBarChart("reportsStatusChart", Object.keys(executive.statusCounts || {}), Object.values(executive.statusCounts || {}));
+            drawBarChart("reportsPlansChart", plans.slice(0, 6).map(function(plan){ return plan.name || plan.code || "Plano"; }), plans.slice(0, 6).map(function(plan){ return plan.count || 0; }));
+
+            const plansRows = plans.map(function(plan){
+              return '<tr>' +
+                '<td><b>' + esc(plan.name || plan.code || "—") + '</b><div class="muted"><code>' + esc(plan.code || "") + '</code></div></td>' +
+                '<td>' + esc(plan.count || 0) + '</td>' +
+                '<td>' + esc(fmtBRL(plan.mrrCents || 0)) + '</td>' +
+                '<td>' + esc(plan.description || "—") + '</td>' +
+              '</tr>';
+            }).join('');
+            document.getElementById("reportsPlansRows").innerHTML = plansRows || '<tr><td colspan="4" class="muted">Sem dados.</td></tr>';
+
+            const citiesRows = cities.map(function(item){
+              return '<tr><td>' + esc(item.city || "—") + '</td><td>' + esc(item.count || 0) + '</td></tr>';
+            }).join('');
+            document.getElementById("reportsCitiesRows").innerHTML = citiesRows || '<tr><td colspan="2" class="muted">Sem dados.</td></tr>';
+
+            renderPills("reportsModulePills", modules, function(item){
+              return '<span class="pill">' + esc(item.name || "—") + ': <b>' + esc(item.count || 0) + '</b></span>';
+            });
+            renderPills("reportsActionPills", actions, function(item){
+              return '<span class="pill">' + esc(item.name || "—") + ': <b>' + esc(item.count || 0) + '</b></span>';
+            });
+
+            const issueRows = issues.map(function(issue){
+              return '<tr>' +
+                '<td><b>' + esc(issue.label || "—") + '</b></td>' +
+                '<td>' + severityBadge(issue.severity) + '</td>' +
+                '<td><b>' + esc(issue.count || 0) + '</b></td>' +
+              '</tr>';
+            }).join('');
+            document.getElementById("reportsIssuesRows").innerHTML = issueRows || '<tr><td colspan="3" class="muted">Sem inconsistências.</td></tr>';
+
+            const auditRows = auditItems.map(function(item){
+              return '<tr>' +
+                '<td><code>' + esc(fmtTs(item.ts)) + '</code></td>' +
+                '<td>' + esc(item.module || "—") + '</td>' +
+                '<td>' + esc(item.action || "—") + '</td>' +
+                '<td><code>' + esc(item.waId || item.targetId || "—") + '</code></td>' +
+                '<td style="max-width:420px; white-space:pre-wrap;">' + esc(item.summary || "—") + '</td>' +
+                '<td>' + esc(item?.actor?.user || "admin") + '</td>' +
+              '</tr>';
+            }).join('');
+            document.getElementById("reportsAuditRows").innerHTML = auditRows || '<tr><td colspan="6" class="muted">Sem eventos recentes.</td></tr>';
+          }
+
+          const reloadBtn = document.getElementById("reportsReloadBtn");
+          if (reloadBtn) reloadBtn.addEventListener("click", loadReports);
+          loadReports();
+        });
+      </script>
+    `;
+
+    const html = layoutBase({
+      title: "Relatórios e Exportação",
+      activePath: "/admin/reports-ui",
+      content: inner,
+      scriptExtra,
+    });
+
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
