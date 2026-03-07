@@ -640,7 +640,7 @@ function buildReportsFallbackData(errorMessage = "") {
       revenue: { mrrCents: 0, avgTicketCents: 0, activePaidUsers: 0 },
       usage: { descriptionsToday: 0, descriptionsMonth: 0, dayLabel: "", monthLabel: "", window24hCount: 0, avgDescriptionsPerActive: 0 },
       quality: { withName: 0, withBizProfile: 0, withPendingBizProfile: 0, withAsaasCustomer: 0, withAsaasSubscription: 0, withBilling: 0, issueUsers: 0, profileCoveragePct: 0, nameCoveragePct: 0, inconsistencyPct: 0 },
-      statusCounts: getCrmStatusCounters(),
+      statusCounts: { TRIAL: 0, ACTIVE: 0, WAIT_PLAN: 0, PAYMENT_PENDING: 0, BLOCKED: 0, UNKNOWN: 0 },
       payments: [],
       plans: [],
       cities: [],
@@ -656,9 +656,13 @@ function buildReportsFallbackData(errorMessage = "") {
   };
 }
 
-async function buildReportsCenterData() {
+async function buildReportsCenterData(executiveBuilder) {
+  const executivePromise = typeof executiveBuilder === "function"
+    ? executiveBuilder()
+    : Promise.resolve(buildReportsFallbackData("Executive builder unavailable").executive);
+
   const [executive, auditItems, auditTotal] = await Promise.all([
-    buildExecutiveDashboardData(),
+    executivePromise,
     listAdminAudit({ limit: 30 }),
     getAdminAuditCount(),
   ]);
@@ -4291,7 +4295,7 @@ async function toggle(code, active){
 
   router.get("/reports/data", async (req, res) => {
     try {
-      const data = await buildReportsCenterData();
+      const data = await buildReportsCenterData(buildExecutiveDashboardData);
       return res.status(200).json(data);
     } catch (err) {
       const message = String(err?.message || err);
@@ -4341,7 +4345,7 @@ async function toggle(code, active){
   router.get("/export/executive", async (req, res) => {
     try {
       const format = normalizeExportFormat(req.query?.format);
-      const data = await buildReportsCenterData();
+      const data = await buildReportsCenterData(buildExecutiveDashboardData);
       if (format === "json") {
         return sendExport(res, "amigo_relatorio_executivo", "json", data);
       }
