@@ -516,9 +516,7 @@ function normalizeExportFormat(value) {
 
 function csvCell(value) {
   if (value === null || value === undefined) return '""';
-  const str = String(value).replace(/
-?
-/g, " ");
+  const str = String(value).replace(/\r?\n/g, " ");
   return '"' + str.replace(/"/g, '""') + '"';
 }
 
@@ -530,8 +528,7 @@ function rowsToCsv(rows) {
   for (const row of list) {
     lines.push(headers.map((key) => csvCell(row?.[key] ?? "")).join(","));
   }
-  return lines.join("
-");
+  return lines.join("\n");
 }
 
 function sendExport(res, filenameBase, format, payload) {
