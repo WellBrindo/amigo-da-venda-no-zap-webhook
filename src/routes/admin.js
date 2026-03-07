@@ -511,7 +511,10 @@ function formatMoneyCents(cents) {
 
 function normalizeExportFormat(value) {
   const format = String(value || "csv").trim().toLowerCase();
-  return format === "json" ? "json" : "csv";
+  if (format === "json") return "json";
+  if (format === "excel" || format === "xlsx" || format === "xls") return "excel";
+  if (format === "pdf") return "pdf";
+  return "csv";
 }
 
 function csvCell(value) {
@@ -531,14 +534,287 @@ function rowsToCsv(rows) {
   return lines.join("\n");
 }
 
-function sendExport(res, filenameBase, format, payload) {
+function rowsToHtmlTable(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return '<table><tr><td>Sem dados</td></tr></table>';
+  const headers = Array.from(new Set(list.flatMap((row) => Object.keys(row || {}))));
+  const thead = '<tr>' + headers.map((header) => '<th style="background:#eef2ff; border:1px solid #cbd5e1; padding:6px 8px; text-align:left;">' + escapeHtml(header) + '</th>').join('') + '</tr>';
+  const tbody = list.map((row) => '<tr>' + headers.map((header) => '<td style="border:1px solid #cbd5e1; padding:6px 8px; vertical-align:top;">' + escapeHtml(row?.[header] ?? '') + '</td>').join('') + '</tr>').join('');
+  return '<table style="border-collapse:collapse; width:100%; font-family:Arial,sans-serif; font-size:12px;">' + thead + tbody + '</table>';
+}
+
+function rowsToExcelXml(rows, title = 'Exportação') {
+  const html = rowsToHtmlTable(rows);
+  return '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">' +
+    '<head><meta charset="utf-8" /><title>' + escapeHtml(title) + '</title></head>' +
+    '<body><h3 style="font-family:Arial,sans-serif;">' + escapeHtml(title) + '</h3>' + html + '</body></html>';
+}
+
+function pdfEscape(value) {
+  return String(value ?? '').replace(/\/g, '\\').replace(/\(/g, '\(').replace(/\)/g, '\)');
+}
+
+function rowsToPdfBuffer(title, rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const headers = list.length ? Array.from(new Set(list.flatMap((row) => Object.keys(row || {})))) : [];
+  const lines = [String(title || 'Exportação')];
+  if (!list.length) {
+    lines.push('Sem dados disponíveis.');
+  } else {
+    lines.push(headers.join(' | '));
+    lines.push('-'.repeat(Math.min(120, Math.max(20, headers.join(' | ').length))));
+    for (const row of list) {
+      const line = headers.map((header) => String(row?.[header] ?? '').replace(/
+?
+/g, ' ')).join(' | ');
+      lines.push(line.length > 240 ? line.slice(0, 237) + '...' : line);
+    }
+  }
+
+  const pageHeight = 792;
+  const startY = 760;
+  const linesPerPage = 58;
+  const pages = [];
+  for (let i = 0; i < lines.length; i += linesPerPage) pages.push(lines.slice(i, i + linesPerPage));
+
+  const objects = [];
+  const addObject = (content) => {
+    objects.push(content);
+    return objects.length;
+  };
+
+  const fontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  const pageIds = [];
+  for (const pageLines of pages) {
+    let stream = 'BT
+/F1 10 Tf
+50 ' + startY + ' Td
+';
+    pageLines.forEach((line, index) => {
+      if (index === 0) stream += '(' + pdfEscape(line) + ') Tj
+';
+      else stream += 'T* (' + pdfEscape(line) + ') Tj
+';
+    });
+    stream += 'ET';
+    const contentId = addObject('<< /Length ' + Buffer.byteLength(stream, 'utf8') + ' >>
+stream
+' + stream + '
+endstream');
+    const pageId = addObject('<< /Type /Page /Parent PAGES_ID 0 R /MediaBox [0 0 612 ' + pageHeight + '] /Resources << /Font << /F1 ' + fontId + ' 0 R >> >> /Contents ' + contentId + ' 0 R >>');
+    pageIds.push(pageId);
+  }
+
+  const kids = pageIds.map((id) => id + ' 0 R').join(' ');
+  const pagesId = addObject('<< /Type /Pages /Kids [' + kids + '] /Count ' + pageIds.length + ' >>');
+  const catalogId = addObject('<< /Type /Catalog /Pages ' + pagesId + ' 0 R >>');
+
+  let pdf = '%PDF-1.4
+';
+  const offsets = [0];
+  for (let i = 0; i < objects.length; i += 1) {
+    const content = objects[i].replace('PAGES_ID', String(pagesId));
+    offsets.push(Buffer.byteLength(pdf, 'utf8'));
+    pdf += (i + 1) + ' 0 obj
+' + content + '
+endobj
+';
+  }
+  const xrefStart = Buffer.byteLength(pdf, 'utf8');
+  pdf += 'xref
+0 ' + (objects.length + 1) + '
+';
+  pdf += '0000000000 65535 f 
+';
+  for (let i = 1; i < offsets.length; i += 1) {
+    pdf += String(offsets[i]).padStart(10, '0') + ' 00000 n 
+';
+  }
+  pdf += 'trailer
+<< /Size ' + (objects.length + 1) + ' /Root ' + catalogId + ' 0 R >>
+startxref
+' + xrefStart + '
+%%EOF';
+  return Buffer.from(pdf, 'utf8');
+}
+
+function globalBuildPlanMap(plans) {
+  return new Map(
+    (Array.isArray(plans) ? plans : [])
+      .map((plan) => {
+        const code = String(plan?.code || '').trim().toUpperCase();
+        return code ? [code, plan] : null;
+      })
+      .filter(Boolean)
+  );
+}
+
+function globalDetectUserInconsistencyKeys(snap, lastInboundTs, now, planMap) {
+  const keys = [];
+  const status = String(snap?.status || '').trim().toUpperCase();
+  const planCode = String(snap?.plan || '').trim().toUpperCase();
+  const paymentMethod = String(snap?.paymentMethod || '').trim().toUpperCase();
+  const asaasCustomerId = String(snap?.asaasCustomerId || '').trim();
+  const asaasSubscriptionId = String(snap?.asaasSubscriptionId || '').trim();
+  const fullName = String(snap?.fullName || '').trim();
+  const quotaUsed = Number(snap?.quotaUsed || 0);
+  const trialUsed = Number(snap?.trialUsed || 0);
+  const planMeta = planCode ? planMap.get(planCode) : null;
+  const hasPendingBizProfile = !!(snap?.pendingBizProfile && typeof snap.pendingBizProfile === 'object');
+
+  if (status === 'ACTIVE' && !planCode) keys.push('activeWithoutPlan');
+  if (status === 'TRIAL' && planCode) keys.push('trialWithPlan');
+  if (planCode && !planMeta) keys.push('planNotFound');
+  if (planMeta && !planMeta.active) keys.push('inactivePlanInUse');
+  if (paymentMethod && !asaasCustomerId) keys.push('paymentWithoutCustomer');
+  if (asaasSubscriptionId && !asaasCustomerId) keys.push('subscriptionWithoutCustomer');
+  if (status === 'ACTIVE' && !asaasSubscriptionId) keys.push('activeWithoutSubscription');
+  if (quotaUsed < 0) keys.push('quotaNegative');
+  if (trialUsed < 0) keys.push('trialNegative');
+  if (status === 'TRIAL' && quotaUsed > 0) keys.push('trialWithQuota');
+  if (!fullName) keys.push('noName');
+  if (lastInboundTs > now) keys.push('futureInbound');
+  if (status === 'WAIT_PLAN' && asaasSubscriptionId) keys.push('waitPlanWithSubscription');
+  if (snap?.cardCanceledAt && !snap?.cardValidUntil) keys.push('cardCanceledWithoutValidUntil');
+  if (hasPendingBizProfile) keys.push('pendingBizProfile');
+  return keys;
+}
+
+async function enrichUserForExport(waId, planMap, now) {
+  const [snap, lastInboundTsRaw] = await Promise.all([getUserSnapshot(waId), getLastInboundTs(waId)]);
+  const lastInboundTs = Number(lastInboundTsRaw || 0);
+  const windowExpiresAt = lastInboundTs ? lastInboundTs + 24 * 60 * 60 * 1000 : 0;
+  const inWindow = lastInboundTs ? now - lastInboundTs < 24 * 60 * 60 * 1000 : false;
+  const planCode = String(snap?.plan || '').trim().toUpperCase();
+  const planMeta = planCode ? planMap.get(planCode) : null;
+  const issueKeys = globalDetectUserInconsistencyKeys(snap, lastInboundTs, now, planMap);
+  return {
+    waId: String(waId || ''),
+    fullName: String(snap?.fullName || ''),
+    status: String(snap?.status || ''),
+    plan: String(snap?.plan || ''),
+    planName: String(planMeta?.name || ''),
+    planDescription: String(planMeta?.description || ''),
+    paymentMethod: String(snap?.paymentMethod || ''),
+    quotaUsed: Number(snap?.quotaUsed || 0),
+    trialUsed: Number(snap?.trialUsed || 0),
+    templateMode: String(snap?.templateMode || ''),
+    billingCityState: String(snap?.billingCityState || ''),
+    billingAddress: String(snap?.billingAddress || ''),
+    asaasCustomerId: String(snap?.asaasCustomerId || ''),
+    asaasSubscriptionId: String(snap?.asaasSubscriptionId || ''),
+    cardValidUntil: String(snap?.cardValidUntil || ''),
+    cardCanceledAt: String(snap?.cardCanceledAt || ''),
+    doc: snap?.doc || { docType: '', docLast4: '' },
+    bizProfile: snap?.bizProfile || null,
+    pendingBizProfile: snap?.pendingBizProfile || null,
+    hasBizProfile: !!(snap?.bizProfile && typeof snap.bizProfile === 'object'),
+    hasPendingBizProfile: !!(snap?.pendingBizProfile && typeof snap.pendingBizProfile === 'object'),
+    inWindow,
+    lastInboundTs,
+    windowExpiresAt,
+    issueKeys,
+    issueCount: issueKeys.length,
+    snapshot: snap,
+  };
+}
+
+function buildGlobalInconsistencyBucket(label, severity, description = '') {
+  return { label, severity, description, count: 0, items: [] };
+}
+
+async function collectInconsistenciesForExport() {
+  const usersRaw = await listUsers();
+  const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
+  const plans = await listPlans({ includeInactive: true });
+  const planMap = globalBuildPlanMap(plans);
+  const buckets = {
+    activeWithoutPlan: buildGlobalInconsistencyBucket('Assinante sem plano', 'danger', 'Usuário está ativo, mas não tem nenhum plano salvo.'),
+    trialWithPlan: buildGlobalInconsistencyBucket('Trial com plano salvo', 'warn', 'Usuário ainda está no teste, mas já aparece com um plano preenchido.'),
+    planNotFound: buildGlobalInconsistencyBucket('Plano não encontrado', 'danger', 'O plano salvo no usuário não existe mais no catálogo do sistema.'),
+    inactivePlanInUse: buildGlobalInconsistencyBucket('Plano desativado em uso', 'warn', 'O usuário está vinculado a um plano que hoje está desativado.'),
+    paymentWithoutCustomer: buildGlobalInconsistencyBucket('Pagamento sem cadastro Asaas', 'warn', 'Há forma de pagamento definida, mas falta o código do cliente no Asaas.'),
+    subscriptionWithoutCustomer: buildGlobalInconsistencyBucket('Assinatura sem cliente Asaas', 'danger', 'Existe assinatura salva, mas não existe cliente correspondente no Asaas.'),
+    activeWithoutSubscription: buildGlobalInconsistencyBucket('Assinante sem assinatura Asaas', 'danger', 'Usuário está ativo, mas não há assinatura registrada no Asaas.'),
+    quotaNegative: buildGlobalInconsistencyBucket('Uso mensal negativo', 'danger', 'O contador de uso mensal ficou abaixo de zero, o que não deveria acontecer.'),
+    trialNegative: buildGlobalInconsistencyBucket('Uso do trial negativo', 'danger', 'O contador de uso do teste ficou abaixo de zero, o que indica erro de dados.'),
+    trialWithQuota: buildGlobalInconsistencyBucket('Trial usando quota de plano', 'warn', 'Usuário em teste aparece com consumo na quota mensal de assinante.'),
+    noName: buildGlobalInconsistencyBucket('Usuário sem nome', 'info', 'Cadastro sem nome preenchido, o que dificulta suporte e cobrança.'),
+    futureInbound: buildGlobalInconsistencyBucket('Mensagem com data futura', 'warn', 'A última mensagem recebida ficou registrada com horário no futuro.'),
+    waitPlanWithSubscription: buildGlobalInconsistencyBucket('Aguardando plano com assinatura', 'warn', 'Usuário ainda está aguardando plano, mas já possui assinatura criada.'),
+    cardCanceledWithoutValidUntil: buildGlobalInconsistencyBucket('Cancelado sem data final', 'warn', 'O cartão foi cancelado, mas não foi salva a data final de acesso.'),
+    pendingBizProfile: buildGlobalInconsistencyBucket('Perfil da empresa pendente', 'info', 'Há dados da empresa aguardando confirmação ou finalização pelo usuário.'),
+  };
+
+  function pushIssue(bucketKey, snap, extra = {}) {
+    const bucket = buckets[bucketKey];
+    if (!bucket) return;
+    bucket.items.push({
+      waId: String(snap?.waId || extra.waId || ''),
+      fullName: String(snap?.fullName || ''),
+      status: String(snap?.status || ''),
+      plan: String(snap?.plan || ''),
+      paymentMethod: String(snap?.paymentMethod || ''),
+      asaasCustomerId: String(snap?.asaasCustomerId || ''),
+      asaasSubscriptionId: String(snap?.asaasSubscriptionId || ''),
+      quotaUsed: Number(snap?.quotaUsed || 0),
+      trialUsed: Number(snap?.trialUsed || 0),
+      cardValidUntil: String(snap?.cardValidUntil || ''),
+      cardCanceledAt: String(snap?.cardCanceledAt || ''),
+      ...extra,
+    });
+    bucket.count = bucket.items.length;
+  }
+
+  const now = nowMs();
+  await mapLimit(waIds, 20, async (waId) => {
+    const user = await enrichUserForExport(waId, planMap, now);
+    const snap = user.snapshot || {};
+    const planMeta = user.plan ? planMap.get(String(user.plan || '').trim().toUpperCase()) : null;
+    for (const key of user.issueKeys || []) {
+      const extra = {};
+      if (key === 'inactivePlanInUse') extra.planName = String(planMeta?.name || '');
+      if (key === 'futureInbound') {
+        extra.lastInboundTs = user.lastInboundTs;
+        extra.nowMs = now;
+      }
+      if (key === 'pendingBizProfile') extra.pendingKeys = Object.keys(snap.pendingBizProfile || {});
+      pushIssue(key, snap, extra);
+    }
+  });
+
+  const summary = Object.entries(buckets).map(([key, bucket]) => ({ key, label: bucket.label, severity: bucket.severity, description: bucket.description, count: bucket.count }));
+  const totalIssues = summary.reduce((acc, item) => acc + item.count, 0);
+  return { ok: true, ts: Date.now(), usersCount: waIds.length, totalIssues, summary, items: buckets };
+}
+
+function sendExport(res, filenameBase, format, payload, options = {}) {
+  const title = String(options?.title || filenameBase || 'Exportação');
   if (format === "json") {
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.json"`);
     return res.status(200).send(JSON.stringify(payload, null, 2));
   }
 
-  const rows = Array.isArray(payload) ? payload : [];
+  const rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.items)
+      ? payload.items
+      : Object.entries(payload || {}).map(([key, value]) => ({ key, value: typeof value === 'object' ? JSON.stringify(value) : String(value ?? '') }));
+
+  if (format === "excel") {
+    res.setHeader("Content-Type", "application/vnd.ms-excel; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.xls"`);
+    return res.status(200).send(rowsToExcelXml(rows, title));
+  }
+
+  if (format === "pdf") {
+    const buffer = rowsToPdfBuffer(title, rows);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.pdf"`);
+    return res.status(200).send(buffer);
+  }
+
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.csv"`);
   return res.status(200).send(rowsToCsv(rows));
@@ -548,9 +824,9 @@ async function buildExportUsersRows() {
   const usersRaw = await listUsers();
   const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
   const plans = await listPlans({ includeInactive: true });
-  const planMap = buildPlanMap(plans);
+  const planMap = globalBuildPlanMap(plans);
   const now = nowMs();
-  const users = await mapLimit(waIds, 20, async (waId) => enrichUserForCrm(waId, planMap, now));
+  const users = await mapLimit(waIds, 20, async (waId) => enrichUserForExport(waId, planMap, now));
 
   return users.map((user) => ({
     waId: String(user.waId || ""),
@@ -582,7 +858,7 @@ async function buildExportUsersRows() {
 }
 
 async function buildExportInconsistencyRows() {
-  const data = await collectInconsistencies();
+  const data = await collectInconsistenciesForExport();
   const rows = [];
   for (const [key, bucket] of Object.entries(data.items || {})) {
     for (const item of bucket.items || []) {
@@ -692,6 +968,42 @@ async function buildReportsCenterData(executiveBuilder) {
       items: recentAudit,
     },
   };
+}
+
+function buildExecutiveExportRows(data) {
+  const rows = [];
+  const overview = data?.executive?.overview || {};
+  const revenue = data?.executive?.revenue || {};
+  const usage = data?.executive?.usage || {};
+  const quality = data?.executive?.quality || {};
+  const pushMetric = (section, metric, value) => rows.push({ section, metric, value });
+  pushMetric("overview", "totalUsers", overview.totalUsers || 0);
+  pushMetric("overview", "activeUsers", overview.activeUsers || 0);
+  pushMetric("overview", "trialUsers", overview.trialUsers || 0);
+  pushMetric("overview", "paymentPendingUsers", overview.paymentPendingUsers || 0);
+  pushMetric("overview", "waitPlanUsers", overview.waitPlanUsers || 0);
+  pushMetric("overview", "blockedUsers", overview.blockedUsers || 0);
+  pushMetric("overview", "activeSharePct", overview.activeSharePct || 0);
+  pushMetric("overview", "trialToPaidPct", overview.trialToPaidPct || 0);
+  pushMetric("revenue", "mrrCents", revenue.mrrCents || 0);
+  pushMetric("revenue", "mrrFormatted", formatMoneyCents(revenue.mrrCents || 0));
+  pushMetric("revenue", "avgTicketCents", revenue.avgTicketCents || 0);
+  pushMetric("revenue", "avgTicketFormatted", formatMoneyCents(revenue.avgTicketCents || 0));
+  pushMetric("usage", "descriptionsToday", usage.descriptionsToday || 0);
+  pushMetric("usage", "descriptionsMonth", usage.descriptionsMonth || 0);
+  pushMetric("usage", "window24hCount", usage.window24hCount || 0);
+  pushMetric("usage", "avgDescriptionsPerActive", usage.avgDescriptionsPerActive || 0);
+  pushMetric("quality", "withName", quality.withName || 0);
+  pushMetric("quality", "withBizProfile", quality.withBizProfile || 0);
+  pushMetric("quality", "withPendingBizProfile", quality.withPendingBizProfile || 0);
+  pushMetric("quality", "withAsaasCustomer", quality.withAsaasCustomer || 0);
+  pushMetric("quality", "withAsaasSubscription", quality.withAsaasSubscription || 0);
+  pushMetric("quality", "withBilling", quality.withBilling || 0);
+  pushMetric("quality", "issueUsers", quality.issueUsers || 0);
+  pushMetric("quality", "profileCoveragePct", quality.profileCoveragePct || 0);
+  pushMetric("quality", "nameCoveragePct", quality.nameCoveragePct || 0);
+  pushMetric("quality", "inconsistencyPct", quality.inconsistencyPct || 0);
+  return rows;
 }
 
 export function adminRouter() {
@@ -4310,7 +4622,7 @@ async function toggle(code, active){
       if (format === "json") {
         return sendExport(res, "amigo_usuarios", "json", { ok: true, exportedAt: new Date().toISOString(), count: rows.length, items: rows });
       }
-      return sendExport(res, "amigo_usuarios", "csv", rows);
+      return sendExport(res, "amigo_usuarios", format, rows, { title: "Usuários do CRM" });
     } catch (err) {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
@@ -4323,7 +4635,7 @@ async function toggle(code, active){
       if (format === "json") {
         return sendExport(res, "amigo_inconsistencias", "json", { ok: true, exportedAt: new Date().toISOString(), count: rows.length, items: rows });
       }
-      return sendExport(res, "amigo_inconsistencias", "csv", rows);
+      return sendExport(res, "amigo_inconsistencias", format, rows, { title: "Inconsistências" });
     } catch (err) {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
@@ -4336,7 +4648,7 @@ async function toggle(code, active){
       if (format === "json") {
         return sendExport(res, "amigo_auditoria", "json", { ok: true, exportedAt: new Date().toISOString(), count: rows.length, items: rows });
       }
-      return sendExport(res, "amigo_auditoria", "csv", rows);
+      return sendExport(res, "amigo_auditoria", format, rows, { title: "Auditoria Administrativa" });
     } catch (err) {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
@@ -4350,35 +4662,8 @@ async function toggle(code, active){
         return sendExport(res, "amigo_relatorio_executivo", "json", data);
       }
 
-      const rows = [];
-      const overview = data?.executive?.overview || {};
-      const revenue = data?.executive?.revenue || {};
-      const usage = data?.executive?.usage || {};
-      const quality = data?.executive?.quality || {};
-      const pushMetric = (section, metric, value) => rows.push({ section, metric, value });
-      pushMetric("overview", "totalUsers", overview.totalUsers || 0);
-      pushMetric("overview", "activeUsers", overview.activeUsers || 0);
-      pushMetric("overview", "trialUsers", overview.trialUsers || 0);
-      pushMetric("overview", "paymentPendingUsers", overview.paymentPendingUsers || 0);
-      pushMetric("overview", "waitPlanUsers", overview.waitPlanUsers || 0);
-      pushMetric("overview", "blockedUsers", overview.blockedUsers || 0);
-      pushMetric("overview", "activeSharePct", overview.activeSharePct || 0);
-      pushMetric("overview", "trialToPaidPct", overview.trialToPaidPct || 0);
-      pushMetric("revenue", "mrrCents", revenue.mrrCents || 0);
-      pushMetric("revenue", "mrrFormatted", formatMoneyCents(revenue.mrrCents || 0));
-      pushMetric("revenue", "avgTicketCents", revenue.avgTicketCents || 0);
-      pushMetric("revenue", "avgTicketFormatted", formatMoneyCents(revenue.avgTicketCents || 0));
-      pushMetric("usage", "descriptionsToday", usage.descriptionsToday || 0);
-      pushMetric("usage", "descriptionsMonth", usage.descriptionsMonth || 0);
-      pushMetric("usage", "window24hCount", usage.window24hCount || 0);
-      pushMetric("usage", "avgDescriptionsPerActive", usage.avgDescriptionsPerActive || 0);
-      pushMetric("quality", "withName", quality.withName || 0);
-      pushMetric("quality", "withBizProfile", quality.withBizProfile || 0);
-      pushMetric("quality", "issueUsers", quality.issueUsers || 0);
-      pushMetric("quality", "profileCoveragePct", quality.profileCoveragePct || 0);
-      pushMetric("quality", "nameCoveragePct", quality.nameCoveragePct || 0);
-      pushMetric("quality", "inconsistencyPct", quality.inconsistencyPct || 0);
-      return sendExport(res, "amigo_relatorio_executivo", "csv", rows);
+      const rows = buildExecutiveExportRows(data);
+      return sendExport(res, "amigo_relatorio_executivo", format, rows, { title: "Relatório Executivo" });
     } catch (err) {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
@@ -4417,7 +4702,7 @@ async function toggle(code, active){
         <div class="card pad">
           <div class="row" style="justify-content:space-between;">
             <h4 style="margin:0;">Exportações rápidas</h4>
-            <span class="muted">CSV ou JSON</span>
+            <span class="muted">CSV, Excel, PDF ou JSON</span>
           </div>
           <div class="hr"></div>
           <div class="grid cols2">
@@ -4426,6 +4711,8 @@ async function toggle(code, active){
               <div class="muted" style="margin:6px 0 10px 0;">Base completa dos usuários com status, plano, pagamento e saúde.</div>
               <div class="row">
                 <a class="pill" href="/admin/export/users?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/users?format=excel">Excel</a>
+                <a class="pill" href="/admin/export/users?format=pdf">PDF</a>
                 <a class="pill" href="/admin/export/users?format=json">JSON</a>
               </div>
             </div>
@@ -4434,6 +4721,8 @@ async function toggle(code, active){
               <div class="muted" style="margin:6px 0 10px 0;">Ocorrências operacionais detalhadas por usuário.</div>
               <div class="row">
                 <a class="pill" href="/admin/export/inconsistencies?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/inconsistencies?format=excel">Excel</a>
+                <a class="pill" href="/admin/export/inconsistencies?format=pdf">PDF</a>
                 <a class="pill" href="/admin/export/inconsistencies?format=json">JSON</a>
               </div>
             </div>
@@ -4442,6 +4731,8 @@ async function toggle(code, active){
               <div class="muted" style="margin:6px 0 10px 0;">Eventos mais recentes do painel administrativo.</div>
               <div class="row">
                 <a class="pill" href="/admin/export/audit?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/audit?format=excel">Excel</a>
+                <a class="pill" href="/admin/export/audit?format=pdf">PDF</a>
                 <a class="pill" href="/admin/export/audit?format=json">JSON</a>
               </div>
             </div>
@@ -4450,6 +4741,8 @@ async function toggle(code, active){
               <div class="muted" style="margin:6px 0 10px 0;">Indicadores consolidados para acompanhamento gerencial.</div>
               <div class="row">
                 <a class="pill" href="/admin/export/executive?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/executive?format=excel">Excel</a>
+                <a class="pill" href="/admin/export/executive?format=pdf">PDF</a>
                 <a class="pill" href="/admin/export/executive?format=json">JSON</a>
               </div>
             </div>
