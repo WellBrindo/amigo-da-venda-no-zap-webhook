@@ -232,7 +232,7 @@ function renderSidebar(activePath){
   const ap = String(activePath||"");
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
-  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
+  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
 
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
@@ -280,6 +280,7 @@ function renderSidebar(activePath){
       <details ${systemOpen ? "open" : ""}>
         <summary>⚙️ Sistema <span>▾</span></summary>
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
+        ${item("/admin/inconsistencies-ui", "Inconsistências", "🩺")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
         ${item("/admin/settings-ui", "Configurações Globais", "🛠️")}
         ${item("/admin/asaas-test-ui", "Asaas Teste", "🧪")}
@@ -454,6 +455,118 @@ export function adminRouter() {
     for (let w = 0; w < Math.min(lim, arr.length); w++) workers.push(worker());
     await Promise.all(workers);
     return out;
+  }
+
+
+  function buildInconsistencyBucket(label, severity) {
+    return { label, severity, count: 0, items: [] };
+  }
+
+  async function collectInconsistencies() {
+    const usersRaw = await listUsers();
+    const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
+    const plans = await listPlans({ includeInactive: true });
+    const planMap = new Map(
+      (Array.isArray(plans) ? plans : [])
+        .map((plan) => {
+          const code = String(plan?.code || "").trim().toUpperCase();
+          return code ? [code, plan] : null;
+        })
+        .filter(Boolean)
+    );
+
+    const buckets = {
+      activeWithoutPlan: buildInconsistencyBucket("ACTIVE sem plano", "danger"),
+      trialWithPlan: buildInconsistencyBucket("TRIAL com plano preenchido", "warn"),
+      planNotFound: buildInconsistencyBucket("Plano inexistente no catálogo", "danger"),
+      inactivePlanInUse: buildInconsistencyBucket("Plano inativo em uso", "warn"),
+      paymentWithoutCustomer: buildInconsistencyBucket("paymentMethod sem asaasCustomerId", "warn"),
+      subscriptionWithoutCustomer: buildInconsistencyBucket("asaasSubscriptionId sem asaasCustomerId", "danger"),
+      activeWithoutSubscription: buildInconsistencyBucket("ACTIVE sem assinatura Asaas", "danger"),
+      quotaNegative: buildInconsistencyBucket("quotaUsed negativo", "danger"),
+      trialNegative: buildInconsistencyBucket("trialUsed negativo", "danger"),
+      trialWithQuota: buildInconsistencyBucket("TRIAL com quotaUsed > 0", "warn"),
+      noName: buildInconsistencyBucket("Usuário sem nome", "info"),
+      futureInbound: buildInconsistencyBucket("lastInboundTs no futuro", "warn"),
+      waitPlanWithSubscription: buildInconsistencyBucket("WAIT_PLAN com assinatura criada", "warn"),
+      cardCanceledWithoutValidUntil: buildInconsistencyBucket("Cartão cancelado sem validade final", "warn"),
+      pendingBizProfile: buildInconsistencyBucket("Perfil da empresa pendente", "info"),
+    };
+
+    function pushIssue(bucketKey, snap, extra = {}) {
+      const bucket = buckets[bucketKey];
+      if (!bucket) return;
+      bucket.items.push({
+        waId: String(snap?.waId || extra.waId || ""),
+        fullName: String(snap?.fullName || ""),
+        status: String(snap?.status || ""),
+        plan: String(snap?.plan || ""),
+        paymentMethod: String(snap?.paymentMethod || ""),
+        asaasCustomerId: String(snap?.asaasCustomerId || ""),
+        asaasSubscriptionId: String(snap?.asaasSubscriptionId || ""),
+        quotaUsed: Number(snap?.quotaUsed || 0),
+        trialUsed: Number(snap?.trialUsed || 0),
+        cardValidUntil: String(snap?.cardValidUntil || ""),
+        cardCanceledAt: String(snap?.cardCanceledAt || ""),
+        ...extra,
+      });
+      bucket.count = bucket.items.length;
+    }
+
+    const now = nowMs();
+
+    await mapLimit(waIds, 20, async (waId) => {
+      const [snap, lastInboundTsRaw] = await Promise.all([
+        getUserSnapshot(waId),
+        getLastInboundTs(waId),
+      ]);
+
+      const status = String(snap?.status || "").trim().toUpperCase();
+      const planCode = String(snap?.plan || "").trim().toUpperCase();
+      const paymentMethod = String(snap?.paymentMethod || "").trim().toUpperCase();
+      const asaasCustomerId = String(snap?.asaasCustomerId || "").trim();
+      const asaasSubscriptionId = String(snap?.asaasSubscriptionId || "").trim();
+      const fullName = String(snap?.fullName || "").trim();
+      const quotaUsed = Number(snap?.quotaUsed || 0);
+      const trialUsed = Number(snap?.trialUsed || 0);
+      const lastInboundTs = Number(lastInboundTsRaw || 0);
+      const planMeta = planCode ? planMap.get(planCode) : null;
+      const hasPendingBizProfile = !!(snap?.pendingBizProfile && typeof snap.pendingBizProfile === "object");
+
+      if (status === "ACTIVE" && !planCode) pushIssue("activeWithoutPlan", snap);
+      if (status === "TRIAL" && planCode) pushIssue("trialWithPlan", snap);
+      if (planCode && !planMeta) pushIssue("planNotFound", snap);
+      if (planMeta && !planMeta.active) pushIssue("inactivePlanInUse", snap, { planName: String(planMeta.name || "") });
+      if (paymentMethod && !asaasCustomerId) pushIssue("paymentWithoutCustomer", snap);
+      if (asaasSubscriptionId && !asaasCustomerId) pushIssue("subscriptionWithoutCustomer", snap);
+      if (status === "ACTIVE" && !asaasSubscriptionId) pushIssue("activeWithoutSubscription", snap);
+      if (quotaUsed < 0) pushIssue("quotaNegative", snap);
+      if (trialUsed < 0) pushIssue("trialNegative", snap);
+      if (status === "TRIAL" && quotaUsed > 0) pushIssue("trialWithQuota", snap);
+      if (!fullName) pushIssue("noName", snap);
+      if (lastInboundTs > now) pushIssue("futureInbound", snap, { lastInboundTs, nowMs: now });
+      if (status === "WAIT_PLAN" && asaasSubscriptionId) pushIssue("waitPlanWithSubscription", snap);
+      if (snap?.cardCanceledAt && !snap?.cardValidUntil) pushIssue("cardCanceledWithoutValidUntil", snap);
+      if (hasPendingBizProfile) pushIssue("pendingBizProfile", snap, { pendingKeys: Object.keys(snap.pendingBizProfile || {}) });
+    });
+
+    const summary = Object.entries(buckets).map(([key, bucket]) => ({
+      key,
+      label: bucket.label,
+      severity: bucket.severity,
+      count: bucket.count,
+    }));
+
+    const totalIssues = summary.reduce((acc, item) => acc + item.count, 0);
+
+    return {
+      ok: true,
+      ts: Date.now(),
+      usersCount: waIds.length,
+      totalIssues,
+      summary,
+      items: buckets,
+    };
   }
 
   router.get("/dashboard/data", async (req, res) => {
@@ -1955,6 +2068,156 @@ async function toggle(code, active){
       </script>
     `;
     const html = layoutBase({ title: "Alertas", activePath: "/admin/alerts-ui", content: inner });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  router.get("/inconsistencies", async (req, res) => {
+    try {
+      const data = await collectInconsistencies();
+      return res.json(data);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/inconsistencies-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">🩺 Painel de Inconsistências</h3>
+            <div class="muted">Diagnóstico operacional dos usuários e assinaturas. O painel apenas lê dados; não corrige nada automaticamente.</div>
+          </div>
+          <button class="primary" onclick="load()">Atualizar</button>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="row">
+          <span class="pill">👥 Usuários analisados: <b id="usersCount">—</b></span>
+          <span class="pill">⚠️ Total de ocorrências: <b id="issuesCount">—</b></span>
+        </div>
+
+        <div class="hr"></div>
+
+        <div id="summary" class="muted">Carregando…</div>
+
+        <div class="hr"></div>
+
+        <div id="details" class="muted">Carregando…</div>
+
+        <div class="hr"></div>
+        <details>
+          <summary class="muted">Ver JSON bruto</summary>
+          <pre id="raw" style="white-space:pre-wrap;"></pre>
+        </details>
+      </div>
+
+      <script>
+        function esc(s){
+          return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
+        }
+
+        function sevClass(sev){
+          const v = String(sev || '').toLowerCase();
+          if(v === 'danger') return 'danger';
+          if(v === 'warn') return 'warn';
+          if(v === 'ok') return 'ok';
+          return 'info';
+        }
+
+        function renderSummary(summary){
+          const root = document.getElementById('summary');
+          if(!Array.isArray(summary) || !summary.length){
+            root.innerHTML = '<div class="muted">Nenhuma regra configurada.</div>';
+            return;
+          }
+
+          const html = '<table><thead><tr><th>Regra</th><th>Severidade</th><th>Quantidade</th></tr></thead><tbody>' +
+            summary.map(item => {
+              return '<tr>' +
+                '<td>' + esc(item.label || item.key || '') + '</td>' +
+                '<td><span class="badge ' + sevClass(item.severity) + '">' + esc(item.severity || 'info') + '</span></td>' +
+                '<td><b>' + esc(item.count || 0) + '</b></td>' +
+              '</tr>';
+            }).join('') +
+            '</tbody></table>';
+
+          root.innerHTML = html;
+        }
+
+        function renderDetails(data){
+          const root = document.getElementById('details');
+          const summary = Array.isArray(data?.summary) ? data.summary : [];
+          const items = data?.items && typeof data.items === 'object' ? data.items : {};
+          const visible = summary.filter(item => Number(item.count || 0) > 0);
+
+          if(!visible.length){
+            root.innerHTML = '<div class="muted">Nenhuma inconsistência encontrada no momento.</div>';
+            return;
+          }
+
+          const sections = visible.map(item => {
+            const bucket = items[item.key] || {};
+            const list = Array.isArray(bucket.items) ? bucket.items : [];
+            const rows = list.map(row => {
+              const href = '/admin/users-ui?waId=' + encodeURIComponent(row.waId || '');
+              const extraParts = [];
+              if(row.plan) extraParts.push('plano: ' + row.plan);
+              if(row.paymentMethod) extraParts.push('payment: ' + row.paymentMethod);
+              if(row.asaasCustomerId) extraParts.push('customer: ' + row.asaasCustomerId);
+              if(row.asaasSubscriptionId) extraParts.push('subscription: ' + row.asaasSubscriptionId);
+              if(typeof row.lastInboundTs === 'number' && row.lastInboundTs > 0) extraParts.push('lastInboundTs: ' + row.lastInboundTs);
+              if(row.cardCanceledAt) extraParts.push('cancelado em: ' + row.cardCanceledAt);
+              if(row.cardValidUntil) extraParts.push('válido até: ' + row.cardValidUntil);
+              if(Array.isArray(row.pendingKeys) && row.pendingKeys.length) extraParts.push('pendingKeys: ' + row.pendingKeys.join(', '));
+              return '<tr>' +
+                '<td><a href="' + href + '"><code>' + esc(row.waId || '') + '</code></a></td>' +
+                '<td>' + esc(row.fullName || '—') + '</td>' +
+                '<td>' + esc(row.status || '—') + '</td>' +
+                '<td>' + esc(row.plan || '—') + '</td>' +
+                '<td style="max-width:520px; white-space:pre-wrap;">' + esc(extraParts.join(' • ') || '—') + '</td>' +
+              '</tr>';
+            }).join('');
+
+            return '<div class="card pad" style="margin-bottom:12px;">' +
+              '<div class="row" style="justify-content:space-between;">' +
+                '<div><b>' + esc(item.label || item.key || '') + '</b></div>' +
+                '<span class="badge ' + sevClass(item.severity) + '">' + esc(item.count || 0) + '</span>' +
+              '</div>' +
+              '<div class="muted" style="margin-top:6px;">Severidade: <b>' + esc(item.severity || 'info') + '</b></div>' +
+              '<div class="hr"></div>' +
+              '<div style="overflow:auto;">' +
+                '<table style="min-width:760px;"><thead><tr><th>waId</th><th>Nome</th><th>Status</th><th>Plano</th><th>Detalhes</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+              '</div>' +
+            '</div>';
+          }).join('');
+
+          root.innerHTML = sections;
+        }
+
+        async function load(){
+          const r = await fetch('/admin/inconsistencies');
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+          document.getElementById('usersCount').textContent = String(j?.usersCount ?? '0');
+          document.getElementById('issuesCount').textContent = String(j?.totalIssues ?? '0');
+
+          if(!j?.ok){
+            document.getElementById('summary').innerHTML = '<div class="muted">Falha ao carregar inconsistências.</div>';
+            document.getElementById('details').innerHTML = '<div class="muted">' + esc(j?.error || 'Erro desconhecido.') + '</div>';
+            return;
+          }
+
+          renderSummary(j.summary);
+          renderDetails(j);
+        }
+
+        load();
+      </script>
+    `;
+    const html = layoutBase({ title: "Painel de Inconsistências", activePath: "/admin/inconsistencies-ui", content: inner });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
