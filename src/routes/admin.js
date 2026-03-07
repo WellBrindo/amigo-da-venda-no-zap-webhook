@@ -11,6 +11,7 @@ import {
   clearLastPrompt, // ✅ V16.4.6: limpar via DEL (não SET "")
   setLastPrompt, // ✅ TESTE CONTROLADO: forçar setLastPrompt("")
   resetUserAsNew, // 🧹 reset total (número de teste)
+  resetUserToTrial,
 } from "../services/state.js";
 
 import {
@@ -231,7 +232,7 @@ function layoutBase({ title, activePath = "/admin", content = "", headExtra = ""
 
 function renderSidebar(activePath){
   const ap = String(activePath||"");
-  const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm");
+  const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm") || ap.startsWith("/admin/bulk");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
   const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
 
@@ -270,6 +271,7 @@ function renderSidebar(activePath){
       <details ${usersOpen ? "open" : ""}>
         <summary>👥 Usuários <span>▾</span></summary>
         ${item("/admin/crm-ui", "CRM de usuários", "🧭")}
+        ${item("/admin/bulk-ui", "Ações em massa", "🧰")}
         ${item("/admin/users-list-ui", "Lista de usuários", "📋")}
         ${item("/admin/users-ui", "Ações / Consulta", "👤")}
         ${item("/admin/window24h-ui", "Janela 24h", "🕒")}
@@ -1700,6 +1702,10 @@ router.get("/", async (req, res) => {
                 <div class="muted" style="font-weight:700;">👥 Usuários</div>
                 <div class="muted">Consulta e ações por waId.</div>
               </a>
+              <a class="card pad" href="/admin/bulk-ui" style="display:block;">
+                <div class="muted" style="font-weight:700;">🧰 Ações em massa</div>
+                <div class="muted">Operações em lote para usuários filtrados.</div>
+              </a>
               <a class="card pad" href="/admin/plans" style="display:block;">
                 <div class="muted" style="font-weight:700;">💳 Planos</div>
                 <div class="muted">Gerenciar catálogo e ativação.</div>
@@ -3097,6 +3103,492 @@ async function toggle(code, active){
     } catch (e) {
       return res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
+  });
+
+
+  router.get("/bulk/list", async (req, res) => {
+    try {
+      const q = String(req.query?.q || "").trim().toLowerCase();
+      const statusFilter = String(req.query?.status || "ALL").trim().toUpperCase();
+      const planFilter = String(req.query?.plan || "ALL").trim().toUpperCase();
+      const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 200) || 200));
+
+      const usersRaw = await listUsers();
+      const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
+      const plans = await listPlans({ includeInactive: true });
+      const planMap = buildPlanMap(plans);
+      const now = nowMs();
+      const enriched = await mapLimit(waIds, 20, async (waId) => enrichUserForCrm(waId, planMap, now));
+      const validItems = Array.isArray(enriched) ? enriched.filter((item) => item && !item.__error) : [];
+
+      const filtered = validItems.filter((item) => {
+        if (!item) return false;
+        if (q) {
+          const hay = [item.waId, item.fullName, item.plan, item.planName, item.billingCityState, item.paymentMethod].join(" ").toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        if (statusFilter !== "ALL" && String(item.status || "").toUpperCase() !== statusFilter) return false;
+        if (planFilter !== "ALL" && String(item.plan || "").toUpperCase() !== planFilter) return false;
+        return true;
+      });
+
+      const availablePlans = Array.from(new Set(validItems.map((item) => String(item.plan || "").trim().toUpperCase()).filter(Boolean))).sort();
+
+      return res.status(200).json({
+        ok: true,
+        totalUsers: waIds.length,
+        filteredCount: filtered.length,
+        availablePlans,
+        limit,
+        items: filtered.slice(0, limit),
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  router.post("/bulk/apply", async (req, res) => {
+    try {
+      const operation = String(req.body?.operation || "").trim().toUpperCase();
+      const waIdsRaw = Array.isArray(req.body?.waIds) ? req.body.waIds : [];
+      const waIds = Array.from(new Set(waIdsRaw.map((value) => String(value || "").trim()).filter(Boolean)));
+      const value = String(req.body?.value || "").trim();
+
+      if (!operation) return res.status(400).json({ ok: false, error: "operation required" });
+      if (!waIds.length) return res.status(400).json({ ok: false, error: "waIds required" });
+
+      const plans = await listPlans({ includeInactive: true });
+      const planMap = buildPlanMap(plans);
+      const normalizedPlan = String(value || "").trim().toUpperCase();
+      const allowedStatus = new Set(["TRIAL", "ACTIVE", "WAIT_PLAN", "PAYMENT_PENDING", "BLOCKED"]);
+      const normalizedStatus = String(value || "").trim().toUpperCase();
+
+      if (operation === "SET_PLAN" && normalizedPlan && !planMap.get(normalizedPlan)) {
+        return res.status(400).json({ ok: false, error: "invalid plan" });
+      }
+      if (operation === "SET_STATUS" && !allowedStatus.has(normalizedStatus)) {
+        return res.status(400).json({ ok: false, error: "invalid status" });
+      }
+
+      const results = [];
+
+      for (const waId of waIds) {
+        try {
+          const beforeUser = await getUserSnapshot(waId);
+          let summary = "";
+          let meta = { operation };
+
+          if (operation === "SET_STATUS") {
+            await setUserStatus(waId, normalizedStatus);
+            summary = `Alterou o status do usuário ${waId} para ${normalizedStatus}.`;
+            meta = { operation, status: normalizedStatus };
+          } else if (operation === "BLOCK_USERS") {
+            await setUserStatus(waId, "BLOCKED");
+            summary = `Bloqueou o usuário ${waId}.`;
+          } else if (operation === "UNBLOCK_TO_TRIAL") {
+            await resetUserToTrial(waId);
+            summary = `Desbloqueou o usuário ${waId} retornando para TRIAL.`;
+          } else if (operation === "SET_PLAN") {
+            await setUserPlan(waId, normalizedPlan);
+            summary = `Alterou o plano do usuário ${waId} para ${normalizedPlan}.`;
+            meta = { operation, plan: normalizedPlan };
+          } else if (operation === "CLEAR_PLAN") {
+            await setUserPlan(waId, "");
+            summary = `Removeu o plano salvo do usuário ${waId}.`;
+          } else if (operation === "RESET_TRIAL") {
+            await resetUserToTrial(waId);
+            summary = `Resetou o usuário ${waId} para o estado de trial.`;
+          } else if (operation === "CLEAR_QUOTA") {
+            await setUserQuotaUsed(waId, 0);
+            summary = `Zerou o uso mensal do usuário ${waId}.`;
+          } else if (operation === "CLEAR_TRIAL_USED") {
+            await setUserTrialUsed(waId, 0);
+            summary = `Zerou o uso de trial do usuário ${waId}.`;
+          } else {
+            return res.status(400).json({ ok: false, error: "unsupported operation" });
+          }
+
+          const afterUser = await getUserSnapshot(waId);
+          await safeRecordAdminAudit(req, {
+            module: "bulk",
+            action: operation,
+            waId,
+            targetId: waId,
+            summary,
+            before: buildAuditUserSnapshot(beforeUser),
+            after: buildAuditUserSnapshot(afterUser),
+            meta,
+          });
+
+          results.push({ ok: true, waId, before: buildAuditUserSnapshot(beforeUser), after: buildAuditUserSnapshot(afterUser) });
+        } catch (err) {
+          results.push({ ok: false, waId, error: String(err?.message || err) });
+        }
+      }
+
+      return res.status(200).json({
+        ok: true,
+        operation,
+        requested: waIds.length,
+        successCount: results.filter((item) => item.ok).length,
+        errorCount: results.filter((item) => !item.ok).length,
+        results,
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  router.get("/bulk-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">🧰 Ações em massa</h3>
+            <div class="muted">Selecione usuários filtrados e aplique operações em lote com segurança.</div>
+          </div>
+          <div class="row">
+            <a class="pill" href="/admin/crm-ui">CRM</a>
+            <a class="pill" href="/admin/users-list-ui">Lista simples</a>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="grid cols3">
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Busca</div>
+            <input id="bulkQ" placeholder="Nome, waId, plano, cidade ou pagamento..." />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Status</div>
+            <select id="bulkStatus">
+              <option value="ALL">Todos</option>
+              <option value="TRIAL">TRIAL</option>
+              <option value="ACTIVE">ACTIVE</option>
+              <option value="WAIT_PLAN">WAIT_PLAN</option>
+              <option value="PAYMENT_PENDING">PAYMENT_PENDING</option>
+              <option value="BLOCKED">BLOCKED</option>
+            </select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Plano</div>
+            <select id="bulkPlanFilter"><option value="ALL">Todos</option></select>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <input id="bulkLimit" type="number" min="1" max="500" value="200" style="width:120px;" />
+          <button class="primary" type="button" id="bulkReloadBtn">Atualizar</button>
+          <button type="button" id="bulkResetBtn">Limpar filtros</button>
+          <button type="button" id="bulkSelectFilteredBtn">Selecionar filtrados</button>
+          <button type="button" id="bulkClearSelectionBtn">Limpar seleção</button>
+          <div id="bulkMeta" class="muted" style="margin-left:auto;"></div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="card pad" style="margin-bottom:14px;">
+          <div class="row" style="justify-content:space-between; gap:12px;">
+            <div>
+              <h4 style="margin:0;">Operação em lote</h4>
+              <div class="muted">Tudo que for executado aqui impactará todos os usuários selecionados.</div>
+            </div>
+            <div class="pill">Selecionados: <b id="bulkSelectedCount">0</b></div>
+          </div>
+          <div class="hr"></div>
+          <div class="grid cols3">
+            <div>
+              <div class="muted" style="font-size:12px;margin-bottom:6px;">Ação</div>
+              <select id="bulkOperation">
+                <option value="SET_STATUS">Alterar status</option>
+                <option value="BLOCK_USERS">Bloquear usuários</option>
+                <option value="UNBLOCK_TO_TRIAL">Desbloquear para trial</option>
+                <option value="SET_PLAN">Alterar plano</option>
+                <option value="CLEAR_PLAN">Remover plano</option>
+                <option value="RESET_TRIAL">Resetar trial</option>
+                <option value="CLEAR_QUOTA">Zerar uso mensal</option>
+                <option value="CLEAR_TRIAL_USED">Zerar uso do teste</option>
+              </select>
+            </div>
+            <div id="bulkStatusValueWrap">
+              <div class="muted" style="font-size:12px;margin-bottom:6px;">Novo status</div>
+              <select id="bulkStatusValue">
+                <option value="TRIAL">TRIAL</option>
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="WAIT_PLAN">WAIT_PLAN</option>
+                <option value="PAYMENT_PENDING">PAYMENT_PENDING</option>
+                <option value="BLOCKED">BLOCKED</option>
+              </select>
+            </div>
+            <div id="bulkPlanValueWrap" style="display:none;">
+              <div class="muted" style="font-size:12px;margin-bottom:6px;">Novo plano</div>
+              <select id="bulkPlanValue"><option value="">Selecione...</option></select>
+            </div>
+          </div>
+          <div class="row" style="margin-top:12px;">
+            <button class="primary" type="button" id="bulkApplyBtn">Aplicar ação</button>
+            <div class="muted">As operações são registradas na auditoria administrativa.</div>
+          </div>
+        </div>
+
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:12px;">
+            <div>
+              <h4 style="margin:0;">Usuários filtrados</h4>
+              <div class="muted">Selecione os usuários na tabela antes de aplicar a operação.</div>
+            </div>
+          </div>
+          <div class="hr"></div>
+          <div style="overflow:auto;">
+            <table style="min-width:1040px;">
+              <thead>
+                <tr>
+                  <th><input id="bulkToggleVisible" type="checkbox" /></th>
+                  <th>Nome</th>
+                  <th>waId</th>
+                  <th>Status</th>
+                  <th>Plano</th>
+                  <th>Pagamento</th>
+                  <th>Janela 24h</th>
+                  <th>Inconsistências</th>
+                </tr>
+              </thead>
+              <tbody id="bulkTbody"><tr><td colspan="8" class="muted">Carregando...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card pad" style="margin-top:14px;">
+          <details>
+            <summary class="muted">Ver JSON da última execução</summary>
+            <pre id="bulkResult" style="white-space:pre-wrap; overflow:auto; max-height:360px;">{}</pre>
+          </details>
+        </div>
+      </div>
+    `;
+
+    const scriptExtra = `
+      <script>
+        document.addEventListener("DOMContentLoaded", function(){
+          const state = {
+            data: null,
+            selected: new Set(),
+          };
+
+          const els = {
+            q: document.getElementById("bulkQ"),
+            status: document.getElementById("bulkStatus"),
+            planFilter: document.getElementById("bulkPlanFilter"),
+            limit: document.getElementById("bulkLimit"),
+            reloadBtn: document.getElementById("bulkReloadBtn"),
+            resetBtn: document.getElementById("bulkResetBtn"),
+            selectFilteredBtn: document.getElementById("bulkSelectFilteredBtn"),
+            clearSelectionBtn: document.getElementById("bulkClearSelectionBtn"),
+            meta: document.getElementById("bulkMeta"),
+            selectedCount: document.getElementById("bulkSelectedCount"),
+            operation: document.getElementById("bulkOperation"),
+            statusValueWrap: document.getElementById("bulkStatusValueWrap"),
+            statusValue: document.getElementById("bulkStatusValue"),
+            planValueWrap: document.getElementById("bulkPlanValueWrap"),
+            planValue: document.getElementById("bulkPlanValue"),
+            applyBtn: document.getElementById("bulkApplyBtn"),
+            tbody: document.getElementById("bulkTbody"),
+            result: document.getElementById("bulkResult"),
+            toggleVisible: document.getElementById("bulkToggleVisible"),
+          };
+
+          function esc(value){
+            return String(value ?? "")
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;")
+              .replace(/"/g, "&quot;")
+              .replace(/'/g, "&#39;");
+          }
+
+          function fmtTs(ts){
+            if (!ts) return "—";
+            const d = new Date(Number(ts));
+            if (Number.isNaN(d.getTime())) return "—";
+            return d.toLocaleString("pt-BR");
+          }
+
+          function windowLabel(user){
+            if (!user || !user.lastInboundTs) return "—";
+            return user.inWindow ? ("Ativa até " + fmtTs(user.windowExpiresAt)) : ("Fora (última em " + fmtTs(user.lastInboundTs) + ")");
+          }
+
+          function setResult(value){
+            if (els.result) els.result.textContent = JSON.stringify(value ?? {}, null, 2);
+          }
+
+          async function fetchJson(url, opt){
+            const response = await fetch(url, opt);
+            const json = await response.json().catch(function(){ return {}; });
+            return { response, json };
+          }
+
+          function buildQuery(){
+            const params = new URLSearchParams();
+            const q = String(els.q?.value || "").trim();
+            const status = String(els.status?.value || "ALL").trim();
+            const plan = String(els.planFilter?.value || "ALL").trim();
+            const limit = String(els.limit?.value || "200").trim();
+            if (q) params.set("q", q);
+            if (status) params.set("status", status);
+            if (plan) params.set("plan", plan);
+            if (limit) params.set("limit", limit);
+            return params.toString();
+          }
+
+          function syncSelectionCounter(){
+            if (els.selectedCount) els.selectedCount.textContent = String(state.selected.size);
+          }
+
+          function syncActionInputs(){
+            const op = String(els.operation?.value || "").trim().toUpperCase();
+            if (els.statusValueWrap) els.statusValueWrap.style.display = op === "SET_STATUS" ? "block" : "none";
+            if (els.planValueWrap) els.planValueWrap.style.display = op === "SET_PLAN" ? "block" : "none";
+          }
+
+          function fillPlanOptions(plans){
+            const list = Array.isArray(plans) ? plans : [];
+            const options = ['<option value="ALL">Todos</option>'].concat(list.map(function(code){ return '<option value="' + esc(code) + '">' + esc(code) + '</option>'; }));
+            if (els.planFilter) els.planFilter.innerHTML = options.join("");
+            if (els.planValue) {
+              els.planValue.innerHTML = '<option value="">Selecione...</option>' + list.map(function(code){ return '<option value="' + esc(code) + '">' + esc(code) + '</option>'; }).join("");
+            }
+          }
+
+          function renderRows(items){
+            if (!els.tbody) return;
+            const rows = Array.isArray(items) ? items : [];
+            if (!rows.length) {
+              els.tbody.innerHTML = '<tr><td colspan="8" class="muted">Nenhum usuário encontrado.</td></tr>';
+              return;
+            }
+            els.tbody.innerHTML = rows.map(function(user){
+              const waId = String(user?.waId || "").trim();
+              const checked = state.selected.has(waId) ? ' checked' : '';
+              const issues = Number(user?.issueCount || 0);
+              const issueBadge = issues > 0 ? '<span class="badge warn">' + esc(issues) + '</span>' : '<span class="badge ok">0</span>';
+              return '<tr>' +
+                '<td><input type="checkbox" data-action="toggle-user" data-waid="' + esc(waId) + '"' + checked + ' /></td>' +
+                '<td><b>' + esc(user?.fullName || '—') + '</b></td>' +
+                '<td><code>' + esc(waId) + '</code></td>' +
+                '<td>' + esc(user?.status || '—') + '</td>' +
+                '<td>' + esc(user?.plan || '—') + '</td>' +
+                '<td>' + esc(user?.paymentMethod || '—') + '</td>' +
+                '<td>' + esc(windowLabel(user)) + '</td>' +
+                '<td>' + issueBadge + '</td>' +
+              '</tr>';
+            }).join("");
+          }
+
+          async function loadBulk(){
+            if (els.tbody) els.tbody.innerHTML = '<tr><td colspan="8" class="muted">Carregando...</td></tr>';
+            const out = await fetchJson('/admin/bulk/list?' + buildQuery());
+            setResult(out.json);
+            if (!out.response.ok || !out.json.ok) {
+              if (els.tbody) els.tbody.innerHTML = '<tr><td colspan="8" class="muted">Erro ao carregar usuários.</td></tr>';
+              return;
+            }
+            state.data = out.json;
+            fillPlanOptions(out.json.availablePlans || []);
+            renderRows(out.json.items || []);
+            if (els.meta) els.meta.textContent = String(out.json.filteredCount || 0) + ' filtrados • Base: ' + String(out.json.totalUsers || 0);
+            syncSelectionCounter();
+          }
+
+          async function applyBulk(){
+            const waIds = Array.from(state.selected.values());
+            if (!waIds.length) {
+              alert('Selecione pelo menos um usuário.');
+              return;
+            }
+            const operation = String(els.operation?.value || '').trim().toUpperCase();
+            let value = '';
+            if (operation === 'SET_STATUS') value = String(els.statusValue?.value || '').trim();
+            if (operation === 'SET_PLAN') value = String(els.planValue?.value || '').trim();
+            if (operation === 'SET_PLAN' && !value) {
+              alert('Selecione um plano.');
+              return;
+            }
+            const out = await fetchJson('/admin/bulk/apply', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ operation, waIds, value }),
+            });
+            setResult(out.json);
+            if (!out.response.ok || !out.json.ok) {
+              alert('Falha ao executar a ação em massa.');
+              return;
+            }
+            await loadBulk();
+          }
+
+          if (els.reloadBtn) els.reloadBtn.addEventListener('click', loadBulk);
+          if (els.resetBtn) els.resetBtn.addEventListener('click', function(){
+            if (els.q) els.q.value = '';
+            if (els.status) els.status.value = 'ALL';
+            if (els.planFilter) els.planFilter.value = 'ALL';
+            if (els.limit) els.limit.value = '200';
+            loadBulk();
+          });
+          if (els.selectFilteredBtn) els.selectFilteredBtn.addEventListener('click', function(){
+            const items = Array.isArray(state.data?.items) ? state.data.items : [];
+            items.forEach(function(user){
+              const waId = String(user?.waId || '').trim();
+              if (waId) state.selected.add(waId);
+            });
+            renderRows(items);
+            syncSelectionCounter();
+          });
+          if (els.clearSelectionBtn) els.clearSelectionBtn.addEventListener('click', function(){
+            state.selected.clear();
+            renderRows(state.data?.items || []);
+            syncSelectionCounter();
+          });
+          if (els.operation) els.operation.addEventListener('change', syncActionInputs);
+          if (els.applyBtn) els.applyBtn.addEventListener('click', applyBulk);
+          if (els.toggleVisible) els.toggleVisible.addEventListener('change', function(ev){
+            const checked = !!ev.target.checked;
+            const items = Array.isArray(state.data?.items) ? state.data.items : [];
+            items.forEach(function(user){
+              const waId = String(user?.waId || '').trim();
+              if (!waId) return;
+              if (checked) state.selected.add(waId);
+              else state.selected.delete(waId);
+            });
+            renderRows(items);
+            syncSelectionCounter();
+          });
+          if (els.tbody) els.tbody.addEventListener('change', function(ev){
+            const target = ev.target;
+            if (!(target instanceof HTMLInputElement)) return;
+            if (target.getAttribute('data-action') !== 'toggle-user') return;
+            const waId = String(target.getAttribute('data-waid') || '').trim();
+            if (!waId) return;
+            if (target.checked) state.selected.add(waId);
+            else state.selected.delete(waId);
+            syncSelectionCounter();
+          });
+
+          syncActionInputs();
+          loadBulk();
+        });
+      </script>
+    `;
+
+    const html = layoutBase({
+      title: "Ações em Massa",
+      activePath: "/admin/bulk-ui",
+      content: inner,
+      scriptExtra,
+    });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
   });
 
   router.get("/crm-ui", async (req, res) => {
