@@ -230,7 +230,7 @@ function layoutBase({ title, activePath = "/admin", content = "", headExtra = ""
 
 function renderSidebar(activePath){
   const ap = String(activePath||"");
-  const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h");
+  const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
   const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
 
@@ -267,6 +267,7 @@ function renderSidebar(activePath){
 
       <details ${usersOpen ? "open" : ""}>
         <summary>👥 Usuários <span>▾</span></summary>
+        ${item("/admin/crm-ui", "CRM de usuários", "🧭")}
         ${item("/admin/users-list-ui", "Lista de usuários", "📋")}
         ${item("/admin/users-ui", "Ações / Consulta", "👤")}
         ${item("/admin/window24h-ui", "Janela 24h", "🕒")}
@@ -462,11 +463,8 @@ export function adminRouter() {
     return { label, severity, description, count: 0, items: [] };
   }
 
-  async function collectInconsistencies() {
-    const usersRaw = await listUsers();
-    const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
-    const plans = await listPlans({ includeInactive: true });
-    const planMap = new Map(
+  function buildPlanMap(plans) {
+    return new Map(
       (Array.isArray(plans) ? plans : [])
         .map((plan) => {
           const code = String(plan?.code || "").trim().toUpperCase();
@@ -474,6 +472,100 @@ export function adminRouter() {
         })
         .filter(Boolean)
     );
+  }
+
+  function getCrmStatusCounters() {
+    return {
+      TRIAL: 0,
+      ACTIVE: 0,
+      WAIT_PLAN: 0,
+      PAYMENT_PENDING: 0,
+      BLOCKED: 0,
+      UNKNOWN: 0,
+    };
+  }
+
+  function detectUserInconsistencyKeys(snap, lastInboundTs, now, planMap) {
+    const keys = [];
+    const status = String(snap?.status || "").trim().toUpperCase();
+    const planCode = String(snap?.plan || "").trim().toUpperCase();
+    const paymentMethod = String(snap?.paymentMethod || "").trim().toUpperCase();
+    const asaasCustomerId = String(snap?.asaasCustomerId || "").trim();
+    const asaasSubscriptionId = String(snap?.asaasSubscriptionId || "").trim();
+    const fullName = String(snap?.fullName || "").trim();
+    const quotaUsed = Number(snap?.quotaUsed || 0);
+    const trialUsed = Number(snap?.trialUsed || 0);
+    const planMeta = planCode ? planMap.get(planCode) : null;
+    const hasPendingBizProfile = !!(snap?.pendingBizProfile && typeof snap.pendingBizProfile === "object");
+
+    if (status === "ACTIVE" && !planCode) keys.push("activeWithoutPlan");
+    if (status === "TRIAL" && planCode) keys.push("trialWithPlan");
+    if (planCode && !planMeta) keys.push("planNotFound");
+    if (planMeta && !planMeta.active) keys.push("inactivePlanInUse");
+    if (paymentMethod && !asaasCustomerId) keys.push("paymentWithoutCustomer");
+    if (asaasSubscriptionId && !asaasCustomerId) keys.push("subscriptionWithoutCustomer");
+    if (status === "ACTIVE" && !asaasSubscriptionId) keys.push("activeWithoutSubscription");
+    if (quotaUsed < 0) keys.push("quotaNegative");
+    if (trialUsed < 0) keys.push("trialNegative");
+    if (status === "TRIAL" && quotaUsed > 0) keys.push("trialWithQuota");
+    if (!fullName) keys.push("noName");
+    if (lastInboundTs > now) keys.push("futureInbound");
+    if (status === "WAIT_PLAN" && asaasSubscriptionId) keys.push("waitPlanWithSubscription");
+    if (snap?.cardCanceledAt && !snap?.cardValidUntil) keys.push("cardCanceledWithoutValidUntil");
+    if (hasPendingBizProfile) keys.push("pendingBizProfile");
+
+    return keys;
+  }
+
+  async function enrichUserForCrm(waId, planMap, now) {
+    const [snap, lastInboundTsRaw] = await Promise.all([
+      getUserSnapshot(waId),
+      getLastInboundTs(waId),
+    ]);
+
+    const lastInboundTs = Number(lastInboundTsRaw || 0);
+    const windowExpiresAt = lastInboundTs ? lastInboundTs + 24 * 60 * 60 * 1000 : 0;
+    const inWindow = lastInboundTs ? now - lastInboundTs < 24 * 60 * 60 * 1000 : false;
+    const planCode = String(snap?.plan || "").trim().toUpperCase();
+    const planMeta = planCode ? planMap.get(planCode) : null;
+    const issueKeys = detectUserInconsistencyKeys(snap, lastInboundTs, now, planMap);
+
+    return {
+      waId: String(waId || ""),
+      fullName: String(snap?.fullName || ""),
+      status: String(snap?.status || ""),
+      plan: String(snap?.plan || ""),
+      planName: String(planMeta?.name || ""),
+      planDescription: String(planMeta?.description || ""),
+      paymentMethod: String(snap?.paymentMethod || ""),
+      quotaUsed: Number(snap?.quotaUsed || 0),
+      trialUsed: Number(snap?.trialUsed || 0),
+      templateMode: String(snap?.templateMode || ""),
+      billingCityState: String(snap?.billingCityState || ""),
+      billingAddress: String(snap?.billingAddress || ""),
+      asaasCustomerId: String(snap?.asaasCustomerId || ""),
+      asaasSubscriptionId: String(snap?.asaasSubscriptionId || ""),
+      cardValidUntil: String(snap?.cardValidUntil || ""),
+      cardCanceledAt: String(snap?.cardCanceledAt || ""),
+      doc: snap?.doc || { docType: "", docLast4: "" },
+      bizProfile: snap?.bizProfile || null,
+      pendingBizProfile: snap?.pendingBizProfile || null,
+      hasBizProfile: !!(snap?.bizProfile && typeof snap.bizProfile === "object"),
+      hasPendingBizProfile: !!(snap?.pendingBizProfile && typeof snap.pendingBizProfile === "object"),
+      inWindow,
+      lastInboundTs,
+      windowExpiresAt,
+      issueKeys,
+      issueCount: issueKeys.length,
+      snapshot: snap,
+    };
+  }
+
+  async function collectInconsistencies() {
+    const usersRaw = await listUsers();
+    const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
+    const plans = await listPlans({ includeInactive: true });
+    const planMap = buildPlanMap(plans);
 
     const buckets = {
       activeWithoutPlan: buildInconsistencyBucket("Assinante sem plano", "danger", "Usuário está ativo, mas não tem nenhum plano salvo."),
@@ -516,38 +608,20 @@ export function adminRouter() {
     const now = nowMs();
 
     await mapLimit(waIds, 20, async (waId) => {
-      const [snap, lastInboundTsRaw] = await Promise.all([
-        getUserSnapshot(waId),
-        getLastInboundTs(waId),
-      ]);
+      const user = await enrichUserForCrm(waId, planMap, now);
+      const snap = user.snapshot || {};
+      const planMeta = user.plan ? planMap.get(String(user.plan || "").trim().toUpperCase()) : null;
 
-      const status = String(snap?.status || "").trim().toUpperCase();
-      const planCode = String(snap?.plan || "").trim().toUpperCase();
-      const paymentMethod = String(snap?.paymentMethod || "").trim().toUpperCase();
-      const asaasCustomerId = String(snap?.asaasCustomerId || "").trim();
-      const asaasSubscriptionId = String(snap?.asaasSubscriptionId || "").trim();
-      const fullName = String(snap?.fullName || "").trim();
-      const quotaUsed = Number(snap?.quotaUsed || 0);
-      const trialUsed = Number(snap?.trialUsed || 0);
-      const lastInboundTs = Number(lastInboundTsRaw || 0);
-      const planMeta = planCode ? planMap.get(planCode) : null;
-      const hasPendingBizProfile = !!(snap?.pendingBizProfile && typeof snap.pendingBizProfile === "object");
-
-      if (status === "ACTIVE" && !planCode) pushIssue("activeWithoutPlan", snap);
-      if (status === "TRIAL" && planCode) pushIssue("trialWithPlan", snap);
-      if (planCode && !planMeta) pushIssue("planNotFound", snap);
-      if (planMeta && !planMeta.active) pushIssue("inactivePlanInUse", snap, { planName: String(planMeta.name || "") });
-      if (paymentMethod && !asaasCustomerId) pushIssue("paymentWithoutCustomer", snap);
-      if (asaasSubscriptionId && !asaasCustomerId) pushIssue("subscriptionWithoutCustomer", snap);
-      if (status === "ACTIVE" && !asaasSubscriptionId) pushIssue("activeWithoutSubscription", snap);
-      if (quotaUsed < 0) pushIssue("quotaNegative", snap);
-      if (trialUsed < 0) pushIssue("trialNegative", snap);
-      if (status === "TRIAL" && quotaUsed > 0) pushIssue("trialWithQuota", snap);
-      if (!fullName) pushIssue("noName", snap);
-      if (lastInboundTs > now) pushIssue("futureInbound", snap, { lastInboundTs, nowMs: now });
-      if (status === "WAIT_PLAN" && asaasSubscriptionId) pushIssue("waitPlanWithSubscription", snap);
-      if (snap?.cardCanceledAt && !snap?.cardValidUntil) pushIssue("cardCanceledWithoutValidUntil", snap);
-      if (hasPendingBizProfile) pushIssue("pendingBizProfile", snap, { pendingKeys: Object.keys(snap.pendingBizProfile || {}) });
+      for (const key of user.issueKeys || []) {
+        const extra = {};
+        if (key === "inactivePlanInUse") extra.planName = String(planMeta?.name || "");
+        if (key === "futureInbound") {
+          extra.lastInboundTs = user.lastInboundTs;
+          extra.nowMs = now;
+        }
+        if (key === "pendingBizProfile") extra.pendingKeys = Object.keys(snap.pendingBizProfile || {});
+        pushIssue(key, snap, extra);
+      }
     });
 
     const summary = Object.entries(buckets).map(([key, bucket]) => ({
@@ -2069,6 +2143,464 @@ async function toggle(code, active){
       </script>
     `;
     const html = layoutBase({ title: "Alertas", activePath: "/admin/alerts-ui", content: inner });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  router.get("/crm/list", async (req, res) => {
+    try {
+      const q = String(req.query?.q || "").trim().toLowerCase();
+      const statusFilter = String(req.query?.status || "ALL").trim().toUpperCase();
+      const planFilter = String(req.query?.plan || "ALL").trim().toUpperCase();
+      const paymentFilter = String(req.query?.paymentMethod || "ALL").trim().toUpperCase();
+      const hasName = String(req.query?.hasName || "ALL").trim().toUpperCase();
+      const hasSubscription = String(req.query?.hasSubscription || "ALL").trim().toUpperCase();
+      const hasBizProfile = String(req.query?.hasBizProfile || "ALL").trim().toUpperCase();
+      const hasInconsistency = String(req.query?.hasInconsistency || "ALL").trim().toUpperCase();
+      const inWindowFilter = String(req.query?.inWindow || "ALL").trim().toUpperCase();
+      const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 200) || 200));
+
+      const usersRaw = await listUsers();
+      const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
+      const plans = await listPlans({ includeInactive: true });
+      const planMap = buildPlanMap(plans);
+      const now = nowMs();
+
+      const enriched = await mapLimit(waIds, 20, async (waId) => enrichUserForCrm(waId, planMap, now));
+      const validItems = Array.isArray(enriched) ? enriched.filter((item) => item && !item.__error) : [];
+      const statusSummary = getCrmStatusCounters();
+
+      for (const item of validItems) {
+        const st = String(item?.status || "").trim().toUpperCase() || "UNKNOWN";
+        if (statusSummary[st] === undefined) statusSummary.UNKNOWN++;
+        else statusSummary[st]++;
+      }
+
+      const filtered = validItems.filter((item) => {
+        if (!item) return false;
+        if (q) {
+          const hay = [item.waId, item.fullName, item.plan, item.planName, item.billingCityState].join(" ").toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        if (statusFilter !== "ALL" && String(item.status || "").toUpperCase() !== statusFilter) return false;
+        if (planFilter !== "ALL" && String(item.plan || "").toUpperCase() !== planFilter) return false;
+        if (paymentFilter !== "ALL" && String(item.paymentMethod || "").toUpperCase() !== paymentFilter) return false;
+        if (hasName === "YES" && !String(item.fullName || "").trim()) return false;
+        if (hasName === "NO" && String(item.fullName || "").trim()) return false;
+        if (hasSubscription === "YES" && !String(item.asaasSubscriptionId || "").trim()) return false;
+        if (hasSubscription === "NO" && String(item.asaasSubscriptionId || "").trim()) return false;
+        if (hasBizProfile === "YES" && !item.hasBizProfile) return false;
+        if (hasBizProfile === "NO" && item.hasBizProfile) return false;
+        if (hasInconsistency === "YES" && !(Number(item.issueCount || 0) > 0)) return false;
+        if (hasInconsistency === "NO" && Number(item.issueCount || 0) > 0) return false;
+        if (inWindowFilter === "YES" && !item.inWindow) return false;
+        if (inWindowFilter === "NO" && item.inWindow) return false;
+        return true;
+      });
+
+      const planCodes = Array.from(new Set(validItems.map((item) => String(item.plan || "").trim().toUpperCase()).filter(Boolean))).sort();
+
+      return res.status(200).json({
+        ok: true,
+        totalUsers: waIds.length,
+        filteredCount: filtered.length,
+        limit,
+        availablePlans: planCodes,
+        statusSummary,
+        items: filtered.slice(0, limit),
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  router.get("/crm/user", async (req, res) => {
+    try {
+      const waId = String(req.query?.waId || "").trim();
+      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+
+      const plans = await listPlans({ includeInactive: true });
+      const planMap = buildPlanMap(plans);
+      const user = await enrichUserForCrm(waId, planMap, nowMs());
+      return res.status(200).json({ ok: true, user });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  router.get("/crm-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">🧭 CRM de usuários</h3>
+            <div class="muted">Central única para localizar usuários, filtrar contas e abrir uma ficha completa com assinatura, uso, empresa e inconsistências.</div>
+          </div>
+          <div class="row">
+            <a class="pill" href="/admin/users-list-ui">Lista simples</a>
+            <a class="pill" href="/admin/users-ui">Ações por waId</a>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="grid cols3">
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Busca</div>
+            <input id="crmQ" placeholder="Nome, waId, plano ou cidade..." />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Status</div>
+            <select id="crmStatus">
+              <option value="ALL">Todos</option>
+              <option value="TRIAL">TRIAL</option>
+              <option value="ACTIVE">ACTIVE</option>
+              <option value="WAIT_PLAN">WAIT_PLAN</option>
+              <option value="PAYMENT_PENDING">PAYMENT_PENDING</option>
+              <option value="BLOCKED">BLOCKED</option>
+            </select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Plano</div>
+            <select id="crmPlan"><option value="ALL">Todos</option></select>
+          </div>
+        </div>
+
+        <div class="grid cols3" style="margin-top:12px;">
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Pagamento</div>
+            <select id="crmPayment">
+              <option value="ALL">Todos</option>
+              <option value="CARD">CARD</option>
+              <option value="PIX">PIX</option>
+            </select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Tem nome</div>
+            <select id="crmHasName">
+              <option value="ALL">Todos</option>
+              <option value="YES">Sim</option>
+              <option value="NO">Não</option>
+            </select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Tem assinatura Asaas</div>
+            <select id="crmHasSubscription">
+              <option value="ALL">Todos</option>
+              <option value="YES">Sim</option>
+              <option value="NO">Não</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid cols3" style="margin-top:12px;">
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Tem perfil da empresa</div>
+            <select id="crmHasBizProfile">
+              <option value="ALL">Todos</option>
+              <option value="YES">Sim</option>
+              <option value="NO">Não</option>
+            </select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Tem inconsistência</div>
+            <select id="crmHasInconsistency">
+              <option value="ALL">Todos</option>
+              <option value="YES">Sim</option>
+              <option value="NO">Não</option>
+            </select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;margin-bottom:6px;">Janela 24h ativa</div>
+            <select id="crmInWindow">
+              <option value="ALL">Todos</option>
+              <option value="YES">Sim</option>
+              <option value="NO">Não</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:12px;">
+          <input id="crmLimit" type="number" min="1" max="500" value="200" style="width:120px;" />
+          <button class="primary" type="button" onclick="loadCrm()">Atualizar</button>
+          <button type="button" onclick="resetCrmFilters()">Limpar filtros</button>
+          <div id="crmMeta" class="muted" style="margin-left:auto;"></div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="row" id="crmSummary" style="gap:8px; flex-wrap:wrap;"></div>
+
+        <div class="hr"></div>
+
+        <div class="grid cols2">
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;">
+              <h4 style="margin:0;">Usuários filtrados</h4>
+              <div class="muted">Clique em “Abrir ficha”.</div>
+            </div>
+            <div class="hr"></div>
+            <div style="overflow:auto;">
+              <table style="min-width:1000px;">
+                <thead>
+                  <tr>
+                    <th>Nome</th>
+                    <th>waId</th>
+                    <th>Status</th>
+                    <th>Plano</th>
+                    <th>Pagamento</th>
+                    <th>Janela 24h</th>
+                    <th>Inconsistências</th>
+                    <th>Ação</th>
+                  </tr>
+                </thead>
+                <tbody id="crmTbody">
+                  <tr><td colspan="8" class="muted">Carregando...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;">
+              <h4 style="margin:0;">Ficha do usuário</h4>
+              <div class="muted">Visão consolidada</div>
+            </div>
+            <div class="hr"></div>
+            <div id="crmDetail" class="muted">Selecione um usuário na tabela para abrir a ficha completa.</div>
+          </div>
+        </div>
+      </div>
+
+      <script>
+        (function(){
+          function esc(value){
+            return String(value ?? '')
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;');
+          }
+
+          function fmtTs(ts){
+            if (!ts) return '—';
+            const d = new Date(Number(ts));
+            if (Number.isNaN(d.getTime())) return '—';
+            return d.toLocaleString('pt-BR');
+          }
+
+          function fmtIssueCount(n){
+            const v = Number(n || 0);
+            if (v <= 0) return '<span class="badge ok">sem pendências</span>';
+            if (v === 1) return '<span class="badge warn">1 pendência</span>';
+            return '<span class="badge danger">' + esc(v) + ' pendências</span>';
+          }
+
+          function readFilters(){
+            return {
+              q: (document.getElementById('crmQ').value || '').trim(),
+              status: (document.getElementById('crmStatus').value || 'ALL').trim(),
+              plan: (document.getElementById('crmPlan').value || 'ALL').trim(),
+              paymentMethod: (document.getElementById('crmPayment').value || 'ALL').trim(),
+              hasName: (document.getElementById('crmHasName').value || 'ALL').trim(),
+              hasSubscription: (document.getElementById('crmHasSubscription').value || 'ALL').trim(),
+              hasBizProfile: (document.getElementById('crmHasBizProfile').value || 'ALL').trim(),
+              hasInconsistency: (document.getElementById('crmHasInconsistency').value || 'ALL').trim(),
+              inWindow: (document.getElementById('crmInWindow').value || 'ALL').trim(),
+              limit: (document.getElementById('crmLimit').value || '200').trim(),
+            };
+          }
+
+          async function fetchJson(url, opt){
+            const response = await fetch(url, opt);
+            const json = await response.json().catch(() => ({}));
+            return { response, json };
+          }
+
+          function buildQuery(){
+            const params = new URLSearchParams();
+            const filters = readFilters();
+            Object.keys(filters).forEach((key) => {
+              if (filters[key] && filters[key] !== 'ALL') params.set(key, filters[key]);
+              if (key === 'limit') params.set(key, filters[key] || '200');
+            });
+            return params.toString();
+          }
+
+          function renderSummary(data){
+            const root = document.getElementById('crmSummary');
+            const st = data?.statusSummary || {};
+            const cards = [
+              ['Total filtrado', data?.filteredCount ?? 0],
+              ['Total base', data?.totalUsers ?? 0],
+              ['TRIAL', st.TRIAL ?? 0],
+              ['ACTIVE', st.ACTIVE ?? 0],
+              ['WAIT_PLAN', st.WAIT_PLAN ?? 0],
+              ['PAYMENT_PENDING', st.PAYMENT_PENDING ?? 0],
+              ['BLOCKED', st.BLOCKED ?? 0],
+            ];
+            root.innerHTML = cards.map((card) => '<span class="pill">' + esc(card[0]) + ': <b>' + esc(card[1]) + '</b></span>').join('');
+            document.getElementById('crmMeta').textContent = String(data?.filteredCount ?? 0) + ' usuário(s) exibidos';
+          }
+
+          function syncPlanOptions(plans){
+            const select = document.getElementById('crmPlan');
+            const current = (select.value || 'ALL').trim();
+            const opts = ['<option value="ALL">Todos</option>'];
+            (Array.isArray(plans) ? plans : []).forEach((plan) => {
+              opts.push('<option value="' + esc(plan) + '">' + esc(plan) + '</option>');
+            });
+            select.innerHTML = opts.join('');
+            if ([...select.options].some((opt) => opt.value === current)) select.value = current;
+          }
+
+          function renderTable(items){
+            const tbody = document.getElementById('crmTbody');
+            const rows = Array.isArray(items) ? items : [];
+            if (!rows.length) {
+              tbody.innerHTML = '<tr><td colspan="8" class="muted">Nenhum usuário encontrado para os filtros aplicados.</td></tr>';
+              return;
+            }
+            tbody.innerHTML = rows.map((user) => {
+              const planLabel = user.planName ? (user.plan + ' · ' + user.planName) : (user.plan || '—');
+              const win = user.inWindow ? ('Ativa até ' + fmtTs(user.windowExpiresAt)) : (user.lastInboundTs ? ('Fora desde ' + fmtTs(user.lastInboundTs)) : '—');
+              return '<tr>' +
+                '<td>' + esc(user.fullName || '—') + '</td>' +
+                '<td><code>' + esc(user.waId || '') + '</code></td>' +
+                '<td>' + esc(user.status || '—') + '</td>' +
+                '<td>' + esc(planLabel) + '</td>' +
+                '<td>' + esc(user.paymentMethod || '—') + '</td>' +
+                '<td>' + esc(win) + '</td>' +
+                '<td>' + fmtIssueCount(user.issueCount) + '</td>' +
+                '<td><button type="button" onclick="loadCrmUser('' + esc(user.waId || '') + '')">Abrir ficha</button></td>' +
+              '</tr>';
+            }).join('');
+          }
+
+          function renderDetail(user){
+            const root = document.getElementById('crmDetail');
+            if (!user) {
+              root.innerHTML = '<div class="muted">Usuário não encontrado.</div>';
+              return;
+            }
+
+            const doc = user.doc && user.doc.docType ? (user.doc.docType + ' • ' + (user.doc.docLast4 || '')) : '—';
+            const bizProfile = user.bizProfile ? '<pre style="white-space:pre-wrap;">' + esc(JSON.stringify(user.bizProfile, null, 2)) + '</pre>' : '<div class="muted">Nenhum perfil salvo.</div>';
+            const pendingBiz = user.pendingBizProfile ? '<pre style="white-space:pre-wrap;">' + esc(JSON.stringify(user.pendingBizProfile, null, 2)) + '</pre>' : '<div class="muted">Nenhum dado pendente.</div>';
+            const issues = Array.isArray(user.issueKeys) && user.issueKeys.length
+              ? '<div class="row" style="gap:6px; flex-wrap:wrap;">' + user.issueKeys.map((key) => '<span class="badge warn soft">' + esc(key) + '</span>').join('') + '</div>'
+              : '<span class="badge ok">Sem inconsistências</span>';
+
+            root.innerHTML = '' +
+              '<div class="row" style="justify-content:space-between; align-items:flex-start;">' +
+                '<div>' +
+                  '<h3 style="margin:0 0 6px 0;">' + esc(user.fullName || 'Sem nome') + '</h3>' +
+                  '<div class="muted"><code>' + esc(user.waId || '') + '</code></div>' +
+                '</div>' +
+                '<div class="row">' +
+                  '<a class="pill" href="/admin/users-ui?waId=' + encodeURIComponent(user.waId || '') + '">Ações</a>' +
+                  '<a class="pill" href="/admin/inconsistencies-ui">Inconsistências</a>' +
+                '</div>' +
+              '</div>' +
+              '<div class="hr"></div>' +
+              '<div class="grid cols2">' +
+                '<div class="kpi">' +
+                  '<div class="t">Conta</div>' +
+                  '<div class="muted">Status: <b>' + esc(user.status || '—') + '</b></div>' +
+                  '<div class="muted">Plano: <b>' + esc(user.plan || '—') + '</b></div>' +
+                  '<div class="muted">Nome do plano: <b>' + esc(user.planName || '—') + '</b></div>' +
+                  '<div class="muted">Template: <b>' + esc(user.templateMode || '—') + '</b></div>' +
+                '</div>' +
+                '<div class="kpi">' +
+                  '<div class="t">Uso</div>' +
+                  '<div class="muted">quotaUsed: <b>' + esc(user.quotaUsed) + '</b></div>' +
+                  '<div class="muted">trialUsed: <b>' + esc(user.trialUsed) + '</b></div>' +
+                  '<div class="muted">Janela 24h: <b>' + esc(user.inWindow ? 'Ativa' : 'Fora') + '</b></div>' +
+                  '<div class="muted">Última inbound: <b>' + esc(fmtTs(user.lastInboundTs)) + '</b></div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="hr"></div>' +
+              '<div class="grid cols2">' +
+                '<div class="kpi">' +
+                  '<div class="t">Cobrança</div>' +
+                  '<div class="muted">Pagamento: <b>' + esc(user.paymentMethod || '—') + '</b></div>' +
+                  '<div class="muted">Asaas Customer: <code>' + esc(user.asaasCustomerId || '—') + '</code></div>' +
+                  '<div class="muted">Asaas Subscription: <code>' + esc(user.asaasSubscriptionId || '—') + '</code></div>' +
+                  '<div class="muted">Cancelado em: <b>' + esc(user.cardCanceledAt || '—') + '</b></div>' +
+                  '<div class="muted">Válido até: <b>' + esc(user.cardValidUntil || '—') + '</b></div>' +
+                '</div>' +
+                '<div class="kpi">' +
+                  '<div class="t">Cadastro</div>' +
+                  '<div class="muted">Documento: <b>' + esc(doc) + '</b></div>' +
+                  '<div class="muted">Cidade/UF: <b>' + esc(user.billingCityState || '—') + '</b></div>' +
+                  '<div class="muted">Endereço: <b>' + esc(user.billingAddress || '—') + '</b></div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="hr"></div>' +
+              '<div><b>Inconsistências encontradas</b></div>' +
+              '<div style="margin-top:8px;">' + issues + '</div>' +
+              '<div class="hr"></div>' +
+              '<details open><summary><b>Perfil da empresa salvo</b></summary>' + bizProfile + '</details>' +
+              '<div class="hr"></div>' +
+              '<details><summary><b>Perfil da empresa pendente</b></summary>' + pendingBiz + '</details>' +
+              '<div class="hr"></div>' +
+              '<details><summary><b>JSON completo</b></summary><pre style="white-space:pre-wrap;">' + esc(JSON.stringify(user.snapshot || {}, null, 2)) + '</pre></details>';
+          }
+
+          async function loadCrm(){
+            const query = buildQuery();
+            const out = await fetchJson('/admin/crm/list?' + query);
+            if (!out.response.ok || !out.json.ok) {
+              document.getElementById('crmTbody').innerHTML = '<tr><td colspan="8" class="muted">Falha ao carregar CRM.</td></tr>';
+              document.getElementById('crmDetail').innerHTML = '<div class="muted">Falha ao carregar dados.</div>';
+              return;
+            }
+            syncPlanOptions(out.json.availablePlans);
+            renderSummary(out.json);
+            renderTable(out.json.items);
+          }
+
+          async function loadCrmUser(waId){
+            const out = await fetchJson('/admin/crm/user?waId=' + encodeURIComponent(waId));
+            if (!out.response.ok || !out.json.ok) {
+              document.getElementById('crmDetail').innerHTML = '<div class="muted">Falha ao carregar a ficha do usuário.</div>';
+              return;
+            }
+            renderDetail(out.json.user);
+          }
+
+          function resetCrmFilters(){
+            document.getElementById('crmQ').value = '';
+            document.getElementById('crmStatus').value = 'ALL';
+            document.getElementById('crmPlan').value = 'ALL';
+            document.getElementById('crmPayment').value = 'ALL';
+            document.getElementById('crmHasName').value = 'ALL';
+            document.getElementById('crmHasSubscription').value = 'ALL';
+            document.getElementById('crmHasBizProfile').value = 'ALL';
+            document.getElementById('crmHasInconsistency').value = 'ALL';
+            document.getElementById('crmInWindow').value = 'ALL';
+            document.getElementById('crmLimit').value = '200';
+            loadCrm();
+          }
+
+          window.loadCrm = loadCrm;
+          window.loadCrmUser = loadCrmUser;
+          window.resetCrmFilters = resetCrmFilters;
+
+          (function init(){
+            const p = new URLSearchParams(location.search);
+            const waId = (p.get('waId') || '').trim();
+            if (waId) document.getElementById('crmQ').value = waId;
+            loadCrm().then(() => {
+              if (waId) loadCrmUser(waId);
+            });
+          })();
+        })();
+      </script>
+    `;
+
+    const html = layoutBase({ title: "CRM de Usuários", activePath: "/admin/crm-ui", content: inner });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
