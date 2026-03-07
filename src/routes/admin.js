@@ -458,8 +458,8 @@ export function adminRouter() {
   }
 
 
-  function buildInconsistencyBucket(label, severity) {
-    return { label, severity, count: 0, items: [] };
+  function buildInconsistencyBucket(label, severity, description = "") {
+    return { label, severity, description, count: 0, items: [] };
   }
 
   async function collectInconsistencies() {
@@ -476,21 +476,21 @@ export function adminRouter() {
     );
 
     const buckets = {
-      activeWithoutPlan: buildInconsistencyBucket("ACTIVE sem plano", "danger"),
-      trialWithPlan: buildInconsistencyBucket("TRIAL com plano preenchido", "warn"),
-      planNotFound: buildInconsistencyBucket("Plano inexistente no catálogo", "danger"),
-      inactivePlanInUse: buildInconsistencyBucket("Plano inativo em uso", "warn"),
-      paymentWithoutCustomer: buildInconsistencyBucket("paymentMethod sem asaasCustomerId", "warn"),
-      subscriptionWithoutCustomer: buildInconsistencyBucket("asaasSubscriptionId sem asaasCustomerId", "danger"),
-      activeWithoutSubscription: buildInconsistencyBucket("ACTIVE sem assinatura Asaas", "danger"),
-      quotaNegative: buildInconsistencyBucket("quotaUsed negativo", "danger"),
-      trialNegative: buildInconsistencyBucket("trialUsed negativo", "danger"),
-      trialWithQuota: buildInconsistencyBucket("TRIAL com quotaUsed > 0", "warn"),
-      noName: buildInconsistencyBucket("Usuário sem nome", "info"),
-      futureInbound: buildInconsistencyBucket("lastInboundTs no futuro", "warn"),
-      waitPlanWithSubscription: buildInconsistencyBucket("WAIT_PLAN com assinatura criada", "warn"),
-      cardCanceledWithoutValidUntil: buildInconsistencyBucket("Cartão cancelado sem validade final", "warn"),
-      pendingBizProfile: buildInconsistencyBucket("Perfil da empresa pendente", "info"),
+      activeWithoutPlan: buildInconsistencyBucket("Assinante sem plano", "danger", "Usuário está ativo, mas não tem nenhum plano salvo."),
+      trialWithPlan: buildInconsistencyBucket("Trial com plano salvo", "warn", "Usuário ainda está no teste, mas já aparece com um plano preenchido."),
+      planNotFound: buildInconsistencyBucket("Plano não encontrado", "danger", "O plano salvo no usuário não existe mais no catálogo do sistema."),
+      inactivePlanInUse: buildInconsistencyBucket("Plano desativado em uso", "warn", "O usuário está vinculado a um plano que hoje está desativado."),
+      paymentWithoutCustomer: buildInconsistencyBucket("Pagamento sem cadastro Asaas", "warn", "Há forma de pagamento definida, mas falta o código do cliente no Asaas."),
+      subscriptionWithoutCustomer: buildInconsistencyBucket("Assinatura sem cliente Asaas", "danger", "Existe assinatura salva, mas não existe cliente correspondente no Asaas."),
+      activeWithoutSubscription: buildInconsistencyBucket("Assinante sem assinatura Asaas", "danger", "Usuário está ativo, mas não há assinatura registrada no Asaas."),
+      quotaNegative: buildInconsistencyBucket("Uso mensal negativo", "danger", "O contador de uso mensal ficou abaixo de zero, o que não deveria acontecer."),
+      trialNegative: buildInconsistencyBucket("Uso do trial negativo", "danger", "O contador de uso do teste ficou abaixo de zero, o que indica erro de dados."),
+      trialWithQuota: buildInconsistencyBucket("Trial usando quota de plano", "warn", "Usuário em teste aparece com consumo na quota mensal de assinante."),
+      noName: buildInconsistencyBucket("Usuário sem nome", "info", "Cadastro sem nome preenchido, o que dificulta suporte e cobrança."),
+      futureInbound: buildInconsistencyBucket("Mensagem com data futura", "warn", "A última mensagem recebida ficou registrada com horário no futuro."),
+      waitPlanWithSubscription: buildInconsistencyBucket("Aguardando plano com assinatura", "warn", "Usuário ainda está aguardando plano, mas já possui assinatura criada."),
+      cardCanceledWithoutValidUntil: buildInconsistencyBucket("Cancelado sem data final", "warn", "O cartão foi cancelado, mas não foi salva a data final de acesso."),
+      pendingBizProfile: buildInconsistencyBucket("Perfil da empresa pendente", "info", "Há dados da empresa aguardando confirmação ou finalização pelo usuário."),
     };
 
     function pushIssue(bucketKey, snap, extra = {}) {
@@ -554,6 +554,7 @@ export function adminRouter() {
       key,
       label: bucket.label,
       severity: bucket.severity,
+      description: bucket.description,
       count: bucket.count,
     }));
 
@@ -2134,10 +2135,11 @@ async function toggle(code, active){
             return;
           }
 
-          const html = '<table><thead><tr><th>Regra</th><th>Severidade</th><th>Quantidade</th></tr></thead><tbody>' +
+          const html = '<table><thead><tr><th>Item</th><th>Descrição</th><th>Nível</th><th>Quantidade</th></tr></thead><tbody>' +
             summary.map(item => {
               return '<tr>' +
-                '<td>' + esc(item.label || item.key || '') + '</td>' +
+                '<td><b>' + esc(item.label || item.key || '') + '</b></td>' +
+                '<td class="muted" style="max-width:520px; white-space:pre-wrap;">' + esc(item.description || '—') + '</td>' +
                 '<td><span class="badge ' + sevClass(item.severity) + '">' + esc(item.severity || 'info') + '</span></td>' +
                 '<td><b>' + esc(item.count || 0) + '</b></td>' +
               '</tr>';
@@ -2186,7 +2188,8 @@ async function toggle(code, active){
                 '<div><b>' + esc(item.label || item.key || '') + '</b></div>' +
                 '<span class="badge ' + sevClass(item.severity) + '">' + esc(item.count || 0) + '</span>' +
               '</div>' +
-              '<div class="muted" style="margin-top:6px;">Severidade: <b>' + esc(item.severity || 'info') + '</b></div>' +
+              '<div class="muted" style="margin-top:6px;">' + esc(item.description || '—') + '</div>' +
+              '<div class="muted" style="margin-top:6px;">Nível: <b>' + esc(item.severity || 'info') + '</b></div>' +
               '<div class="hr"></div>' +
               '<div style="overflow:auto;">' +
                 '<table style="min-width:760px;"><thead><tr><th>waId</th><th>Nome</th><th>Status</th><th>Plano</th><th>Detalhes</th></tr></thead><tbody>' + rows + '</tbody></table>' +
