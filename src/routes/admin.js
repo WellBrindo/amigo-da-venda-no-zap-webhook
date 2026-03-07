@@ -2352,41 +2352,48 @@ async function toggle(code, active){
 
         <div class="hr"></div>
 
-        <div class="grid cols2">
-          <div class="card pad">
-            <div class="row" style="justify-content:space-between;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:12px;">
+            <div>
               <h4 style="margin:0;">Usuários filtrados</h4>
-              <div class="muted">Use os filtros e abra a ficha ao lado.</div>
+              <div class="muted">Use os filtros para localizar a conta e abra a ficha completa em uma janela maior.</div>
             </div>
-            <div class="hr"></div>
-            <div style="overflow:auto;">
-              <table style="min-width:1000px;">
-                <thead>
-                  <tr>
-                    <th>Nome</th>
-                    <th>waId</th>
-                    <th>Status</th>
-                    <th>Plano</th>
-                    <th>Pagamento</th>
-                    <th>Janela 24h</th>
-                    <th>Inconsistências</th>
-                    <th>Ação</th>
-                  </tr>
-                </thead>
-                <tbody id="crmTbody">
-                  <tr><td colspan="8" class="muted">Carregando...</td></tr>
-                </tbody>
-              </table>
-            </div>
+            <div class="muted">A ficha agora abre em pop-up para não cortar o conteúdo.</div>
           </div>
+          <div class="hr"></div>
+          <div style="overflow:auto;">
+            <table style="min-width:1000px;">
+              <thead>
+                <tr>
+                  <th>Nome</th>
+                  <th>waId</th>
+                  <th>Status</th>
+                  <th>Plano</th>
+                  <th>Pagamento</th>
+                  <th>Janela 24h</th>
+                  <th>Inconsistências</th>
+                  <th>Ação</th>
+                </tr>
+              </thead>
+              <tbody id="crmTbody">
+                <tr><td colspan="8" class="muted">Carregando...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
 
-          <div class="card pad">
-            <div class="row" style="justify-content:space-between;">
-              <h4 style="margin:0;">Ficha do usuário</h4>
-              <div class="muted">Visão consolidada</div>
+        <div id="crmModal" class="crm-modal" aria-hidden="true">
+          <div class="crm-modal-backdrop" data-action="close-crm-modal"></div>
+          <div class="crm-modal-panel" role="dialog" aria-modal="true" aria-labelledby="crmModalTitle">
+            <div class="crm-modal-header">
+              <div>
+                <h4 id="crmModalTitle" style="margin:0;">Ficha do usuário</h4>
+                <div class="muted">Visão consolidada da conta</div>
+              </div>
+              <button type="button" id="crmCloseModalBtn">Fechar</button>
             </div>
             <div class="hr"></div>
-            <div id="crmDetail" class="muted">Selecione um usuário na tabela para abrir a ficha completa.</div>
+            <div id="crmDetail" class="crm-modal-body muted">Selecione um usuário na tabela para abrir a ficha completa.</div>
           </div>
         </div>
       </div>
@@ -2416,6 +2423,9 @@ async function toggle(code, active){
             summary: document.getElementById("crmSummary"),
             tbody: document.getElementById("crmTbody"),
             detail: document.getElementById("crmDetail"),
+            modal: document.getElementById("crmModal"),
+            modalTitle: document.getElementById("crmModalTitle"),
+            closeModalBtn: document.getElementById("crmCloseModalBtn"),
           };
 
           function esc(value){
@@ -2439,6 +2449,23 @@ async function toggle(code, active){
             if (v <= 0) return '<span class="badge ok">sem pendências</span>';
             if (v === 1) return '<span class="badge warn">1 pendência</span>';
             return '<span class="badge danger">' + esc(v) + ' pendências</span>';
+          }
+
+          function openDetailModal(title){
+            if (els.modalTitle) els.modalTitle.textContent = title || "Ficha do usuário";
+            if (els.modal) {
+              els.modal.classList.add("open");
+              els.modal.setAttribute("aria-hidden", "false");
+              document.body.style.overflow = "hidden";
+            }
+          }
+
+          function closeDetailModal(){
+            if (els.modal) {
+              els.modal.classList.remove("open");
+              els.modal.setAttribute("aria-hidden", "true");
+              document.body.style.overflow = "";
+            }
           }
 
           function readFilters(){
@@ -2535,6 +2562,7 @@ async function toggle(code, active){
           function renderDetail(user){
             if (!user) {
               els.detail.innerHTML = '<div class="muted">Usuário não encontrado.</div>';
+              openDetailModal("Ficha do usuário");
               return;
             }
 
@@ -2605,6 +2633,8 @@ async function toggle(code, active){
               '<details><summary><b>Perfil da empresa pendente</b></summary>' + pendingBiz + '</details>' +
               '<div class="hr"></div>' +
               '<details><summary><b>JSON completo</b></summary><pre style="white-space:pre-wrap;">' + esc(JSON.stringify(user.snapshot || {}, null, 2)) + '</pre></details>';
+
+            openDetailModal(user.fullName || user.waId || "Ficha do usuário");
           }
 
           async function loadCrm(){
@@ -2626,6 +2656,7 @@ async function toggle(code, active){
             const out = await fetchJson("/admin/crm/user?waId=" + encodeURIComponent(waId));
             if (!out.response.ok || !out.json.ok) {
               els.detail.innerHTML = '<div class="muted">Falha ao carregar a ficha do usuário.</div>';
+              openDetailModal("Ficha do usuário");
               return;
             }
             renderDetail(out.json.user);
@@ -2658,6 +2689,19 @@ async function toggle(code, active){
               loadCrmUser(button.getAttribute("data-wa-id") || "");
             });
           }
+          if (els.modal) {
+            els.modal.addEventListener("click", function(ev){
+              if (ev.target.closest("[data-action='close-crm-modal']")) {
+                closeDetailModal();
+              }
+            });
+          }
+          if (els.closeModalBtn) {
+            els.closeModalBtn.addEventListener("click", closeDetailModal);
+          }
+          document.addEventListener("keydown", function(ev){
+            if (ev.key === "Escape") closeDetailModal();
+          });
 
           const params = new URLSearchParams(window.location.search);
           const waId = String(params.get("waId") || "").trim();
@@ -2670,10 +2714,30 @@ async function toggle(code, active){
       </script>
     `;
 
+    const headExtra = `
+      <style>
+        .crm-modal{ position:fixed; inset:0; display:none; align-items:center; justify-content:center; padding:24px; z-index:60; }
+        .crm-modal.open{ display:flex; }
+        .crm-modal-backdrop{ position:absolute; inset:0; background:rgba(15,23,42,.55); }
+        .crm-modal-panel{ position:relative; width:min(1120px, calc(100vw - 32px)); max-height:calc(100vh - 48px); overflow:auto; background:#fff; border:1px solid var(--border); border-radius:18px; box-shadow:0 20px 48px rgba(15,23,42,.22); padding:18px; }
+        .crm-modal-header{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; position:sticky; top:0; background:#fff; padding-bottom:4px; z-index:1; }
+        .crm-modal-body{ min-height:120px; }
+        .crm-modal-panel .grid.cols2{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .crm-modal-panel pre{ max-width:100%; overflow:auto; background:#f8fafc; border:1px solid var(--border); border-radius:12px; padding:12px; }
+        @media (max-width: 980px){
+          .crm-modal{ padding:12px; }
+          .crm-modal-panel{ width:calc(100vw - 24px); max-height:calc(100vh - 24px); padding:14px; }
+          .crm-modal-panel .grid.cols2{ grid-template-columns:1fr; }
+          .crm-modal-header{ position:static; }
+        }
+      </style>
+    `;
+
     const html = layoutBase({
       title: "CRM de Usuários",
       activePath: "/admin/crm-ui",
       content: inner,
+      headExtra,
       scriptExtra,
     });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
