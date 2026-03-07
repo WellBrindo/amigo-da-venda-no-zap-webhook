@@ -61,6 +61,7 @@ import { listPayments, getSubscription, cancelSubscription } from "../services/a
 import { listAsaasEvents } from "../services/asaas/ledger.js";
 
 import { redisGet, redisSet, redisDel } from "../services/redis.js";
+import { logAdminAudit, listAdminAudit, getAdminAuditCount } from "../services/audit.js";
 
 
 function escapeHtml(s) {
@@ -232,7 +233,7 @@ function renderSidebar(activePath){
   const ap = String(activePath||"");
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
-  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
+  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
 
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
@@ -281,6 +282,7 @@ function renderSidebar(activePath){
       <details ${systemOpen ? "open" : ""}>
         <summary>⚙️ Sistema <span>▾</span></summary>
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
+        ${item("/admin/audit-ui", "Auditoria administrativa", "📚")}
         ${item("/admin/inconsistencies-ui", "Inconsistências", "🩺")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
         ${item("/admin/settings-ui", "Configurações Globais", "🛠️")}
@@ -423,6 +425,70 @@ function groupGlobalSettings(rows) {
     groups.get(section).push(row);
   }
   return Array.from(groups.entries()).map(([section, items]) => ({ section, items }));
+}
+
+function limitText(value, max = 240) {
+  const s = String(value ?? "").trim();
+  if (!s) return "";
+  return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+function parseBasicAuthUser(req) {
+  const auth = String(req?.headers?.authorization || "").trim();
+  if (!auth.startsWith("Basic ")) return "admin";
+  try {
+    const decoded = Buffer.from(auth.slice(6), "base64").toString("utf8");
+    const username = String(decoded.split(":")[0] || "").trim();
+    return username || "admin";
+  } catch (_) {
+    return "admin";
+  }
+}
+
+function getAdminActor(req) {
+  const xfwd = String(req?.headers?.["x-forwarded-for"] || "").split(",")[0].trim();
+  const ip = xfwd || String(req?.ip || req?.socket?.remoteAddress || "").trim() || "unknown";
+  const userAgent = limitText(req?.headers?.["user-agent"] || "", 180);
+  return {
+    type: "admin",
+    user: parseBasicAuthUser(req),
+    ip,
+    userAgent,
+  };
+}
+
+function buildAuditUserSnapshot(user) {
+  const u = user || {};
+  return {
+    waId: String(u.waId || "").trim(),
+    status: String(u.status || "").trim(),
+    plan: String(u.plan || "").trim(),
+    fullName: String(u.fullName || "").trim(),
+    paymentMethod: String(u.paymentMethod || "").trim(),
+    quotaUsed: Number(u.quotaUsed || 0),
+    trialUsed: Number(u.trialUsed || 0),
+    asaasCustomerId: String(u.asaasCustomerId || "").trim(),
+    asaasSubscriptionId: String(u.asaasSubscriptionId || "").trim(),
+    cardValidUntil: String(u.cardValidUntil || "").trim(),
+    cardCanceledAt: String(u.cardCanceledAt || "").trim(),
+  };
+}
+
+async function safeRecordAdminAudit(req, entry) {
+  try {
+    await logAdminAudit({
+      ...entry,
+      actor: getAdminActor(req),
+    });
+  } catch (err) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      tag: "admin_audit_failed",
+      error: String(err?.message || err),
+      action: String(entry?.action || ""),
+      module: String(entry?.module || ""),
+    }));
+  }
 }
 
 export function adminRouter() {
@@ -1201,6 +1267,7 @@ router.get("/", async (req, res) => {
               <a class="pill" href="/health-redis">🧠 Health Redis</a>
               <a class="pill" href="/admin/health-plans">🧾 Health Planos (JSON)</a>
               <a class="pill" href="/admin/alerts-ui">🚨 Alertas</a>
+              <a class="pill" href="/admin/audit-ui">📚 Auditoria</a>
               <a class="pill" href="/admin/asaas-test-ui">🧪 Asaas Teste</a>
             </div>
             <div class="hr"></div>
@@ -1232,8 +1299,19 @@ router.get("/", async (req, res) => {
       const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
       if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
 
+      const beforeStored = await redisGet(settingRedisKey(def.key));
       const normalized = normalizeSettingValue(def, req.body?.value);
       await redisSet(settingRedisKey(def.key), serializeSettingValue(def, normalized));
+      await safeRecordAdminAudit(req, {
+        module: "settings",
+        action: "SET_GLOBAL_SETTING",
+        targetId: def.key,
+        targetLabel: def.label,
+        summary: `Atualizou a configuração global ${def.key}.`,
+        before: { storedValue: beforeStored },
+        after: { value: normalized },
+        meta: { key: def.key, type: def.type },
+      });
 
       return res.json({ ok: true, key: def.key, value: normalized });
     } catch (err) {
@@ -1247,7 +1325,18 @@ router.get("/", async (req, res) => {
       const def = GLOBAL_SETTINGS_CATALOG.find((item) => item.key === key);
       if (!def) return res.status(400).json({ ok: false, error: "invalid setting key" });
 
+      const beforeStored = await redisGet(settingRedisKey(def.key));
       await redisDel(settingRedisKey(def.key));
+      await safeRecordAdminAudit(req, {
+        module: "settings",
+        action: "RESET_GLOBAL_SETTING",
+        targetId: def.key,
+        targetLabel: def.label,
+        summary: `Resetou a configuração global ${def.key} para o padrão.`,
+        before: { storedValue: beforeStored },
+        after: { value: def.defaultValue, reset: true },
+        meta: { key: def.key },
+      });
       return res.json({ ok: true, key: def.key, value: def.defaultValue, reset: true });
     } catch (err) {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
@@ -1926,8 +2015,19 @@ router.post("/users/status", async (req, res) => {
       const status = String(req.body?.status || "").trim();
       if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
       if (!status) return res.status(400).json({ ok: false, error: "status required" });
+      const beforeUser = await getUserSnapshot(waId);
       await setUserStatus(waId, status);
       const user = await getUserSnapshot(waId);
+      await safeRecordAdminAudit(req, {
+        module: "users",
+        action: "SET_USER_STATUS",
+        waId,
+        targetId: waId,
+        summary: `Alterou o status do usuário ${waId} para ${status}.`,
+        before: buildAuditUserSnapshot(beforeUser),
+        after: buildAuditUserSnapshot(user),
+        meta: { status },
+      });
       return res.json({ ok: true, waId, status, user });
     } catch (err) {
       return res.status(500).json({ ok: false, error: String(err?.message || err) });
@@ -1937,8 +2037,18 @@ router.post("/users/status", async (req, res) => {
   router.get("/users/clear-lastprompt", async (req, res) => {
     try {
       const waId = requireWaId(req);
+      const beforeUser = await getUserSnapshot(waId);
       await clearLastPrompt(waId);
       const user = await getUserSnapshot(waId);
+      await safeRecordAdminAudit(req, {
+        module: "users",
+        action: "CLEAR_LAST_PROMPT",
+        waId,
+        targetId: waId,
+        summary: `Limpou o último prompt salvo do usuário ${waId}.`,
+        before: { lastPrompt: limitText(beforeUser?.lastPrompt || "", 500) },
+        after: { lastPrompt: limitText(user?.lastPrompt || "", 500) },
+      });
       return res.json({ ok: true, waId, action: "clearLastPrompt", user });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
@@ -2069,7 +2179,17 @@ async function toggle(code, active){
 
   router.post("/plans", async (req, res) => {
     try {
-      const plan = await upsertPlan(req.body || {});
+      const input = req.body || {};
+      const plan = await upsertPlan(input);
+      await safeRecordAdminAudit(req, {
+        module: "plans",
+        action: "UPSERT_PLAN",
+        targetId: String(plan?.code || "").trim(),
+        targetLabel: String(plan?.name || "").trim(),
+        summary: `Criou ou atualizou o plano ${String(plan?.code || "").trim()}.`,
+        after: plan,
+        meta: { code: String(plan?.code || "").trim() },
+      });
       return res.json({ ok: true, plan });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
@@ -2080,6 +2200,15 @@ async function toggle(code, active){
     try {
       const active = Boolean(req.body?.active);
       const plan = await setPlanActive(req.params.code, active);
+      await safeRecordAdminAudit(req, {
+        module: "plans",
+        action: "SET_PLAN_ACTIVE",
+        targetId: String(plan?.code || req.params.code || "").trim(),
+        targetLabel: String(plan?.name || "").trim(),
+        summary: `${active ? "Ativou" : "Desativou"} o plano ${String(plan?.code || req.params.code || "").trim()}.`,
+        after: plan,
+        meta: { active },
+      });
       return res.json({ ok: true, plan });
     } catch (err) {
       return res.status(400).json({ ok: false, error: err.message });
@@ -2162,6 +2291,275 @@ async function toggle(code, active){
       </script>
     `;
     const html = layoutBase({ title: "Alertas", activePath: "/admin/alerts-ui", content: inner });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  router.get("/audit/list", async (req, res) => {
+    try {
+      const limit = Math.max(1, Math.min(500, Number(req.query?.limit || 100) || 100));
+      const pull = Math.max(limit, Math.min(1500, Number(req.query?.pull || limit * 4) || (limit * 4)));
+      const q = String(req.query?.q || "").trim().toLowerCase();
+      const moduleFilter = String(req.query?.module || "ALL").trim().toUpperCase();
+      const actionFilter = String(req.query?.action || "ALL").trim().toUpperCase();
+      const waIdFilter = String(req.query?.waId || "").trim();
+      const items = await listAdminAudit({ limit: pull });
+      const totalStored = await getAdminAuditCount();
+
+      const modules = Array.from(new Set(items.map((item) => String(item?.module || "").trim()).filter(Boolean))).sort();
+      const actions = Array.from(new Set(items.map((item) => String(item?.action || "").trim()).filter(Boolean))).sort();
+
+      const filtered = items.filter((item) => {
+        const moduleValue = String(item?.module || "").trim().toUpperCase();
+        const actionValue = String(item?.action || "").trim().toUpperCase();
+        const waIdValue = String(item?.waId || item?.targetId || "").trim();
+        if (moduleFilter !== "ALL" && moduleValue !== moduleFilter) return false;
+        if (actionFilter !== "ALL" && actionValue !== actionFilter) return false;
+        if (waIdFilter && waIdValue !== waIdFilter) return false;
+        if (q) {
+          const hay = [
+            item?.id,
+            item?.module,
+            item?.action,
+            item?.summary,
+            item?.waId,
+            item?.targetId,
+            item?.targetLabel,
+            item?.actor?.user,
+          ].join(" ").toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+
+      return res.status(200).json({
+        ok: true,
+        totalStored,
+        pulled: items.length,
+        filteredCount: filtered.length,
+        modules,
+        actions,
+        items: filtered.slice(0, limit),
+      });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/audit-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">📚 Auditoria administrativa</h3>
+            <div class="muted">Rastreie alterações feitas no painel: usuário, configurações, planos, textos do bot e ações operacionais.</div>
+          </div>
+          <div class="row" style="gap:8px;">
+            <button type="button" class="primary" id="auditRefreshBtn">Atualizar</button>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="grid cols3" style="align-items:end;">
+          <div>
+            <div class="muted" style="margin-bottom:6px;">Busca</div>
+            <input id="auditQ" placeholder="ação, usuário, resumo ou módulo" />
+          </div>
+          <div>
+            <div class="muted" style="margin-bottom:6px;">Módulo</div>
+            <select id="auditModule"><option value="ALL">Todos</option></select>
+          </div>
+          <div>
+            <div class="muted" style="margin-bottom:6px;">Ação</div>
+            <select id="auditAction"><option value="ALL">Todas</option></select>
+          </div>
+          <div>
+            <div class="muted" style="margin-bottom:6px;">waId</div>
+            <input id="auditWaId" placeholder="5511... (opcional)" />
+          </div>
+          <div>
+            <div class="muted" style="margin-bottom:6px;">Itens exibidos</div>
+            <input id="auditLimit" type="number" min="20" max="500" value="100" />
+          </div>
+          <div class="row" style="align-items:center; gap:8px;">
+            <button type="button" class="primary" id="auditApplyBtn">Aplicar filtros</button>
+            <button type="button" id="auditClearBtn">Limpar</button>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="row" style="gap:8px; flex-wrap:wrap;">
+          <span class="pill">Eventos salvos: <b id="auditTotalStored">—</b></span>
+          <span class="pill">Eventos lidos: <b id="auditPulled">—</b></span>
+          <span class="pill">Filtrados: <b id="auditFiltered">—</b></span>
+        </div>
+
+        <div class="hr"></div>
+
+        <div id="auditTableWrap" class="muted">Carregando…</div>
+      </div>
+
+      <div id="auditModal" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:60; padding:24px;">
+        <div class="card" style="max-width:980px; margin:0 auto; max-height:calc(100vh - 48px); overflow:auto;">
+          <div class="pad">
+            <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+              <div>
+                <h3 style="margin:0 0 6px 0;">Detalhes do evento</h3>
+                <div class="muted" id="auditModalSub">—</div>
+              </div>
+              <button type="button" id="auditModalClose">Fechar</button>
+            </div>
+            <div class="hr"></div>
+            <pre id="auditModalPre" style="white-space:pre-wrap; overflow:auto; max-height:70vh;"></pre>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const html = layoutBase({
+      title: "Auditoria administrativa",
+      activePath: "/admin/audit-ui",
+      content: inner,
+      scriptExtra: `
+        <script>
+          (function(){
+            const state = { items: [] };
+            const els = {
+              q: document.getElementById('auditQ'),
+              module: document.getElementById('auditModule'),
+              action: document.getElementById('auditAction'),
+              waId: document.getElementById('auditWaId'),
+              limit: document.getElementById('auditLimit'),
+              tableWrap: document.getElementById('auditTableWrap'),
+              totalStored: document.getElementById('auditTotalStored'),
+              pulled: document.getElementById('auditPulled'),
+              filtered: document.getElementById('auditFiltered'),
+              modal: document.getElementById('auditModal'),
+              modalPre: document.getElementById('auditModalPre'),
+              modalSub: document.getElementById('auditModalSub'),
+            };
+
+            function esc(value){
+              return String(value ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'", '&#39;');
+            }
+
+            function fillSelect(el, values, current){
+              if (!el) return;
+              const keep = String(current || 'ALL');
+              const options = ['<option value="ALL">Todos</option>'];
+              (Array.isArray(values) ? values : []).forEach(function(value){
+                const v = String(value || '').trim();
+                if (!v) return;
+                options.push('<option value="' + esc(v) + '"' + (v === keep ? ' selected' : '') + '>' + esc(v) + '</option>');
+              });
+              el.innerHTML = options.join('');
+            }
+
+            function readFilters(){
+              return {
+                q: String(els.q?.value || '').trim(),
+                module: String(els.module?.value || 'ALL').trim(),
+                action: String(els.action?.value || 'ALL').trim(),
+                waId: String(els.waId?.value || '').trim(),
+                limit: String(els.limit?.value || '100').trim(),
+              };
+            }
+
+            function buildQuery(){
+              const params = new URLSearchParams();
+              const filters = readFilters();
+              Object.keys(filters).forEach(function(key){
+                const value = filters[key];
+                if (key === 'limit') { params.set('limit', value || '100'); return; }
+                if (value && value !== 'ALL') params.set(key, value);
+              });
+              return params.toString();
+            }
+
+            async function fetchJson(url){
+              const response = await fetch(url);
+              const json = await response.json().catch(() => ({}));
+              return { response, json };
+            }
+
+            function openModal(item){
+              els.modalPre.textContent = JSON.stringify(item || {}, null, 2);
+              els.modalSub.textContent = [item?.ts, item?.module, item?.action].filter(Boolean).join(' • ') || '—';
+              els.modal.style.display = 'block';
+            }
+
+            function closeModal(){
+              els.modal.style.display = 'none';
+            }
+
+            function renderTable(items){
+              if (!Array.isArray(items) || !items.length) {
+                els.tableWrap.innerHTML = '<div class="muted">Nenhum evento encontrado.</div>';
+                return;
+              }
+              const rows = items.map(function(item, index){
+                const actor = item?.actor?.user || 'admin';
+                const target = item?.waId || item?.targetId || item?.targetLabel || '—';
+                const summary = item?.summary || '—';
+                return '<tr>' +
+                  '<td><code>' + esc(item?.ts || '') + '</code></td>' +
+                  '<td>' + esc(item?.module || '') + '</td>' +
+                  '<td>' + esc(item?.action || '') + '</td>' +
+                  '<td><code>' + esc(target) + '</code></td>' +
+                  '<td style="max-width:420px; white-space:pre-wrap;">' + esc(summary) + '</td>' +
+                  '<td>' + esc(actor) + '</td>' +
+                  '<td><button type="button" data-action="open-audit" data-index="' + index + '">Ver detalhes</button></td>' +
+                '</tr>';
+              }).join('');
+              els.tableWrap.innerHTML = '<div style="overflow:auto;"><table style="min-width:980px;"><thead><tr><th>Quando</th><th>Módulo</th><th>Ação</th><th>Alvo</th><th>Resumo</th><th>Responsável</th><th>Ação</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+            }
+
+            async function loadAudit(){
+              els.tableWrap.innerHTML = '<div class="muted">Carregando…</div>';
+              const query = buildQuery();
+              const { response, json } = await fetchJson('/admin/audit/list?' + query);
+              if (!response.ok || !json.ok) {
+                els.tableWrap.innerHTML = '<div class="muted">Erro ao carregar auditoria.</div>';
+                return;
+              }
+              state.items = Array.isArray(json.items) ? json.items : [];
+              els.totalStored.textContent = String(json.totalStored || 0);
+              els.pulled.textContent = String(json.pulled || 0);
+              els.filtered.textContent = String(json.filteredCount || 0);
+              fillSelect(els.module, json.modules || [], readFilters().module);
+              fillSelect(els.action, json.actions || [], readFilters().action);
+              renderTable(state.items);
+            }
+
+            document.getElementById('auditRefreshBtn').addEventListener('click', loadAudit);
+            document.getElementById('auditApplyBtn').addEventListener('click', loadAudit);
+            document.getElementById('auditClearBtn').addEventListener('click', function(){
+              els.q.value = '';
+              els.module.value = 'ALL';
+              els.action.value = 'ALL';
+              els.waId.value = '';
+              els.limit.value = '100';
+              loadAudit();
+            });
+            els.tableWrap.addEventListener('click', function(ev){
+              const btn = ev.target.closest('[data-action="open-audit"]');
+              if (!btn) return;
+              const idx = Number(btn.getAttribute('data-index') || -1);
+              if (idx < 0 || idx >= state.items.length) return;
+              openModal(state.items[idx]);
+            });
+            document.getElementById('auditModalClose').addEventListener('click', closeModal);
+            els.modal.addEventListener('click', function(ev){ if (ev.target === els.modal) closeModal(); });
+            document.addEventListener('keydown', function(ev){ if (ev.key === 'Escape' && els.modal.style.display === 'block') closeModal(); });
+            document.addEventListener('DOMContentLoaded', loadAudit);
+            loadAudit();
+          })();
+        </script>
+      `,
+    });
+
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(html);
   });
@@ -3127,6 +3525,13 @@ async function toggle(code, active){
       return res.status(400).json({ ok: false, error: "key required" });
     }
     await setCopyGlobal(key, value);
+    await safeRecordAdminAudit(req, {
+      module: "copy",
+      action: "SET_COPY_GLOBAL",
+      targetId: key,
+      summary: `Atualizou o texto global ${key}.`,
+      after: { key, valueLength: value.length },
+    });
     res.redirect("/admin/copy-ui");
   });
 
@@ -3136,6 +3541,13 @@ async function toggle(code, active){
       return res.status(400).json({ ok: false, error: "key required" });
     }
     await delCopyGlobal(key);
+    await safeRecordAdminAudit(req, {
+      module: "copy",
+      action: "DEL_COPY_GLOBAL",
+      targetId: key,
+      summary: `Resetou o texto global ${key}.`,
+      after: { key, reset: true },
+    });
     res.redirect("/admin/copy-ui");
   });
 
@@ -3147,6 +3559,14 @@ async function toggle(code, active){
       return res.status(400).json({ ok: false, error: "key and waId required" });
     }
     await setCopyUser(waId, key, value);
+    await safeRecordAdminAudit(req, {
+      module: "copy",
+      action: "SET_COPY_USER",
+      waId,
+      targetId: key,
+      summary: `Atualizou o texto ${key} para o usuário ${waId}.`,
+      after: { key, waId, valueLength: value.length },
+    });
     res.redirect(`/admin/copy-ui?waId=${encodeURIComponent(waId)}`);
   });
 
@@ -3157,6 +3577,14 @@ async function toggle(code, active){
       return res.status(400).json({ ok: false, error: "key and waId required" });
     }
     await delCopyUser(waId, key);
+    await safeRecordAdminAudit(req, {
+      module: "copy",
+      action: "DEL_COPY_USER",
+      waId,
+      targetId: key,
+      summary: `Resetou o texto ${key} do usuário ${waId}.`,
+      after: { key, waId, reset: true },
+    });
     res.redirect(`/admin/copy-ui?waId=${encodeURIComponent(waId)}`);
   });
 
@@ -3412,6 +3840,15 @@ async function toggle(code, active){
       }
 
       const out = await cancelSubscription(subId);
+      await safeRecordAdminAudit(req, {
+        module: "finance",
+        action: "CANCEL_ASAAS_SUBSCRIPTION",
+        waId: waId || "",
+        targetId: subId,
+        summary: `Solicitou o cancelamento da assinatura ${subId}.`,
+        after: { canceled: true, response: out },
+        meta: { waId: waId || "" },
+      });
       return res.json({ ok: true, canceled: out });
     } catch (e) {
       const msg = String(e?.message || e || "Erro").slice(0, 300);
@@ -3777,6 +4214,7 @@ router.get("/window24h-ui", async (req, res) => {
   router.get("/state-test/reset-trial", async (req, res) => {
     try {
       const waId = requireWaId(req);
+      const beforeUser = await getUserSnapshot(waId);
       await setUserStatus(waId, "TRIAL");
       await setUserPlan(waId, "");
       await setUserQuotaUsed(waId, 0);
@@ -3786,6 +4224,15 @@ router.get("/window24h-ui", async (req, res) => {
       await clearLastPrompt(waId);
 
       const user = await getUserSnapshot(waId);
+      await safeRecordAdminAudit(req, {
+        module: "state",
+        action: "RESET_USER_TRIAL",
+        waId,
+        targetId: waId,
+        summary: `Resetou o usuário ${waId} para TRIAL.`,
+        before: buildAuditUserSnapshot(beforeUser),
+        after: buildAuditUserSnapshot(user),
+      });
       return res.json({ ok: true, action: "reset-trial", waId, user });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
@@ -3796,6 +4243,7 @@ router.get("/window24h-ui", async (req, res) => {
   router.get('/state-test/reset-user', async (req, res) => {
     try {
       const waId = requireWaId(req);
+      const beforeUser = await getUserSnapshot(waId);
 
       // 1) Estado (user:*) + remove do users:index
       const st = await resetUserAsNew(waId);
@@ -3819,6 +4267,22 @@ router.get("/window24h-ui", async (req, res) => {
         // ignore (best-effort)
       }
 
+      const afterUser = await getUserSnapshot(waId);
+      await safeRecordAdminAudit(req, {
+        module: "state",
+        action: "RESET_USER_TOTAL",
+        waId,
+        targetId: waId,
+        summary: `Executou reset total do usuário ${waId}.`,
+        before: buildAuditUserSnapshot(beforeUser),
+        after: buildAuditUserSnapshot(afterUser),
+        meta: {
+          state: st,
+          window24h: w,
+          metrics: m,
+          copyDeleted,
+        },
+      });
       return res.json({
         ok: true,
         action: 'reset-user-total',
