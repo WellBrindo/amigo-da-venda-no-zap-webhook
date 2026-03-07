@@ -628,6 +628,34 @@ async function buildExportAuditRows() {
   }));
 }
 
+function buildReportsFallbackData(errorMessage = "") {
+  return {
+    ok: true,
+    ts: Date.now(),
+    warning: String(errorMessage || "").trim(),
+    executive: {
+      ok: true,
+      ts: Date.now(),
+      overview: { totalUsers: 0, activeUsers: 0, trialUsers: 0, paymentPendingUsers: 0, waitPlanUsers: 0, blockedUsers: 0, activeSharePct: 0, trialToPaidPct: 0 },
+      revenue: { mrrCents: 0, avgTicketCents: 0, activePaidUsers: 0 },
+      usage: { descriptionsToday: 0, descriptionsMonth: 0, dayLabel: "", monthLabel: "", window24hCount: 0, avgDescriptionsPerActive: 0 },
+      quality: { withName: 0, withBizProfile: 0, withPendingBizProfile: 0, withAsaasCustomer: 0, withAsaasSubscription: 0, withBilling: 0, issueUsers: 0, profileCoveragePct: 0, nameCoveragePct: 0, inconsistencyPct: 0 },
+      statusCounts: getCrmStatusCounters(),
+      payments: [],
+      plans: [],
+      cities: [],
+      inconsistencies: { ok: true, ts: Date.now(), usersCount: 0, totalIssues: 0, summary: [], items: {} },
+    },
+    audit: {
+      totalStored: 0,
+      recentCount: 0,
+      modules: [],
+      actions: [],
+      items: [],
+    },
+  };
+}
+
 async function buildReportsCenterData() {
   const [executive, auditItems, auditTotal] = await Promise.all([
     buildExecutiveDashboardData(),
@@ -4266,7 +4294,8 @@ async function toggle(code, active){
       const data = await buildReportsCenterData();
       return res.status(200).json(data);
     } catch (err) {
-      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+      const message = String(err?.message || err);
+      return res.status(200).json(buildReportsFallbackData(message));
     }
   });
 
@@ -4556,7 +4585,11 @@ async function toggle(code, active){
               ctx.strokeStyle = "rgba(37,99,235,.60)";
               ctx.lineWidth = 1;
               ctx.beginPath();
-              ctx.roundRect(x, y, barW, barH, 10);
+              if (typeof ctx.roundRect === "function") {
+                ctx.roundRect(x, y, barW, barH, 10);
+              } else {
+                ctx.rect(x, y, barW, barH);
+              }
               ctx.fill();
               ctx.stroke();
               ctx.fillStyle = "#0f172a";
@@ -4574,6 +4607,12 @@ async function toggle(code, active){
             const data = await response.json().catch(function(){ return {}; });
             document.getElementById("reportsRaw").textContent = JSON.stringify(data, null, 2);
             if (!response.ok || !data.ok) {
+              document.getElementById("reportsModulePills").innerHTML = '<span class="muted">Falha ao carregar os dados.</span>';
+              document.getElementById("reportsActionPills").innerHTML = '<span class="muted">Falha ao carregar os dados.</span>';
+              document.getElementById("reportsPlansRows").innerHTML = '<tr><td colspan="4" class="muted">Falha ao carregar os dados.</td></tr>';
+              document.getElementById("reportsCitiesRows").innerHTML = '<tr><td colspan="2" class="muted">Falha ao carregar os dados.</td></tr>';
+              document.getElementById("reportsIssuesRows").innerHTML = '<tr><td colspan="3" class="muted">Falha ao carregar os dados.</td></tr>';
+              document.getElementById("reportsAuditRows").innerHTML = '<tr><td colspan="6" class="muted">Falha ao carregar os dados.</td></tr>';
               return;
             }
             const executive = data.executive || {};
@@ -4586,6 +4625,9 @@ async function toggle(code, active){
             const issues = Array.isArray(executive?.inconsistencies?.summary) ? executive.inconsistencies.summary : [];
             const audit = data.audit || {};
             const auditItems = Array.isArray(audit.items) ? audit.items : [];
+            if (data.warning) {
+              document.getElementById("reportsModulePills").innerHTML = '<span class="badge warn">Modo contingência</span> <span class="muted">' + esc(data.warning) + '</span>';
+            }
             const modules = Array.isArray(audit.modules) ? audit.modules : [];
             const actions = Array.isArray(audit.actions) ? audit.actions : [];
 
