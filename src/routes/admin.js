@@ -257,6 +257,7 @@ function renderSidebar(activePath){
         <summary>📊 Produto <span>▾</span></summary>
         ${item("/admin", "Início", "🏠")}
         ${item("/admin/dashboard", "Dashboard", "📈")}
+        ${item("/admin/executive-ui", "Dashboard Executivo", "🧠")}
         ${item("/admin/plans", "Planos", "💳")}
       </details>
 
@@ -709,6 +710,454 @@ export function adminRouter() {
       items: buckets,
     };
   }
+
+  async function buildExecutiveDashboardData() {
+    const [usersRaw, global, window24hCount, systemPlans, inconsistencyData] = await Promise.all([
+      listUsers(),
+      getGlobalDescriptionMetrics(),
+      countWindow24hActive(),
+      listPlans({ includeInactive: true }),
+      collectInconsistencies(),
+    ]);
+
+    const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
+    const now = nowMs();
+    const planMap = buildPlanMap(systemPlans);
+    const users = await mapLimit(waIds, 20, async (waId) => enrichUserForCrm(waId, planMap, now));
+
+    const statusCounts = getCrmStatusCounters();
+    const paymentCounts = { CARD: 0, PIX: 0, NONE: 0, OTHER: 0 };
+    const planCounts = new Map();
+    const cityCounts = new Map();
+
+    let activePaidUsers = 0;
+    let totalMrrCents = 0;
+    let withName = 0;
+    let withBizProfile = 0;
+    let withPendingBizProfile = 0;
+    let withAsaasCustomer = 0;
+    let withAsaasSubscription = 0;
+    let withBilling = 0;
+    let issueUsers = 0;
+
+    for (const user of users) {
+      const status = String(user?.status || "").trim().toUpperCase();
+      if (statusCounts[status] === undefined) statusCounts.UNKNOWN += 1;
+      else statusCounts[status] += 1;
+
+      const payment = String(user?.paymentMethod || "").trim().toUpperCase();
+      if (payment === "CARD") paymentCounts.CARD += 1;
+      else if (payment === "PIX") paymentCounts.PIX += 1;
+      else if (!payment) paymentCounts.NONE += 1;
+      else paymentCounts.OTHER += 1;
+
+      if (user?.fullName) withName += 1;
+      if (user?.hasBizProfile) withBizProfile += 1;
+      if (user?.hasPendingBizProfile) withPendingBizProfile += 1;
+      if (user?.asaasCustomerId) withAsaasCustomer += 1;
+      if (user?.asaasSubscriptionId) withAsaasSubscription += 1;
+      if (user?.billingCityState || user?.billingAddress) withBilling += 1;
+      if ((user?.issueCount || 0) > 0) issueUsers += 1;
+
+      const city = String(user?.billingCityState || "").trim();
+      if (city) cityCounts.set(city, (cityCounts.get(city) || 0) + 1);
+
+      const planCode = String(user?.plan || "").trim().toUpperCase();
+      const planMeta = planCode ? planMap.get(planCode) : null;
+      if (planCode) {
+        const prev = planCounts.get(planCode) || {
+          code: planCode,
+          name: String(planMeta?.name || planCode),
+          description: String(planMeta?.description || ""),
+          priceCents: Number(planMeta?.priceCents || 0),
+          count: 0,
+          mrrCents: 0,
+        };
+        prev.count += 1;
+        if (status === "ACTIVE" && Number.isFinite(Number(planMeta?.priceCents))) {
+          prev.mrrCents += Number(planMeta?.priceCents || 0);
+        }
+        planCounts.set(planCode, prev);
+      }
+
+      if (status === "ACTIVE" && planMeta) {
+        activePaidUsers += 1;
+        totalMrrCents += Number(planMeta?.priceCents || 0);
+      }
+    }
+
+    const totalUsers = users.length;
+    const activeUsers = statusCounts.ACTIVE || 0;
+    const trialUsers = statusCounts.TRIAL || 0;
+    const paymentPendingUsers = statusCounts.PAYMENT_PENDING || 0;
+    const waitPlanUsers = statusCounts.WAIT_PLAN || 0;
+    const blockedUsers = statusCounts.BLOCKED || 0;
+    const avgTicketCents = activePaidUsers ? Math.round(totalMrrCents / activePaidUsers) : 0;
+    const avgDescriptionsPerActive = activeUsers ? Number((Number(global?.monthCount || 0) / activeUsers).toFixed(2)) : 0;
+    const conversionBase = activeUsers + trialUsers;
+    const trialToPaidPct = conversionBase > 0 ? Number(((activeUsers / conversionBase) * 100).toFixed(1)) : 0;
+    const baseActivationPct = totalUsers > 0 ? Number(((activeUsers / totalUsers) * 100).toFixed(1)) : 0;
+    const profileCoveragePct = totalUsers > 0 ? Number(((withBizProfile / totalUsers) * 100).toFixed(1)) : 0;
+    const nameCoveragePct = totalUsers > 0 ? Number(((withName / totalUsers) * 100).toFixed(1)) : 0;
+    const inconsistencyPct = totalUsers > 0 ? Number(((issueUsers / totalUsers) * 100).toFixed(1)) : 0;
+
+    const plans = Array.from(planCounts.values()).sort((a, b) => {
+      if (b.mrrCents !== a.mrrCents) return b.mrrCents - a.mrrCents;
+      if (b.count !== a.count) return b.count - a.count;
+      return String(a.code).localeCompare(String(b.code));
+    });
+
+    const cities = Array.from(cityCounts.entries())
+      .map(([city, count]) => ({ city, count }))
+      .sort((a, b) => (b.count - a.count) || String(a.city).localeCompare(String(b.city)))
+      .slice(0, 8);
+
+    const payments = [
+      { type: "CARD", count: paymentCounts.CARD },
+      { type: "PIX", count: paymentCounts.PIX },
+      { type: "Sem método", count: paymentCounts.NONE },
+      { type: "Outro", count: paymentCounts.OTHER },
+    ];
+
+    return {
+      ok: true,
+      ts: Date.now(),
+      overview: {
+        totalUsers,
+        activeUsers,
+        trialUsers,
+        paymentPendingUsers,
+        waitPlanUsers,
+        blockedUsers,
+        activeSharePct: baseActivationPct,
+        trialToPaidPct,
+      },
+      revenue: {
+        mrrCents: totalMrrCents,
+        avgTicketCents,
+        activePaidUsers,
+      },
+      usage: {
+        descriptionsToday: Number(global?.dayCount || 0),
+        descriptionsMonth: Number(global?.monthCount || 0),
+        dayLabel: String(global?.day || ""),
+        monthLabel: String(global?.month || ""),
+        window24hCount: Number(window24hCount || 0),
+        avgDescriptionsPerActive,
+      },
+      quality: {
+        withName,
+        withBizProfile,
+        withPendingBizProfile,
+        withAsaasCustomer,
+        withAsaasSubscription,
+        withBilling,
+        issueUsers,
+        profileCoveragePct,
+        nameCoveragePct,
+        inconsistencyPct,
+      },
+      statusCounts,
+      payments,
+      plans,
+      cities,
+      inconsistencies: inconsistencyData,
+    };
+  }
+
+  router.get("/executive/data", async (req, res) => {
+    try {
+      const data = await buildExecutiveDashboardData();
+      return res.json(data);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/executive-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad" style="margin-bottom:14px;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">🧠 Dashboard Executivo SaaS</h3>
+            <div class="muted">Visão gerencial do produto: base de usuários, receita estimada, uso do sistema e saúde operacional.</div>
+          </div>
+          <div class="row">
+            <a class="pill" href="/admin/dashboard">Dashboard operacional</a>
+            <a class="pill" href="/admin/inconsistencies-ui">Inconsistências</a>
+            <button type="button" class="primary" id="reloadExecutiveBtn">Atualizar</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid cols3">
+        <div class="kpi"><div class="t">Usuários totais</div><div class="v" id="exTotalUsers">—</div><div class="muted" id="exActiveShare">—</div></div>
+        <div class="kpi"><div class="t">Assinantes ativos</div><div class="v" id="exActiveUsers">—</div><div class="muted" id="exTrialToPaid">—</div></div>
+        <div class="kpi"><div class="t">MRR estimado</div><div class="v" id="exMrr">—</div><div class="muted" id="exAvgTicket">—</div></div>
+      </div>
+
+      <div class="grid cols3" style="margin-top:12px;">
+        <div class="kpi"><div class="t">Descrições hoje</div><div class="v" id="exDescToday">—</div><div class="muted" id="exDescTodayLabel">—</div></div>
+        <div class="kpi"><div class="t">Descrições no mês</div><div class="v" id="exDescMonth">—</div><div class="muted" id="exDescMonthLabel">—</div></div>
+        <div class="kpi"><div class="t">Usuários ativos 24h</div><div class="v" id="ex24hUsers">—</div><div class="muted" id="exAvgUsage">—</div></div>
+      </div>
+
+      <div class="grid cols3" style="margin-top:12px;">
+        <div class="kpi"><div class="t">Perfis com empresa salva</div><div class="v" id="exBizProfiles">—</div><div class="muted" id="exBizProfilesPct">—</div></div>
+        <div class="kpi"><div class="t">Cadastros com nome</div><div class="v" id="exWithName">—</div><div class="muted" id="exWithNamePct">—</div></div>
+        <div class="kpi"><div class="t">Usuários com inconsistência</div><div class="v" id="exIssueUsers">—</div><div class="muted" id="exIssuePct">—</div></div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;">
+            <h4 style="margin:0;">Distribuição da base</h4>
+            <span class="muted">Status atuais</span>
+          </div>
+          <div class="hr"></div>
+          <div id="statusPills"></div>
+          <div class="hr"></div>
+          <div id="paymentPills"></div>
+        </div>
+
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;">
+            <h4 style="margin:0;">Saúde operacional</h4>
+            <a class="pill" href="/admin/audit-ui">Auditoria</a>
+          </div>
+          <div class="hr"></div>
+          <div id="healthPills"></div>
+        </div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;">
+            <h4 style="margin:0;">Planos e MRR</h4>
+            <span class="muted">Ranking atual</span>
+          </div>
+          <div class="hr"></div>
+          <div style="overflow:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Plano</th>
+                  <th>Usuários</th>
+                  <th>MRR</th>
+                  <th>Descrição</th>
+                </tr>
+              </thead>
+              <tbody id="plansRows"><tr><td colspan="4" class="muted">Carregando...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;">
+            <h4 style="margin:0;">Top cidades / região</h4>
+            <span class="muted">billingCityState</span>
+          </div>
+          <div class="hr"></div>
+          <div style="overflow:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Local</th>
+                  <th>Usuários</th>
+                </tr>
+              </thead>
+              <tbody id="citiesRows"><tr><td colspan="2" class="muted">Carregando...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card pad" style="margin-top:14px;">
+        <div class="row" style="justify-content:space-between;">
+          <div>
+            <h4 style="margin:0;">Resumo de inconsistências</h4>
+            <div class="muted">Leitura consolidada do painel de inconsistências.</div>
+          </div>
+          <a class="pill" href="/admin/inconsistencies-ui">Abrir painel completo</a>
+        </div>
+        <div class="hr"></div>
+        <div style="overflow:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Indicador</th>
+                <th>Nível</th>
+                <th>Qtd.</th>
+                <th>Descrição</th>
+              </tr>
+            </thead>
+            <tbody id="issuesRows"><tr><td colspan="4" class="muted">Carregando...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card pad" style="margin-top:14px;">
+        <details>
+          <summary class="muted">Ver JSON bruto</summary>
+          <pre id="executiveRaw" style="white-space:pre-wrap; overflow:auto; max-height:360px;"></pre>
+        </details>
+      </div>
+    `;
+
+    const scriptExtra = `
+      <script>
+        (function(){
+          function esc(value){
+            return String(value ?? '')
+              .replaceAll('&','&amp;')
+              .replaceAll('<','&lt;')
+              .replaceAll('>','&gt;')
+              .replaceAll('"','&quot;')
+              .replaceAll("'",'&#39;');
+          }
+          function setText(id, value){
+            const el = document.getElementById(id);
+            if (el) el.textContent = String(value ?? '—');
+          }
+          function fmtBRL(cents){
+            const v = (Number(cents) || 0) / 100;
+            try { return v.toLocaleString('pt-BR', { style:'currency', currency:'BRL' }); }
+            catch (_) { return 'R$ ' + v.toFixed(2); }
+          }
+          function fmtPct(value){
+            const n = Number(value || 0);
+            return n.toFixed(1).replace('.', ',') + '%';
+          }
+          function severityBadge(severity){
+            const s = String(severity || 'soft').toLowerCase();
+            const cls = ['danger','warn','info','ok'].includes(s) ? s : 'soft';
+            const label = cls === 'danger' ? 'Crítico' : cls === 'warn' ? 'Atenção' : cls === 'info' ? 'Info' : 'OK';
+            return '<span class="badge ' + cls + '">' + label + '</span>';
+          }
+          function renderPills(containerId, items, formatter){
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            if (!Array.isArray(items) || !items.length) {
+              el.innerHTML = '<span class="muted">Sem dados.</span>';
+              return;
+            }
+            el.innerHTML = items.map(function(item){ return formatter(item); }).join(' ');
+          }
+          function renderTableRows(containerId, rowsHtml, emptyColspan, emptyText){
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            el.innerHTML = rowsHtml || '<tr><td colspan="' + String(emptyColspan) + '" class="muted">' + esc(emptyText || 'Sem dados.') + '</td></tr>';
+          }
+          async function loadExecutive(){
+            const response = await fetch('/admin/executive/data');
+            const data = await response.json().catch(function(){ return {}; });
+            document.getElementById('executiveRaw').textContent = JSON.stringify(data, null, 2);
+            if (!response.ok || !data.ok) {
+              renderTableRows('plansRows', '', 4, 'Erro ao carregar dashboard executivo.');
+              renderTableRows('citiesRows', '', 2, 'Erro ao carregar dashboard executivo.');
+              renderTableRows('issuesRows', '', 4, 'Erro ao carregar dashboard executivo.');
+              return;
+            }
+
+            const overview = data.overview || {};
+            const revenue = data.revenue || {};
+            const usage = data.usage || {};
+            const quality = data.quality || {};
+            const statusCounts = data.statusCounts || {};
+            const payments = Array.isArray(data.payments) ? data.payments : [];
+            const plans = Array.isArray(data.plans) ? data.plans : [];
+            const cities = Array.isArray(data.cities) ? data.cities : [];
+            const issues = Array.isArray(data?.inconsistencies?.summary) ? data.inconsistencies.summary : [];
+
+            setText('exTotalUsers', overview.totalUsers || 0);
+            setText('exActiveShare', 'Ativação da base: ' + fmtPct(overview.activeSharePct || 0));
+            setText('exActiveUsers', overview.activeUsers || 0);
+            setText('exTrialToPaid', 'Conversão trial → pago: ' + fmtPct(overview.trialToPaidPct || 0));
+            setText('exMrr', fmtBRL(revenue.mrrCents || 0));
+            setText('exAvgTicket', 'Ticket médio: ' + fmtBRL(revenue.avgTicketCents || 0));
+
+            setText('exDescToday', usage.descriptionsToday || 0);
+            setText('exDescTodayLabel', usage.dayLabel ? ('Dia ' + usage.dayLabel) : 'Sem referência');
+            setText('exDescMonth', usage.descriptionsMonth || 0);
+            setText('exDescMonthLabel', usage.monthLabel ? ('Mês ' + usage.monthLabel) : 'Sem referência');
+            setText('ex24hUsers', usage.window24hCount || 0);
+            setText('exAvgUsage', 'Média por ativo: ' + String(usage.avgDescriptionsPerActive || 0).replace('.', ','));
+
+            setText('exBizProfiles', quality.withBizProfile || 0);
+            setText('exBizProfilesPct', 'Cobertura: ' + fmtPct(quality.profileCoveragePct || 0));
+            setText('exWithName', quality.withName || 0);
+            setText('exWithNamePct', 'Cobertura: ' + fmtPct(quality.nameCoveragePct || 0));
+            setText('exIssueUsers', quality.issueUsers || 0);
+            setText('exIssuePct', 'Base afetada: ' + fmtPct(quality.inconsistencyPct || 0));
+
+            renderPills('statusPills', [
+              { label: 'TRIAL', value: statusCounts.TRIAL || 0 },
+              { label: 'ACTIVE', value: statusCounts.ACTIVE || 0 },
+              { label: 'WAIT_PLAN', value: statusCounts.WAIT_PLAN || 0 },
+              { label: 'PAYMENT_PENDING', value: statusCounts.PAYMENT_PENDING || 0 },
+              { label: 'BLOCKED', value: statusCounts.BLOCKED || 0 },
+              { label: 'UNKNOWN', value: statusCounts.UNKNOWN || 0 }
+            ], function(item){
+              return '<span class="pill"><b>' + esc(item.label) + '</b>: ' + esc(item.value) + '</span>';
+            });
+
+            renderPills('paymentPills', payments, function(item){
+              return '<span class="pill"><b>' + esc(item.type) + '</b>: ' + esc(item.count) + '</span>';
+            });
+
+            renderPills('healthPills', [
+              { label: 'Com Asaas Customer', value: quality.withAsaasCustomer || 0 },
+              { label: 'Com assinatura Asaas', value: quality.withAsaasSubscription || 0 },
+              { label: 'Com billing preenchido', value: quality.withBilling || 0 },
+              { label: 'Perfil pendente', value: quality.withPendingBizProfile || 0 }
+            ], function(item){
+              return '<span class="pill"><b>' + esc(item.label) + '</b>: ' + esc(item.value) + '</span>';
+            });
+
+            const plansRows = plans.map(function(item){
+              return '<tr>' +
+                '<td><b>' + esc(item.name || item.code || '—') + '</b><div class="muted" style="font-size:12px;">' + esc(item.code || '') + '</div></td>' +
+                '<td>' + esc(item.count || 0) + '</td>' +
+                '<td>' + esc(fmtBRL(item.mrrCents || 0)) + '</td>' +
+                '<td>' + esc(item.description || '—') + '</td>' +
+              '</tr>';
+            }).join('');
+            renderTableRows('plansRows', plansRows, 4, 'Nenhum plano encontrado.');
+
+            const citiesRows = cities.map(function(item){
+              return '<tr><td>' + esc(item.city || '—') + '</td><td><b>' + esc(item.count || 0) + '</b></td></tr>';
+            }).join('');
+            renderTableRows('citiesRows', citiesRows, 2, 'Nenhuma cidade/região preenchida.');
+
+            const issuesRows = issues.map(function(item){
+              return '<tr>' +
+                '<td><b>' + esc(item.label || '') + '</b></td>' +
+                '<td>' + severityBadge(item.severity) + '</td>' +
+                '<td><b>' + esc(item.count || 0) + '</b></td>' +
+                '<td>' + esc(item.description || '') + '</td>' +
+              '</tr>';
+            }).join('');
+            renderTableRows('issuesRows', issuesRows, 4, 'Nenhuma inconsistência encontrada.');
+          }
+
+          document.addEventListener('DOMContentLoaded', function(){
+            const reloadBtn = document.getElementById('reloadExecutiveBtn');
+            if (reloadBtn) reloadBtn.addEventListener('click', loadExecutive);
+            loadExecutive();
+          });
+        })();
+      </script>
+    `;
+
+    const html = layoutBase({
+      title: "Dashboard Executivo",
+      activePath: "/admin/executive-ui",
+      content: inner,
+      scriptExtra,
+    });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
 
   router.get("/dashboard/data", async (req, res) => {
     const waId = String(req.query?.waId || "").trim();
@@ -1243,6 +1692,10 @@ router.get("/", async (req, res) => {
                 <div class="muted" style="font-weight:700;">📊 Dashboard</div>
                 <div class="muted">Métricas globais, histórico e usuário.</div>
               </a>
+              <a class="card pad" href="/admin/executive-ui" style="display:block;">
+                <div class="muted" style="font-weight:700;">🧠 Dashboard Executivo</div>
+                <div class="muted">Visão gerencial de base, receita e saúde.</div>
+              </a>
               <a class="card pad" href="/admin/users-ui" style="display:block;">
                 <div class="muted" style="font-weight:700;">👥 Usuários</div>
                 <div class="muted">Consulta e ações por waId.</div>
@@ -1268,6 +1721,7 @@ router.get("/", async (req, res) => {
               <a class="pill" href="/admin/health-plans">🧾 Health Planos (JSON)</a>
               <a class="pill" href="/admin/alerts-ui">🚨 Alertas</a>
               <a class="pill" href="/admin/audit-ui">📚 Auditoria</a>
+              <a class="pill" href="/admin/executive-ui">🧠 Dashboard Executivo</a>
               <a class="pill" href="/admin/asaas-test-ui">🧪 Asaas Teste</a>
             </div>
             <div class="hr"></div>
