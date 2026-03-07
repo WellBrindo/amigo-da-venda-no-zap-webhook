@@ -3132,7 +3132,7 @@ async function toggle(code, active){
         return true;
       });
 
-      const availablePlans = Array.from(new Set(validItems.map((item) => String(item.plan || "").trim().toUpperCase()).filter(Boolean))).sort();
+      const availablePlans = Array.from(new Set((Array.isArray(plans) ? plans : []).map((plan) => String(plan?.code || "").trim().toUpperCase()).filter(Boolean))).sort();
 
       return res.status(200).json({
         ok: true,
