@@ -523,13 +523,14 @@ function csvCell(value) {
   return '"' + str.replace(/"/g, '""') + '"';
 }
 
-function rowsToCsv(rows) {
+function rowsToCsv(rows, delimiter = ";") {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return "";
+  const sep = String(delimiter || ";");
   const headers = Array.from(new Set(list.flatMap((row) => Object.keys(row || {}))));
-  const lines = [headers.map(csvCell).join(",")];
+  const lines = [headers.map(csvCell).join(sep)];
   for (const row of list) {
-    lines.push(headers.map((key) => csvCell(row?.[key] ?? "")).join(","));
+    lines.push(headers.map((key) => csvCell(row?.[key] ?? "")).join(sep));
   }
   return lines.join("\n");
 }
@@ -634,9 +635,16 @@ function rowsToExcelXml(rows, title = 'Exportação') {
 }
 
 function pdfEscape(value) {
-function pdfEscape(value) {
-  const v = String(value ?? '');
-  return v.replaceAll('\\','\\\\').replaceAll('(','\\(').replaceAll(')','\\)');
+  const normalized = String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u2012\u2013\u2014\u2015]/g, '-')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/\u2022/g, '*');
+  return normalized.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+}
+
 function normalizePdfCell(value) {
   const text = String(value ?? '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
   return text || '—';
@@ -780,7 +788,7 @@ function rowsToPdfBuffer(title, rows) {
   const fontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>');
   const pageIds = [];
   for (const page of pages) {
-    let stream = 'BT\n/F1 ' + fontSize + ' Tf\n' + left + ' ' + startY + ' Td\n';
+    let stream = 'BT\n/F1 ' + fontSize + ' Tf\n' + (fontSize + 4) + ' TL\n' + left + ' ' + startY + ' Td\n';
     stream += '(' + pdfEscape(page.title) + ') Tj\n';
     page.lines.forEach((line) => {
       stream += 'T* (' + pdfEscape(line) + ') Tj\n';
@@ -991,7 +999,7 @@ function sendExport(res, filenameBase, format, payload, options = {}) {
 
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${filenameBase}.csv"`);
-  return res.status(200).send(rowsToCsv(rows));
+  return res.status(200).send("\uFEFF" + rowsToCsv(rows, ";"));
 }
 
 async function buildExportUsersRows() {
@@ -1180,7 +1188,7 @@ function buildExecutiveExportRows(data) {
   return rows;
 }
 
-function adminRouter() {
+export function adminRouter() {
   const router = Router();
 
   // ===================== Dashboard (Métricas consolidadas) =====================
@@ -6402,6 +6410,3 @@ if (typeof reloadUsers === 'function') {
     document.addEventListener('DOMContentLoaded', () => { try { reloadUsers(); } catch(e) {} });
   }
 }
-
-}
-module.exports = { adminRouter };
