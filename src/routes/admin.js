@@ -551,7 +551,7 @@ function rowsToExcelXml(rows, title = 'Exportação') {
 }
 
 function pdfEscape(value) {
-  return String(value ?? '').replace(/\/g, '\\').replace(/\(/g, '\(').replace(/\)/g, '\)');
+  return String(value ?? '').replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
 }
 
 function rowsToPdfBuffer(title, rows) {
@@ -564,9 +564,9 @@ function rowsToPdfBuffer(title, rows) {
     lines.push(headers.join(' | '));
     lines.push('-'.repeat(Math.min(120, Math.max(20, headers.join(' | ').length))));
     for (const row of list) {
-      const line = headers.map((header) => String(row?.[header] ?? '').replace(/
-?
-/g, ' ')).join(' | ');
+      const line = headers
+        .map((header) => String(row?.[header] ?? '').replace(/\r?\n/g, ' '))
+        .join(' | ');
       lines.push(line.length > 240 ? line.slice(0, 237) + '...' : line);
     }
   }
@@ -575,7 +575,9 @@ function rowsToPdfBuffer(title, rows) {
   const startY = 760;
   const linesPerPage = 58;
   const pages = [];
-  for (let i = 0; i < lines.length; i += linesPerPage) pages.push(lines.slice(i, i + linesPerPage));
+  for (let i = 0; i < lines.length; i += linesPerPage) {
+    pages.push(lines.slice(i, i + linesPerPage));
+  }
 
   const objects = [];
   const addObject = (content) => {
@@ -586,21 +588,13 @@ function rowsToPdfBuffer(title, rows) {
   const fontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
   const pageIds = [];
   for (const pageLines of pages) {
-    let stream = 'BT
-/F1 10 Tf
-50 ' + startY + ' Td
-';
+    let stream = 'BT\n/F1 10 Tf\n50 ' + startY + ' Td\n';
     pageLines.forEach((line, index) => {
-      if (index === 0) stream += '(' + pdfEscape(line) + ') Tj
-';
-      else stream += 'T* (' + pdfEscape(line) + ') Tj
-';
+      if (index === 0) stream += '(' + pdfEscape(line) + ') Tj\n';
+      else stream += 'T* (' + pdfEscape(line) + ') Tj\n';
     });
     stream += 'ET';
-    const contentId = addObject('<< /Length ' + Buffer.byteLength(stream, 'utf8') + ' >>
-stream
-' + stream + '
-endstream');
+    const contentId = addObject('<< /Length ' + Buffer.byteLength(stream, 'utf8') + ' >>\nstream\n' + stream + '\nendstream');
     const pageId = addObject('<< /Type /Page /Parent PAGES_ID 0 R /MediaBox [0 0 612 ' + pageHeight + '] /Resources << /Font << /F1 ' + fontId + ' 0 R >> >> /Contents ' + contentId + ' 0 R >>');
     pageIds.push(pageId);
   }
@@ -609,32 +603,20 @@ endstream');
   const pagesId = addObject('<< /Type /Pages /Kids [' + kids + '] /Count ' + pageIds.length + ' >>');
   const catalogId = addObject('<< /Type /Catalog /Pages ' + pagesId + ' 0 R >>');
 
-  let pdf = '%PDF-1.4
-';
+  let pdf = '%PDF-1.4\n';
   const offsets = [0];
   for (let i = 0; i < objects.length; i += 1) {
     const content = objects[i].replace('PAGES_ID', String(pagesId));
     offsets.push(Buffer.byteLength(pdf, 'utf8'));
-    pdf += (i + 1) + ' 0 obj
-' + content + '
-endobj
-';
+    pdf += (i + 1) + ' 0 obj\n' + content + '\nendobj\n';
   }
   const xrefStart = Buffer.byteLength(pdf, 'utf8');
-  pdf += 'xref
-0 ' + (objects.length + 1) + '
-';
-  pdf += '0000000000 65535 f 
-';
+  pdf += 'xref\n0 ' + (objects.length + 1) + '\n';
+  pdf += '0000000000 65535 f \n';
   for (let i = 1; i < offsets.length; i += 1) {
-    pdf += String(offsets[i]).padStart(10, '0') + ' 00000 n 
-';
+    pdf += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
   }
-  pdf += 'trailer
-<< /Size ' + (objects.length + 1) + ' /Root ' + catalogId + ' 0 R >>
-startxref
-' + xrefStart + '
-%%EOF';
+  pdf += 'trailer\n<< /Size ' + (objects.length + 1) + ' /Root ' + catalogId + ' 0 R >>\nstartxref\n' + xrefStart + '\n%%EOF';
   return Buffer.from(pdf, 'utf8');
 }
 
@@ -4682,21 +4664,6 @@ async function toggle(code, active){
             <a class="pill" href="/admin/audit-ui">Auditoria</a>
             <a class="pill" href="/admin/inconsistencies-ui">Inconsistências</a>
             <button type="button" class="primary" id="reportsReloadBtn">Atualizar</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="card pad" style="margin-bottom:14px;">
-        <div class="row" style="justify-content:space-between; align-items:center; gap:12px;">
-          <div>
-            <h4 style="margin:0 0 6px 0;">⬇️ Exportações rápidas</h4>
-            <div class="muted">Baixe imediatamente os principais relatórios em CSV, Excel, PDF ou JSON.</div>
-          </div>
-          <div class="row">
-            <a class="pill" href="/admin/export/executive?format=csv">Resumo executivo · CSV</a>
-            <a class="pill" href="/admin/export/executive?format=excel">Resumo executivo · Excel</a>
-            <a class="pill" href="/admin/export/executive?format=pdf">Resumo executivo · PDF</a>
-            <a class="pill" href="/admin/export/executive?format=json">Resumo executivo · JSON</a>
           </div>
         </div>
       </div>
