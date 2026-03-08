@@ -1180,7 +1180,7 @@ function buildExecutiveExportRows(data) {
   return rows;
 }
 
-export function adminRouter() {
+function adminRouter() {
   const router = Router();
 
   // ===================== Dashboard (Métricas consolidadas) =====================
@@ -6402,3 +6402,5 @@ if (typeof reloadUsers === 'function') {
     document.addEventListener('DOMContentLoaded', () => { try { reloadUsers(); } catch(e) {} });
   }
 }
+
+module.exports = { adminRouter };
