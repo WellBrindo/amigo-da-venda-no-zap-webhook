@@ -634,9 +634,9 @@ function rowsToExcelXml(rows, title = 'Exportação') {
 }
 
 function pdfEscape(value) {
-  return String(value ?? '').replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
-}
-
+function pdfEscape(value) {
+  const v = String(value ?? '');
+  return v.replaceAll('\\','\\\\').replaceAll('(','\\(').replaceAll(')','\\)');
 function normalizePdfCell(value) {
   const text = String(value ?? '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
   return text || '—';
