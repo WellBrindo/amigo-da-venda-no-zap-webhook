@@ -534,50 +534,242 @@ function rowsToCsv(rows) {
   return lines.join("\n");
 }
 
+const EXPORT_FIELD_META = {
+  waId: { label: "WA ID", width: 18, description: "Número do WhatsApp associado ao usuário dentro do sistema." },
+  fullName: { label: "Nome", width: 24, description: "Nome completo salvo no cadastro do usuário." },
+  status: { label: "Status", width: 14, description: "Estado atual do usuário no fluxo do produto, como TRIAL, ACTIVE ou BLOCKED." },
+  plan: { label: "Plano", width: 18, description: "Código interno do plano atualmente vinculado ao usuário." },
+  planName: { label: "Nome do plano", width: 22, description: "Nome comercial do plano do usuário." },
+  planDescription: { label: "Descrição do plano", width: 26, description: "Descrição resumida do plano, normalmente com quota ou características principais." },
+  paymentMethod: { label: "Pagamento", width: 14, description: "Método de pagamento salvo para o usuário, como CARD ou PIX." },
+  quotaUsed: { label: "Uso mensal", width: 12, description: "Quantidade de descrições consumidas no ciclo mensal do plano." },
+  trialUsed: { label: "Uso trial", width: 10, description: "Quantidade de descrições consumidas durante o período de teste." },
+  templateMode: { label: "Template", width: 12, description: "Modo de geração do anúncio, como FIXED ou FREE." },
+  billingCityState: { label: "Cidade/UF", width: 18, description: "Cidade e estado informados nos dados de cobrança do usuário." },
+  billingAddress: { label: "Endereço", width: 24, description: "Endereço salvo para cobrança ou cadastro do usuário." },
+  hasBizProfile: { label: "Perfil empresa", width: 12, description: "Indica se já existe perfil da empresa salvo para o usuário." },
+  hasPendingBizProfile: { label: "Perfil pendente", width: 13, description: "Indica se há perfil da empresa pendente de confirmação ou complementação." },
+  inWindow24h: { label: "Janela 24h", width: 11, description: "Indica se o usuário está com janela ativa de 24 horas no WhatsApp." },
+  lastInboundTs: { label: "Últ. inbound", width: 15, description: "Timestamp da última mensagem recebida do usuário." },
+  windowExpiresAt: { label: "Expira em", width: 15, description: "Timestamp estimado de expiração da janela de 24 horas." },
+  issueCount: { label: "Qt. issues", width: 10, description: "Quantidade de inconsistências detectadas para o usuário." },
+  issueKeys: { label: "Issues", width: 24, description: "Lista das chaves de inconsistência encontradas para o usuário." },
+  asaasCustomerId: { label: "Cliente Asaas", width: 18, description: "Identificador do cliente no Asaas." },
+  asaasSubscriptionId: { label: "Assinatura Asaas", width: 18, description: "Identificador da assinatura do usuário no Asaas." },
+  cardValidUntil: { label: "Válido até", width: 14, description: "Data final de acesso após cancelamento de cartão, quando aplicável." },
+  cardCanceledAt: { label: "Cancelado em", width: 14, description: "Data e hora em que a assinatura em cartão foi cancelada." },
+  docType: { label: "Tipo doc", width: 10, description: "Tipo do documento salvo de forma mascarada, como CPF ou CNPJ." },
+  docLast4: { label: "Doc final", width: 10, description: "Quatro últimos dígitos do documento mascarado." },
+  bucketKey: { label: "Chave bucket", width: 16, description: "Chave interna da categoria de inconsistência." },
+  label: { label: "Rótulo", width: 18, description: "Nome amigável do item ou métrica exportada." },
+  severity: { label: "Severidade", width: 12, description: "Nível de criticidade da inconsistência ou evento." },
+  description: { label: "Descrição", width: 30, description: "Texto explicativo resumindo o significado do item exportado." },
+  id: { label: "ID", width: 14, description: "Identificador único do evento ou registro exportado." },
+  ts: { label: "Timestamp", width: 22, description: "Data e hora em que o evento foi registrado." },
+  module: { label: "Módulo", width: 18, description: "Módulo do admin que originou o evento." },
+  action: { label: "Ação", width: 20, description: "Ação administrativa executada no sistema." },
+  targetId: { label: "Alvo ID", width: 16, description: "Identificador do alvo principal afetado pela ação." },
+  targetLabel: { label: "Alvo", width: 20, description: "Nome amigável do alvo afetado pela ação." },
+  summary: { label: "Resumo", width: 28, description: "Resumo curto da ação ou do registro exportado." },
+  actorUser: { label: "Admin", width: 18, description: "Usuário do painel que executou a ação." },
+  actorIp: { label: "IP", width: 16, description: "Endereço IP associado à ação administrativa." },
+  actorType: { label: "Tipo ator", width: 12, description: "Tipo do ator que originou o evento, normalmente admin." },
+  before: { label: "Antes", width: 24, description: "Estado anterior resumido antes da ação." },
+  after: { label: "Depois", width: 24, description: "Estado posterior resumido depois da ação." },
+  meta: { label: "Meta", width: 24, description: "Metadados adicionais registrados junto ao evento." },
+  section: { label: "Seção", width: 16, description: "Seção do relatório executivo à qual a métrica pertence." },
+  metric: { label: "Métrica", width: 22, description: "Nome da métrica exportada." },
+  value: { label: "Valor", width: 20, description: "Valor associado à métrica exportada." },
+};
+
+function humanizeHeader(key) {
+  return String(key || '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^./, (m) => m.toUpperCase());
+}
+
+function getExportFieldMeta(key) {
+  const normalized = String(key || '').trim();
+  const meta = EXPORT_FIELD_META[normalized] || {};
+  return {
+    key: normalized,
+    label: meta.label || humanizeHeader(normalized),
+    width: Math.max(8, Math.min(Number(meta.width || 16), 32)),
+    description: meta.description || ('Descrição do campo ' + humanizeHeader(normalized) + '.'),
+  };
+}
+
+function buildGlossaryRows(headers) {
+  return (Array.isArray(headers) ? headers : []).map((header) => {
+    const meta = getExportFieldMeta(header);
+    return { campo: meta.label, chave: meta.key, descricao: meta.description };
+  });
+}
+
 function rowsToHtmlTable(rows) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return '<table><tr><td>Sem dados</td></tr></table>';
   const headers = Array.from(new Set(list.flatMap((row) => Object.keys(row || {}))));
-  const thead = '<tr>' + headers.map((header) => '<th style="background:#eef2ff; border:1px solid #cbd5e1; padding:6px 8px; text-align:left;">' + escapeHtml(header) + '</th>').join('') + '</tr>';
+  const thead = '<tr>' + headers.map((header) => '<th style="background:#eef2ff; border:1px solid #cbd5e1; padding:6px 8px; text-align:left;">' + escapeHtml(getExportFieldMeta(header).label) + '</th>').join('') + '</tr>';
   const tbody = list.map((row) => '<tr>' + headers.map((header) => '<td style="border:1px solid #cbd5e1; padding:6px 8px; vertical-align:top;">' + escapeHtml(row?.[header] ?? '') + '</td>').join('') + '</tr>').join('');
   return '<table style="border-collapse:collapse; width:100%; font-family:Arial,sans-serif; font-size:12px;">' + thead + tbody + '</table>';
 }
 
 function rowsToExcelXml(rows, title = 'Exportação') {
-  const html = rowsToHtmlTable(rows);
+  const list = Array.isArray(rows) ? rows : [];
+  const headers = Array.from(new Set(list.flatMap((row) => Object.keys(row || {}))));
+  const glossaryHtml = rowsToHtmlTable(buildGlossaryRows(headers));
+  const html = rowsToHtmlTable(list);
   return '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">' +
     '<head><meta charset="utf-8" /><title>' + escapeHtml(title) + '</title></head>' +
-    '<body><h3 style="font-family:Arial,sans-serif;">' + escapeHtml(title) + '</h3>' + html + '</body></html>';
+    '<body>' +
+    '<h2 style="font-family:Arial,sans-serif; margin-bottom:6px;">' + escapeHtml(title) + '</h2>' +
+    '<div style="font-family:Arial,sans-serif; color:#475569; margin-bottom:14px;">Gerado em ' + escapeHtml(new Date().toLocaleString('pt-BR')) + '</div>' +
+    '<h3 style="font-family:Arial,sans-serif; margin:16px 0 8px;">Dicionário dos campos</h3>' + glossaryHtml +
+    '<h3 style="font-family:Arial,sans-serif; margin:16px 0 8px;">Dados exportados</h3>' + html +
+    '</body></html>';
 }
 
 function pdfEscape(value) {
   return String(value ?? '').replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
 }
 
+function normalizePdfCell(value) {
+  const text = String(value ?? '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+  return text || '—';
+}
+
+function wrapPdfText(text, width) {
+  const max = Math.max(8, Number(width || 20));
+  const raw = normalizePdfCell(text);
+  if (raw.length <= max) return [raw];
+  const words = raw.split(' ');
+  const lines = [];
+  let current = '';
+  for (const word of words) {
+    if (!current) {
+      current = word;
+      continue;
+    }
+    if ((current + ' ' + word).length <= max) {
+      current += ' ' + word;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+  const safe = [];
+  for (const line of lines) {
+    if (line.length <= max) safe.push(line);
+    else {
+      for (let i = 0; i < line.length; i += max) safe.push(line.slice(i, i + max));
+    }
+  }
+  return safe.length ? safe : ['—'];
+}
+
+function padPdfCell(value, width) {
+  const raw = String(value ?? '');
+  const max = Math.max(4, Number(width || 10));
+  if (raw.length === max) return raw;
+  if (raw.length < max) return raw.padEnd(max, ' ');
+  if (max <= 2) return raw.slice(0, max);
+  return raw.slice(0, max - 1) + '…';
+}
+
+function buildPdfColumnGroups(headers, maxChars = 132) {
+  const all = (Array.isArray(headers) ? headers : []).map((header) => getExportFieldMeta(header));
+  const pinnedKeys = ['waId', 'fullName', 'status'];
+  const pinned = all.filter((item) => pinnedKeys.includes(item.key));
+  const remaining = all.filter((item) => !pinnedKeys.includes(item.key));
+  const base = pinned.reduce((acc, item) => acc + item.width + 3, 0);
+  const groups = [];
+  let current = [];
+  let used = base;
+  for (const item of remaining) {
+    const size = item.width + 3;
+    if (current.length && used + size > maxChars) {
+      groups.push([...pinned, ...current]);
+      current = [item];
+      used = base + size;
+    } else {
+      current.push(item);
+      used += size;
+    }
+  }
+  if (current.length || !groups.length) groups.push([...pinned, ...current]);
+  return groups.filter((group) => group.length);
+}
+
 function rowsToPdfBuffer(title, rows) {
   const list = Array.isArray(rows) ? rows : [];
   const headers = list.length ? Array.from(new Set(list.flatMap((row) => Object.keys(row || {})))) : [];
-  const lines = [String(title || 'Exportação')];
-  if (!list.length) {
-    lines.push('Sem dados disponíveis.');
-  } else {
-    lines.push(headers.join(' | '));
-    lines.push('-'.repeat(Math.min(120, Math.max(20, headers.join(' | ').length))));
-    for (const row of list) {
-      const line = headers
-        .map((header) => String(row?.[header] ?? '').replace(/\r?\n/g, ' '))
-        .join(' | ');
-      lines.push(line.length > 240 ? line.slice(0, 237) + '...' : line);
+  const glossaryRows = buildGlossaryRows(headers);
+  const columnGroups = buildPdfColumnGroups(headers, 132);
+  const pages = [];
+  const pageLineLimit = 40;
+  const pushPage = (titleLine, lines) => {
+    const content = lines.length ? lines : ['Sem dados disponíveis.'];
+    for (let i = 0; i < content.length; i += pageLineLimit) {
+      pages.push({ title: titleLine, lines: content.slice(i, i + pageLineLimit) });
     }
+  };
+
+  if (!list.length) {
+    pushPage(String(title || 'Exportação'), [
+      'Sem dados disponíveis.',
+      '',
+      'Dicionário dos campos',
+      'Este relatório não possui colunas disponíveis nesta exportação.',
+    ]);
+  } else {
+    columnGroups.forEach((group, groupIndex) => {
+      const groupTitle = String(title || 'Exportação') + ' · Tabela ' + (groupIndex + 1) + '/' + columnGroups.length;
+      const headerLine = group.map((item) => padPdfCell(item.label, item.width)).join(' | ');
+      const divider = group.map((item) => '-'.repeat(item.width)).join('-+-');
+      const lines = [
+        'Gerado em: ' + new Date().toLocaleString('pt-BR'),
+        'Campos exibidos: ' + group.map((item) => item.label).join(', '),
+        '',
+        headerLine,
+        divider,
+      ];
+
+      for (const row of list) {
+        const wrappedCells = group.map((item) => wrapPdfText(row?.[item.key] ?? '', item.width));
+        const rowHeight = Math.max(...wrappedCells.map((parts) => parts.length));
+        for (let lineIndex = 0; lineIndex < rowHeight; lineIndex += 1) {
+          const visualLine = group.map((item, idx) => padPdfCell(wrappedCells[idx][lineIndex] || '', item.width)).join(' | ');
+          lines.push(visualLine);
+        }
+        lines.push(divider);
+      }
+      pushPage(groupTitle, lines);
+    });
+
+    const glossaryLines = [
+      'Gerado em: ' + new Date().toLocaleString('pt-BR'),
+      'Este dicionário explica o significado de cada campo exportado.',
+      '',
+    ];
+    glossaryRows.forEach((item) => {
+      const label = item.campo + ' (' + item.chave + '): ';
+      const wrapped = wrapPdfText(label + item.descricao, 124);
+      wrapped.forEach((line) => glossaryLines.push(line));
+      glossaryLines.push('');
+    });
+    pushPage(String(title || 'Exportação') + ' · Dicionário dos campos', glossaryLines);
   }
 
-  const pageHeight = 792;
-  const startY = 760;
-  const linesPerPage = 58;
-  const pages = [];
-  for (let i = 0; i < lines.length; i += linesPerPage) {
-    pages.push(lines.slice(i, i + linesPerPage));
-  }
+  const pageWidth = 842;
+  const pageHeight = 595;
+  const startY = 560;
+  const fontSize = 8;
+  const left = 26;
 
   const objects = [];
   const addObject = (content) => {
@@ -585,17 +777,17 @@ function rowsToPdfBuffer(title, rows) {
     return objects.length;
   };
 
-  const fontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  const fontId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>');
   const pageIds = [];
-  for (const pageLines of pages) {
-    let stream = 'BT\n/F1 10 Tf\n50 ' + startY + ' Td\n';
-    pageLines.forEach((line, index) => {
-      if (index === 0) stream += '(' + pdfEscape(line) + ') Tj\n';
-      else stream += 'T* (' + pdfEscape(line) + ') Tj\n';
+  for (const page of pages) {
+    let stream = 'BT\n/F1 ' + fontSize + ' Tf\n' + left + ' ' + startY + ' Td\n';
+    stream += '(' + pdfEscape(page.title) + ') Tj\n';
+    page.lines.forEach((line) => {
+      stream += 'T* (' + pdfEscape(line) + ') Tj\n';
     });
     stream += 'ET';
     const contentId = addObject('<< /Length ' + Buffer.byteLength(stream, 'utf8') + ' >>\nstream\n' + stream + '\nendstream');
-    const pageId = addObject('<< /Type /Page /Parent PAGES_ID 0 R /MediaBox [0 0 612 ' + pageHeight + '] /Resources << /Font << /F1 ' + fontId + ' 0 R >> >> /Contents ' + contentId + ' 0 R >>');
+    const pageId = addObject('<< /Type /Page /Parent PAGES_ID 0 R /MediaBox [0 0 ' + pageWidth + ' ' + pageHeight + '] /Resources << /Font << /F1 ' + fontId + ' 0 R >> >> /Contents ' + contentId + ' 0 R >>');
     pageIds.push(pageId);
   }
 
