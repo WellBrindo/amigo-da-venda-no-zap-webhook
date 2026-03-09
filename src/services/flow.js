@@ -1074,33 +1074,20 @@ export async function handleInboundText({ waId, text }) {
     await setTemplateMode(id, mode);
     await setTemplatePrompted(id, true);
 
-    // prepara sugestão de perfil (se houver dados)
-    const ad = await getLastAd(id);
-    const suggestion = extractBizProfileFromText(ad);
-    if (suggestion) {
-      await setPendingBizProfile(id, suggestion);
-      await setUserStatus(id, ST.WAIT_SAVE_PROFILE);
-      return replyMulti([await msgTemplateSet(id, mode), await msgAskSaveProfile(id, suggestion)]);
-    }
-
-    // sem dados detectados: volta ao status anterior e encerra
-    const prev = await getPrevStatus(id);
-    await clearPrevStatus(id);
-    if (prev && prev !== ST.WAIT_TEMPLATE_MODE) await setUserStatus(id, prev);
-    else await setUserStatus(id, ST.WAIT_PRODUCT);
-
-    const maxRef = await resolveMaxRefinementsForUser(id, prev === ST.ACTIVE ? false : true);
-    return replyMulti([await msgTemplateSet(id, mode), await msgAfterSaveProfile(id, false, maxRef)]);
+    const currentBiz = await getBizProfile(id);
+    await setPendingBizProfile(id, (currentBiz && typeof currentBiz === "object") ? currentBiz : {});
+    await setUserStatus(id, ST.WAIT_SAVE_PROFILE);
+    return replyMulti([await msgTemplateSet(id, mode), await msgAskSaveProfile(id, null)]);
   }
 
   // 0.4) Pós-anúncio — salvar perfil (1/2/3)
   if (status === ST.WAIT_SAVE_PROFILE) {
     const c = normalizeChoice(inbound);
 
-    // Opção 3: wizard para complementar/cadastrar dados manualmente
-    if (c === "3") {
-      // usa a sugestão pendente como ponto de partida (se existir)
-      const pending = (await getPendingBizProfile(id)) || {};
+    // Opção 1 ou 3: abrir wizard para cadastrar/complementar dados manualmente
+    if (c === "1" || c === "3") {
+      const current = await getBizProfile(id);
+      const pending = (await getPendingBizProfile(id)) || (current && typeof current === "object" ? current : {});
       await setPendingBizProfile(id, pending);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_COMPANY);
 
@@ -1108,12 +1095,13 @@ export async function handleInboundText({ waId, text }) {
         await getCopyText("FLOW_PROFILE_WIZARD_INTRO", { waId: id }),
         "",
         await getCopyText("FLOW_PROFILE_WIZARD_STEP1_COMPANY", { waId: id }),
-      ].join("\n");
+      ].join("
+");
       return reply(msg);
     }
 
     // se não for escolha válida, volta ao status anterior e reprocessa (pode ser refinamento)
-    if (c !== "1" && c !== "2") {
+    if (c !== "2") {
       const prev = await getPrevStatus(id);
       await clearPrevStatus(id);
       await clearPendingBizProfile(id);
@@ -1125,15 +1113,6 @@ export async function handleInboundText({ waId, text }) {
       return await handleInboundText({ waId: id, text: inbound });
     }
 
-    let saved = false;
-    if (c === "1") {
-      const pending = await getPendingBizProfile(id);
-      if (pending) {
-        await setBizProfile(id, pending);
-        saved = true;
-      }
-    }
-
     await clearPendingBizProfile(id);
 
     const prev = await getPrevStatus(id);
@@ -1143,7 +1122,7 @@ export async function handleInboundText({ waId, text }) {
 
     const isTrialNow = prev !== ST.ACTIVE;
     const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
-    return replyMulti([await msgAfterSaveProfile(id, saved, maxRef)]);
+    return replyMulti([await msgAfterSaveProfile(id, false, maxRef)]);
   }
 
 
