@@ -1095,8 +1095,7 @@ export async function handleInboundText({ waId, text }) {
         await getCopyText("FLOW_PROFILE_WIZARD_INTRO", { waId: id }),
         "",
         await getCopyText("FLOW_PROFILE_WIZARD_STEP1_COMPANY", { waId: id }),
-      ].join("
-");
+      ].join("\n");
       return reply(msg);
     }
 
