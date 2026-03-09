@@ -75,7 +75,7 @@ import {
   setCardCanceledAt,
 } from "./state.js";
 
-import { getMenuPlans, getPlanByChoice, renderPlansMenu } from "./Plans.js";
+import { getMenuPlans, getPlan, getPlanByChoice, renderPlansMenu } from "./Plans.js";
 import { validateDoc } from "./brDoc.js";
 
 import {
@@ -1420,12 +1420,6 @@ export async function handleInboundText({ waId, text }) {
 
   // 8) ACTIVE
   if (status === ST.ACTIVE) {
-    if (wantsOkCommand(inbound)) {
-      await clearLastAd(id);
-      await clearRefineCount(id);
-      await clearLastPrompt(id);
-      return reply(await getCopyText("FLOW_OK_NEXT_DESCRIPTION", { waId: id }));
-    }
     if (isGreeting(inbound)) return reply(await msgAskProduct(id));
     return await handleGenerateAdInTrialOrActive({ waId: id, inboundText: inbound, isTrial: false, currentStatus: status });
   }
@@ -1434,22 +1428,71 @@ export async function handleInboundText({ waId, text }) {
   return reply(await getCopyText("FLOW_FALLBACK_UNKNOWN", { waId: id }));
 }
 
-async function resolveMaxRefinementsForUser(waId, isTrial) {
+async function getRefinementPolicyForUser(waId, isTrial) {
   const DEFAULT_MAX_REFINEMENTS = 2;
-  if (isTrial) return DEFAULT_MAX_REFINEMENTS;
 
-  let maxRefinements = DEFAULT_MAX_REFINEMENTS;
+  if (isTrial) {
+    return {
+      isTrial: true,
+      planCode: "",
+      maxRefinements: DEFAULT_MAX_REFINEMENTS,
+      source: "TRIAL_DEFAULT",
+    };
+  }
+
   const planCode = await getUserPlan(waId);
-  const plan = (await getMenuPlans()).find((p) => p.code === planCode);
+  if (!planCode) {
+    return {
+      isTrial: false,
+      planCode: "",
+      maxRefinements: DEFAULT_MAX_REFINEMENTS,
+      source: "NO_PLAN_DEFAULT",
+    };
+  }
+
+  let plan = await getPlan(planCode);
+  if (!plan) {
+    plan = (await getMenuPlans()).find((p) => p.code === planCode) || null;
+  }
+
   const fromPlan = Number(plan?.maxRefinements);
-  if (Number.isFinite(fromPlan) && fromPlan >= 0) maxRefinements = Math.trunc(fromPlan);
-  return maxRefinements;
+  const maxRefinements =
+    Number.isFinite(fromPlan) && fromPlan >= 0
+      ? Math.trunc(fromPlan)
+      : DEFAULT_MAX_REFINEMENTS;
+
+  return {
+    isTrial: false,
+    planCode,
+    maxRefinements,
+    source: plan ? "PLAN" : "PLAN_NOT_FOUND_DEFAULT",
+  };
+}
+
+async function resolveMaxRefinementsForUser(waId, isTrial) {
+  const policy = await getRefinementPolicyForUser(waId, isTrial);
+  return policy.maxRefinements;
+}
+
+async function handlePostAdDecisionCommand({ waId, inboundText }) {
+  const lastAd = await getLastAd(waId);
+  if (!lastAd) return null;
+  if (!wantsOkCommand(inboundText)) return null;
+
+  await clearLastAd(waId);
+  await clearRefineCount(waId);
+  await clearLastPrompt(waId);
+
+  return reply(await getCopyText("FLOW_OK_NEXT_DESCRIPTION", { waId }));
 }
 
 // -------------------- Generate Ad --------------------
 async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, currentStatus }) {
   const id = waId;
   const userText = inboundText;
+
+  const postAdDecision = await handlePostAdDecisionCommand({ waId: id, inboundText: userText });
+  if (postAdDecision) return postAdDecision;
 
   const lastAd = await getLastAd(id);
   const isRefinement = !!lastAd;
@@ -1528,7 +1571,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
         if (prof.productList) parts.push(`Catálogo/Lista: ${prof.productList}`);
         if (Array.isArray(prof.socials) && prof.socials.length) parts.push(`Redes: ${prof.socials.join(' | ')}`);
         if (parts.length) {
-          promptToSend = `CONTEXTO_DA_EMPRESA (use somente se ajudar; trate como contexto invisível e priorize a DESCRIÇÃO_DO_USUÁRIO se houver conflito):\n${parts.join("\n")}\n\nDESCRIÇÃO_DO_USUÁRIO:\n${userText}`;
+          promptToSend = `CONTEXTO_DA_EMPRESA (use somente se ajudar; não é obrigatório repetir literalmente):\n${parts.join("\n")}\n\nDESCRIÇÃO_DO_USUÁRIO:\n${userText}`;
         }
       }
     }
