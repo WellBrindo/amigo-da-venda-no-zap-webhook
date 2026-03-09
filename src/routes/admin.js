@@ -4856,6 +4856,21 @@ async function toggle(code, active){
     }
   });
 
+  router.get("/export/finance-saas", async (req, res) => {
+    try {
+      const format = normalizeExportFormat(req.query?.format);
+      const data = await buildFinanceSaasDashboardData();
+      if (format === "json") {
+        return sendExport(res, "amigo_financeiro_saas", "json", data);
+      }
+
+      const rows = buildFinanceSaasExportRows(data);
+      return sendExport(res, "amigo_financeiro_saas", format, rows, { title: "Dashboard Financeiro SaaS" });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
   router.get("/reports-ui", async (req, res) => {
     const inner = `
       <div class="card pad" style="margin-bottom:14px;">
@@ -4866,6 +4881,7 @@ async function toggle(code, active){
           </div>
           <div class="row">
             <a class="pill" href="/admin/executive-ui">Dashboard Executivo</a>
+            <a class="pill" href="/admin/finance-saas-ui">Financeiro SaaS</a>
             <a class="pill" href="/admin/audit-ui">Auditoria</a>
             <a class="pill" href="/admin/inconsistencies-ui">Inconsistências</a>
             <button type="button" class="primary" id="reportsReloadBtn">Atualizar</button>
@@ -4931,6 +4947,19 @@ async function toggle(code, active){
                 <a class="pill" href="/admin/export/executive?format=excel">Excel</a>
                 <a class="pill" href="/admin/export/executive?format=pdf">PDF</a>
                 <a class="pill" href="/admin/export/executive?format=json">JSON</a>
+              </div>
+            </div>
+            <div class="card pad">
+              <b>Dashboard Financeiro SaaS</b>
+              <div class="muted" style="margin:6px 0 10px 0;">MRR, ARR, conversão, métodos de pagamento, top planos, top cidades, top estados, evolução mensal e pagamentos recentes.</div>
+              <div class="row" style="margin-bottom:10px;">
+                <a class="pill" href="/admin/finance-saas-ui">Abrir dashboard</a>
+              </div>
+              <div class="row">
+                <a class="pill" href="/admin/export/finance-saas?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/finance-saas?format=excel">Excel</a>
+                <a class="pill" href="/admin/export/finance-saas?format=pdf">PDF</a>
+                <a class="pill" href="/admin/export/finance-saas?format=json">JSON</a>
               </div>
             </div>
           </div>
@@ -5964,6 +5993,85 @@ async function toggle(code, active){
       ledger: ledgerMetrics,
       inconsistencies: inconsistencyData,
     };
+  }
+
+  function buildFinanceSaasExportRows(data) {
+    const rows = [];
+    const headline = data?.headline || {};
+    const quality = data?.quality || {};
+    const ledger = data?.ledger || {};
+    const plans = Array.isArray(data?.plans) ? data.plans : [];
+    const cities = Array.isArray(data?.cities) ? data.cities : [];
+    const states = Array.isArray(data?.states) ? data.states : [];
+    const statusSeries = Array.isArray(data?.series?.statusSeries) ? data.series.statusSeries : [];
+    const paymentMethods = Array.isArray(data?.series?.paymentMethods) ? data.series.paymentMethods : [];
+    const monthlyUsage = Array.isArray(data?.series?.monthlyUsage) ? data.series.monthlyUsage : [];
+    const recentPayments = Array.isArray(data?.recentPayments) ? data.recentPayments : [];
+    const inconsistencies = Array.isArray(data?.inconsistencies?.summary) ? data.inconsistencies.summary : [];
+
+    function push(section, metric, value, detail = '', rank = '') {
+      rows.push({ section, metric, value, detail, rank });
+    }
+
+    push('headline', 'totalUsers', Number(headline.totalUsers || 0));
+    push('headline', 'activeUsers', Number(headline.activeUsers || 0));
+    push('headline', 'trialUsers', Number(headline.trialUsers || 0));
+    push('headline', 'paidUsers', Number(headline.paidUsers || 0));
+    push('headline', 'blockedUsers', Number(headline.blockedUsers || 0));
+    push('headline', 'paymentPendingUsers', Number(headline.paymentPendingUsers || 0));
+    push('headline', 'waitPlanUsers', Number(headline.waitPlanUsers || 0));
+    push('headline', 'canceledUsers', Number(headline.canceledUsers || 0));
+    push('headline', 'mrrCents', Number(headline.mrrCents || 0), formatMoneyCents(headline.mrrCents || 0));
+    push('headline', 'arrCents', Number(headline.arrCents || 0), formatMoneyCents(headline.arrCents || 0));
+    push('headline', 'avgTicketCents', Number(headline.avgTicketCents || 0), formatMoneyCents(headline.avgTicketCents || 0));
+    push('headline', 'trialToPaidPct', Number(headline.trialToPaidPct || 0), 'Conversão trial → pago');
+    push('headline', 'billableCoveragePct', Number(headline.billableCoveragePct || 0), 'Cobertura de cobrança');
+    push('headline', 'subscriptionCoveragePct', Number(headline.subscriptionCoveragePct || 0), 'Cobertura de assinaturas');
+    push('headline', 'billingCoveragePct', Number(headline.billingCoveragePct || 0), 'Cobertura de billing');
+    push('headline', 'asaasCoveragePct', Number(headline.asaasCoveragePct || 0), 'Cobertura Asaas');
+    push('headline', 'nameCoveragePct', Number(headline.nameCoveragePct || 0), 'Cobertura de nomes');
+    push('headline', 'active24hCount', Number(headline.active24hCount || 0));
+    push('headline', 'active24hPct', Number(headline.active24hPct || 0), 'Base ativa na janela de 24h');
+    push('headline', 'avgMonthlyUsage', Number(headline.avgMonthlyUsage || 0));
+    push('headline', 'descriptionsMonth', Number(headline.descriptionsMonth || 0), String(headline.monthLabel || ''));
+    push('headline', 'descriptionsToday', Number(headline.descriptionsToday || 0), String(headline.dayLabel || ''));
+
+    push('quality', 'usersWithName', Number(quality.usersWithName || 0));
+    push('quality', 'usersWithBilling', Number(quality.usersWithBilling || 0));
+    push('quality', 'usersWithAsaasCustomer', Number(quality.usersWithAsaasCustomer || 0));
+    push('quality', 'usersWithSubscription', Number(quality.usersWithSubscription || 0));
+    push('quality', 'totalUsageCounter', Number(quality.totalUsageCounter || 0));
+
+    push('ledger', 'totalEvents', Number(ledger.totalEvents || 0));
+    push('ledger', 'financialEvents', Number(ledger.financialEvents || 0));
+    push('ledger', 'latestEventAt', String(ledger.latestEventAt || ''));
+
+    plans.forEach((item, index) => {
+      push('plans', String(item.name || item.code || 'Plano'), Number(item.mrrCents || 0), 'Usuários: ' + Number(item.count || 0) + ' · Uso médio: ' + String(item.avgUsagePerUser || 0).replace('.', ','), String(index + 1));
+    });
+    cities.forEach((item, index) => {
+      push('cities', String(item.city || '—'), Number(item.count || 0), 'Top cidades', String(index + 1));
+    });
+    states.forEach((item, index) => {
+      push('states', String(item.state || '—'), Number(item.count || 0), 'Top estados', String(index + 1));
+    });
+    statusSeries.forEach((item, index) => {
+      push('statusSeries', String(item.label || '—'), Number(item.count || 0), 'Participação: ' + Number(item.pct || 0) + '%', String(index + 1));
+    });
+    paymentMethods.forEach((item, index) => {
+      push('paymentMethods', String(item.label || '—'), Number(item.count || 0), 'Método salvo', String(index + 1));
+    });
+    monthlyUsage.forEach((item, index) => {
+      push('monthlyUsage', String(item.label || '—'), Number(item.descriptions || 0), 'MRR referência: ' + formatMoneyCents(item.mrrCents || 0), String(index + 1));
+    });
+    recentPayments.forEach((item, index) => {
+      push('recentPayments', String(item.when || item.paymentId || item.subscriptionId || '—'), item.value === null || item.value === undefined ? '' : Number(item.value || 0), [item.event, item.status, item.customerName].filter(Boolean).join(' · '), String(index + 1));
+    });
+    inconsistencies.forEach((item, index) => {
+      push('inconsistencies', String(item.label || '—'), Number(item.count || 0), 'Severidade: ' + String(item.severity || '—'), String(index + 1));
+    });
+
+    return rows;
   }
 
   router.get("/finance-saas-data", async (req, res) => {
