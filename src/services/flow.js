@@ -488,62 +488,6 @@ function enforceAdFormatting(adText) {
   return arr.join("\n").trim().replace(/\*{2,}/g, "*");
 }
 
-function extractBizProfileFromText(text) {
-  const raw = normalizeNewlines(text);
-  // Para detectar dados, usamos uma versão "plain" (sem *), porque o formatter aplica negrito.
-  const plain = raw.replace(/\*/g, "");
-  const profile = {};
-
-  // Nome da empresa (heurística robusta)
-  // Ex.: "A Simetria Group é ..." | "O X é ..." | "*Simetria Group* é ..."
-  const companyRe = /\b([AaOo])\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,80}?)\s+é\b/;
-  const m1 = plain.match(companyRe);
-  if (m1 && m1[2]) profile.companyName = String(m1[2]).trim();
-
-  // Alternativa: "Somos a X" / "Aqui é a X"
-  if (!profile.companyName) {
-    const altRe = /\b(somos|aqui\s+é|eu\s+sou)\s+(a|o)\s+([A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][\wÀ-ÿ&\-\. ]{2,80}?)(\b|\.|,)/i;
-    const m2 = plain.match(altRe);
-    if (m2 && m2[3]) profile.companyName = String(m2[3]).trim();
-  }
-
-  // Atendimento (linha com "Atendimento")
-  const attLine = plain
-    .split("\n")
-    .map((l) => l.trim())
-    .find((l) => /atendimento/i.test(l));
-  if (attLine) profile.serviceArea = attLine;
-
-  // Horário (heurística)
-  const hoursRe =
-    /(\bSeg\b.*\bSex\b.*\d{1,2}h\s*[–\-]\s*\d{1,2}h)|(\d{1,2}:\d{2}\s*[–\-]\s*\d{1,2}:\d{2})/i;
-  const hm = plain.match(hoursRe);
-  if (hm) profile.hours = String(hm[0]).trim();
-
-  // Local (linha com 📍)
-  const loc = plain
-    .split("\n")
-    .map((l) => l.trim())
-    .find((l) => l.startsWith("📍"));
-  if (loc) profile.location = loc.replace(/^📍\s*/, "").trim();
-
-  // WhatsApp (se houver)
-  const wa = plain.match(/\+?55\s*\(?\d{2}\)?\s*\d{4,5}[\-\s]?\d{4}/);
-  if (wa) profile.whatsapp = String(wa[0]).replace(/\s+/g, " ").trim();
-
-  // Fallback: se não detectou nome, tenta pegar o 1º trecho em negrito no corpo
-  if (!profile.companyName) {
-    const rawBold = raw.match(/\*([^*]{2,80})\*\s+(é|oferece|atua|ajuda|entrega|faz)\b/i);
-    if (rawBold && rawBold[1]) profile.companyName = String(rawBold[1]).trim();
-  }
-
-  // remove vazios
-  for (const k of Object.keys(profile)) {
-    if (!String(profile[k] || "").trim()) delete profile[k];
-  }
-  if (Object.keys(profile).length === 0) return null;
-  return profile;
-}
 
 
 
@@ -644,34 +588,18 @@ E a qualquer momento você pode digitar *MENU* para ajustar.`;
 }
 
 
-function renderProfileForConfirmation(profile) {
-  const lines = [];
-  if (profile.companyName) lines.push(`• Empresa: ${boldWrapSafe(profile.companyName)}`);
-  if (profile.serviceArea) lines.push(`• ${profile.serviceArea}`);
-  if (profile.hours) lines.push(`• Horário: ${profile.hours}`);
-  if (profile.location) lines.push(`• Local: ${profile.location}`);
-  if (profile.whatsapp) lines.push(`• WhatsApp: ${profile.whatsapp}`);
-  return lines;
+
+async function msgAskProfileRegistration(waId) {
+  return [
+    "Quer cadastrar os dados da sua empresa para eu usar automaticamente nos próximos anúncios? 🙂",
+    "",
+    "1) Sim, cadastrar agora",
+    "2) Agora não",
+    "",
+    "Assim você não precisa repetir essas informações toda vez. ✅",
+  ].join("\n");
 }
 
-async function msgAskSaveProfile(waId, profile) {
-  const lines = [];
-  lines.push(await getCopyText("FLOW_SAVE_PROFILE_INTRO", { waId }));
-  lines.push(await getCopyText("FLOW_SAVE_PROFILE_ASK", { waId }));
-  lines.push("");
-  const items = renderProfileForConfirmation(profile);
-  if (items.length) {
-    lines.push(await getCopyText("FLOW_SAVE_PROFILE_WILL_SAVE", { waId }));
-    lines.push(...items);
-    lines.push("");
-  }
-  lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_YES", { waId }));
-  lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_NO", { waId }));
-  lines.push(await getCopyText("FLOW_SAVE_PROFILE_OPT_ADD", { waId }));
-  lines.push("");
-  lines.push(await getCopyText("FLOW_SAVE_PROFILE_BENEFIT", { waId }));
-  return lines.join("\n");
-}
 
 function buildRefinementReminder(maxRefinements) {
   const qty = Number.isFinite(Number(maxRefinements)) && Number(maxRefinements) >= 0
@@ -1077,17 +1005,19 @@ export async function handleInboundText({ waId, text }) {
     const currentBiz = await getBizProfile(id);
     await setPendingBizProfile(id, (currentBiz && typeof currentBiz === "object") ? currentBiz : {});
     await setUserStatus(id, ST.WAIT_SAVE_PROFILE);
-    return replyMulti([await msgTemplateSet(id, mode), await msgAskSaveProfile(id, null)]);
+    return replyMulti([await msgTemplateSet(id, mode), await msgAskProfileRegistration(id)]);
   }
 
-  // 0.4) Pós-anúncio — salvar perfil (1/2/3)
+  // 0.4) Pós-anúncio — cadastro dos dados da empresa (1/2)
   if (status === ST.WAIT_SAVE_PROFILE) {
     const c = normalizeChoice(inbound);
 
-    // Opção 1 ou 3: abrir wizard para cadastrar/complementar dados manualmente
-    if (c === "1" || c === "3") {
+    if (c === "1") {
       const current = await getBizProfile(id);
-      const pending = (await getPendingBizProfile(id)) || (current && typeof current === "object" ? current : {});
+      const pending =
+        (await getPendingBizProfile(id)) ||
+        (current && typeof current === "object" ? current : {});
+
       await setPendingBizProfile(id, pending);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_COMPANY);
 
@@ -1099,29 +1029,20 @@ export async function handleInboundText({ waId, text }) {
       return reply(msg);
     }
 
-    // se não for escolha válida, volta ao status anterior e reprocessa (pode ser refinamento)
-    if (c !== "2") {
+    if (c === "2") {
+      await clearPendingBizProfile(id);
+
       const prev = await getPrevStatus(id);
       await clearPrevStatus(id);
-      await clearPendingBizProfile(id);
-      if (prev && prev !== ST.WAIT_SAVE_PROFILE) {
-        await setUserStatus(id, prev);
-      } else {
-        await setUserStatus(id, ST.WAIT_PRODUCT);
-      }
-      return await handleInboundText({ waId: id, text: inbound });
+      if (prev && prev !== ST.WAIT_SAVE_PROFILE) await setUserStatus(id, prev);
+      else await setUserStatus(id, ST.WAIT_PRODUCT);
+
+      const isTrialNow = prev !== ST.ACTIVE;
+      const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
+      return replyMulti([await msgAfterSaveProfile(id, false, maxRef)]);
     }
 
-    await clearPendingBizProfile(id);
-
-    const prev = await getPrevStatus(id);
-    await clearPrevStatus(id);
-    if (prev && prev !== ST.WAIT_SAVE_PROFILE) await setUserStatus(id, prev);
-    else await setUserStatus(id, ST.WAIT_PRODUCT);
-
-    const isTrialNow = prev !== ST.ACTIVE;
-    const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
-    return replyMulti([await msgAfterSaveProfile(id, false, maxRef)]);
+    return reply(await msgAskProfileRegistration(id));
   }
 
 
