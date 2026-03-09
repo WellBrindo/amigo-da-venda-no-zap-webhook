@@ -6,36 +6,35 @@ import { asaasRouter } from "./routes/asaas.js";
 import { adminRouter } from "./routes/admin.js";
 
 import { redisPing } from "./services/redis.js";
+import { resolveAdminSession } from "./services/adminAccess.js";
 
 const APP_NAME = "amigo-das-vendas";
 const APP_VERSION = "16.0.9-modular-clean-server-bootstrap";
 
 const ADMIN_SECRET = String(process.env.ADMIN_SECRET || "").trim();
 
-function basicAuth(req, res, next) {
-  // Admin sempre protegido. Se faltar env, melhor falhar cedo.
-  if (!ADMIN_SECRET) {
-    return res.status(500).send("ADMIN_SECRET missing");
-  }
-
+async function basicAuth(req, res, next) {
   const h = String(req.headers.authorization || "");
   if (!h.startsWith("Basic ")) {
     res.setHeader("WWW-Authenticate", 'Basic realm="Admin"');
     return res.status(401).send("Auth required");
   }
 
-  const b64 = h.slice("Basic ".length);
-  let decoded = "";
   try {
-    decoded = Buffer.from(b64, "base64").toString("utf8");
-  } catch {
-    return res.status(401).send("Invalid auth");
+    const session = await resolveAdminSession({
+      authorization: h,
+      sharedSecret: ADMIN_SECRET,
+    });
+
+    if (!session?.ok || !session?.admin) {
+      return res.status(403).send("Forbidden");
+    }
+
+    req.adminAuth = session.admin;
+    return next();
+  } catch (err) {
+    return res.status(500).send(String(err?.message || err || "Auth error"));
   }
-
-  const [_user, pass] = decoded.split(":");
-  if (!pass || pass !== ADMIN_SECRET) return res.status(403).send("Forbidden");
-
-  return next();
 }
 
 const app = express();
@@ -86,3 +85,4 @@ const PORT = Number(process.env.PORT || 10000);
 app.listen(PORT, () => {
   console.log(`[${APP_NAME}] ${APP_VERSION} listening on :${PORT}`);
 });
+
