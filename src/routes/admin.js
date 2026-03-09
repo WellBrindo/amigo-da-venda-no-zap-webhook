@@ -280,6 +280,7 @@ function renderSidebar(activePath){
 
       <details ${financeOpen ? "open" : ""}>
         <summary>💰 Financeiro <span>▾</span></summary>
+        ${item("/admin/finance-saas-ui", "Dashboard Financeiro SaaS", "📈")}
         ${item("/admin/finance-asaas-ui", "Asaas (Reconciliação)", "🧾")}
       </details>
 
@@ -2407,6 +2408,10 @@ router.get("/", async (req, res) => {
               <a class="card pad" href="/admin/broadcast-ui" style="display:block;">
                 <div class="muted" style="font-weight:700;">📣 Broadcast</div>
                 <div class="muted">Criar envios por plano e janela.</div>
+              </a>
+              <a class="card pad" href="/admin/finance-saas-ui" style="display:block;">
+                <div class="muted" style="font-weight:700;">📈 Dashboard Financeiro SaaS</div>
+                <div class="muted">MRR, ARR, conversão, cobertura Asaas e visão de receita.</div>
               </a>
               <a class="card pad" href="/admin/reports-ui" style="display:block;">
                 <div class="muted" style="font-weight:700;">📑 Relatórios e Exportação</div>
@@ -5640,6 +5645,727 @@ async function toggle(code, active){
   // Janela 24h (UI já existente)
   // -----------------------------
   
+  function parseBillingCityStateParts(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return { city: "", state: "" };
+    const normalized = raw.replace(/\s+/g, " ").trim();
+    let city = normalized;
+    let state = "";
+
+    if (normalized.includes("/")) {
+      const parts = normalized.split("/");
+      city = String(parts.slice(0, -1).join("/") || "").trim() || normalized;
+      state = String(parts[parts.length - 1] || "").trim().toUpperCase();
+    } else if (normalized.includes("-")) {
+      const parts = normalized.split("-");
+      city = String(parts.slice(0, -1).join("-") || "").trim() || normalized;
+      state = String(parts[parts.length - 1] || "").trim().toUpperCase();
+    } else if (/,\s*[A-Za-z]{2}$/.test(normalized)) {
+      const match = normalized.match(/^(.*),\s*([A-Za-z]{2})$/);
+      if (match) {
+        city = String(match[1] || "").trim() || normalized;
+        state = String(match[2] || "").trim().toUpperCase();
+      }
+    }
+
+    state = /^[A-Z]{2}$/.test(state) ? state : "";
+    return { city, state };
+  }
+
+  function getSeriesLabel(item, fallbackIndex = 0) {
+    return String(item?.month || item?.label || item?.key || item?.day || item?.date || fallbackIndex + 1 || "");
+  }
+
+  function getSeriesCount(item) {
+    return Number(item?.count ?? item?.value ?? item?.total ?? item?.qty ?? 0) || 0;
+  }
+
+  function eventLooksFinancial(evt) {
+    const raw = String(evt?.event || evt?.type || evt?.kind || "").toUpperCase();
+    if (!raw) return false;
+    return raw.includes("PAYMENT") || raw.includes("INVOICE") || raw.includes("BILLING") || raw.includes("RECEIVED") || raw.includes("CONFIRMED") || raw.includes("SUBSCRIPTION");
+  }
+
+  function normalizeLedgerPaymentItem(evt) {
+    const eventName = String(evt?.event || evt?.type || evt?.kind || "").trim();
+    const when = String(evt?.receivedAt || evt?.dateCreated || evt?.createdAt || evt?.ts || evt?.paymentDate || evt?.dueDate || "").trim();
+    const payload = evt?.payload && typeof evt.payload === "object" ? evt.payload : {};
+    const payment = evt?.payment && typeof evt.payment === "object"
+      ? evt.payment
+      : payload?.payment && typeof payload.payment === "object"
+        ? payload.payment
+        : payload;
+    const customer = evt?.customer && typeof evt.customer === "object"
+      ? evt.customer
+      : payload?.customer && typeof payload.customer === "object"
+        ? payload.customer
+        : {};
+
+    const paymentId = String(evt?.paymentId || payment?.id || payload?.paymentId || evt?.id || evt?.externalReference || "").trim();
+    const subscriptionId = String(evt?.subscriptionId || payment?.subscription || payload?.subscription || payload?.subscriptionId || "").trim();
+    const status = String(evt?.status || payment?.status || payload?.status || eventName || "").trim();
+    const description = String(
+      evt?.description ||
+      payment?.description ||
+      payload?.description ||
+      payload?.invoiceUrl ||
+      payment?.invoiceUrl ||
+      eventName ||
+      ""
+    ).trim();
+    const customerName = String(
+      evt?.customerName ||
+      customer?.name ||
+      payload?.customerName ||
+      payment?.name ||
+      payload?.name ||
+      ""
+    ).trim();
+
+    const valueRaw = evt?.value ?? payment?.value ?? payload?.value ?? payload?.netValue ?? payment?.netValue ?? null;
+    const value = valueRaw === null || valueRaw === undefined || valueRaw === "" ? null : Number(valueRaw || 0);
+
+    return {
+      when,
+      event: eventName,
+      paymentId,
+      subscriptionId,
+      status,
+      value,
+      customerName,
+      description,
+    };
+  }
+
+  async function buildFinanceSaasDashboardData() {
+    const [usersRaw, global, globalMonths, window24hCount, systemPlans, inconsistencyData, ledgerRaw] = await Promise.all([
+      listUsers(),
+      getGlobalDescriptionMetrics(),
+      getGlobalLastNMonths(12),
+      countWindow24hActive(),
+      listPlans({ includeInactive: true }),
+      collectInconsistencies(),
+      listAsaasEvents({ limit: 80, offset: 0 }),
+    ]);
+
+    const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
+    const now = nowMs();
+    const planMap = buildPlanMap(systemPlans);
+    const users = await mapLimit(waIds, 20, async (waId) => enrichUserForCrm(waId, planMap, now));
+
+    const statusCounts = {};
+    const paymentCounts = { CARD: 0, PIX: 0, NONE: 0, OTHER: 0 };
+    const planBuckets = new Map();
+    const cityCounts = new Map();
+    const stateCounts = new Map();
+
+    let activeUsers = 0;
+    let trialUsers = 0;
+    let paidUsers = 0;
+    let blockedUsers = 0;
+    let paymentPendingUsers = 0;
+    let waitPlanUsers = 0;
+    let canceledUsers = 0;
+    let usersWithName = 0;
+    let usersWithBilling = 0;
+    let usersWithAsaasCustomer = 0;
+    let usersWithSubscription = 0;
+    let billableBase = 0;
+    let billableCovered = 0;
+    let activeSubscriptionBase = 0;
+    let activeSubscriptionCovered = 0;
+    let totalMrrCents = 0;
+    let totalUsageCounter = 0;
+
+    for (const user of users) {
+      const status = String(user?.status || "UNKNOWN").trim().toUpperCase() || "UNKNOWN";
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+
+      const paymentMethod = String(user?.paymentMethod || "").trim().toUpperCase();
+      if (paymentMethod === "CARD") paymentCounts.CARD += 1;
+      else if (paymentMethod === "PIX") paymentCounts.PIX += 1;
+      else if (!paymentMethod) paymentCounts.NONE += 1;
+      else paymentCounts.OTHER += 1;
+
+      if (user?.fullName) usersWithName += 1;
+      if (user?.billingCityState || user?.billingAddress) usersWithBilling += 1;
+      if (user?.asaasCustomerId) usersWithAsaasCustomer += 1;
+      if (user?.asaasSubscriptionId) usersWithSubscription += 1;
+
+      if (status === "ACTIVE") activeUsers += 1;
+      else if (status === "TRIAL") trialUsers += 1;
+      else if (status === "BLOCKED") blockedUsers += 1;
+      else if (status === "PAYMENT_PENDING") paymentPendingUsers += 1;
+      else if (status === "WAIT_PLAN") waitPlanUsers += 1;
+      else if (status === "CANCELED") canceledUsers += 1;
+
+      if (user?.cardCanceledAt) canceledUsers += 1;
+
+      const isBillable = !!(paymentMethod || status === "ACTIVE" || status === "PAYMENT_PENDING" || user?.asaasCustomerId || user?.asaasSubscriptionId);
+      if (isBillable) {
+        billableBase += 1;
+        if (user?.asaasCustomerId) billableCovered += 1;
+      }
+
+      if (status === "ACTIVE") {
+        activeSubscriptionBase += 1;
+        if (user?.asaasSubscriptionId) activeSubscriptionCovered += 1;
+      }
+
+      const location = parseBillingCityStateParts(user?.billingCityState || "");
+      if (location.city) cityCounts.set(location.city, (cityCounts.get(location.city) || 0) + 1);
+      if (location.state) stateCounts.set(location.state, (stateCounts.get(location.state) || 0) + 1);
+
+      const planCode = String(user?.plan || "").trim().toUpperCase();
+      const planMeta = planCode ? planMap.get(planCode) : null;
+      const usageCounter = status === "TRIAL" ? Number(user?.trialUsed || 0) : Number(user?.quotaUsed || 0);
+      totalUsageCounter += usageCounter;
+
+      if (planCode) {
+        const current = planBuckets.get(planCode) || {
+          code: planCode,
+          name: String(planMeta?.name || planCode),
+          description: String(planMeta?.description || ""),
+          priceCents: Number(planMeta?.priceCents || 0),
+          active: !!planMeta?.active,
+          count: 0,
+          activeCount: 0,
+          trialCount: 0,
+          revenueUsers: 0,
+          monthlyUsage: 0,
+          mrrCents: 0,
+          arrCents: 0,
+        };
+        current.count += 1;
+        current.monthlyUsage += usageCounter;
+        if (status === "ACTIVE") current.activeCount += 1;
+        if (status === "TRIAL") current.trialCount += 1;
+        if (status === "ACTIVE" && Number(planMeta?.priceCents || 0) > 0) {
+          current.revenueUsers += 1;
+          current.mrrCents += Number(planMeta?.priceCents || 0);
+          totalMrrCents += Number(planMeta?.priceCents || 0);
+        }
+        current.arrCents = current.mrrCents * 12;
+        planBuckets.set(planCode, current);
+      }
+
+      if (status === "ACTIVE" && planMeta && Number(planMeta?.priceCents || 0) > 0) {
+        paidUsers += 1;
+      }
+    }
+
+    const totalUsers = users.length;
+    const arrCents = totalMrrCents * 12;
+    const avgTicketCents = paidUsers > 0 ? Math.round(totalMrrCents / paidUsers) : 0;
+    const conversionBase = activeUsers + trialUsers;
+    const trialToPaidPct = conversionBase > 0 ? Number(((activeUsers / conversionBase) * 100).toFixed(1)) : 0;
+    const billableCoveragePct = billableBase > 0 ? Number(((billableCovered / billableBase) * 100).toFixed(1)) : 0;
+    const subscriptionCoveragePct = activeSubscriptionBase > 0 ? Number(((activeSubscriptionCovered / activeSubscriptionBase) * 100).toFixed(1)) : 0;
+    const billingCoveragePct = totalUsers > 0 ? Number(((usersWithBilling / totalUsers) * 100).toFixed(1)) : 0;
+    const nameCoveragePct = totalUsers > 0 ? Number(((usersWithName / totalUsers) * 100).toFixed(1)) : 0;
+    const asaasCoveragePct = totalUsers > 0 ? Number(((usersWithAsaasCustomer / totalUsers) * 100).toFixed(1)) : 0;
+    const active24hPct = totalUsers > 0 ? Number(((Number(window24hCount || 0) / totalUsers) * 100).toFixed(1)) : 0;
+    const avgMonthlyUsage = activeUsers > 0 ? Number((Number(global?.monthCount || 0) / activeUsers).toFixed(2)) : 0;
+
+    const plans = Array.from(planBuckets.values())
+      .map((item) => ({
+        ...item,
+        avgUsagePerUser: item.count > 0 ? Number((item.monthlyUsage / item.count).toFixed(2)) : 0,
+      }))
+      .sort((a, b) => (b.mrrCents - a.mrrCents) || (b.count - a.count) || String(a.code).localeCompare(String(b.code)));
+
+    const cities = Array.from(cityCounts.entries())
+      .map(([city, count]) => ({ city, count }))
+      .sort((a, b) => (b.count - a.count) || String(a.city).localeCompare(String(b.city)))
+      .slice(0, 10);
+
+    const states = Array.from(stateCounts.entries())
+      .map(([state, count]) => ({ state, count }))
+      .sort((a, b) => (b.count - a.count) || String(a.state).localeCompare(String(b.state)))
+      .slice(0, 10);
+
+    const monthlyUsage = (Array.isArray(globalMonths) ? globalMonths : []).map((item, index) => ({
+      label: getSeriesLabel(item, index),
+      descriptions: getSeriesCount(item),
+      mrrCents: totalMrrCents,
+      arrCents,
+    }));
+
+    const statusSeries = Object.entries(statusCounts)
+      .map(([label, count]) => ({ label, count, pct: totalUsers > 0 ? Number(((count / totalUsers) * 100).toFixed(1)) : 0 }))
+      .sort((a, b) => b.count - a.count || String(a.label).localeCompare(String(b.label)));
+
+    const paymentMethods = [
+      { label: 'CARD', count: paymentCounts.CARD },
+      { label: 'PIX', count: paymentCounts.PIX },
+      { label: 'SEM MÉTODO', count: paymentCounts.NONE },
+      { label: 'OUTROS', count: paymentCounts.OTHER },
+    ];
+
+    const ledgerItems = Array.isArray(ledgerRaw?.items) ? ledgerRaw.items : [];
+    const recentPayments = ledgerItems
+      .filter((evt) => eventLooksFinancial(evt))
+      .map((evt) => normalizeLedgerPaymentItem(evt))
+      .filter((item) => item.when || item.paymentId || item.subscriptionId || item.event)
+      .sort((a, b) => String(b.when).localeCompare(String(a.when)))
+      .slice(0, 20);
+
+    const ledgerMetrics = {
+      totalEvents: ledgerItems.length,
+      financialEvents: recentPayments.length,
+      latestEventAt: recentPayments.length ? String(recentPayments[0].when || "") : "",
+    };
+
+    return {
+      ok: true,
+      ts: Date.now(),
+      headline: {
+        totalUsers,
+        activeUsers,
+        trialUsers,
+        paidUsers,
+        blockedUsers,
+        paymentPendingUsers,
+        waitPlanUsers,
+        canceledUsers,
+        mrrCents: totalMrrCents,
+        arrCents,
+        avgTicketCents,
+        trialToPaidPct,
+        billableCoveragePct,
+        subscriptionCoveragePct,
+        billingCoveragePct,
+        asaasCoveragePct,
+        nameCoveragePct,
+        active24hCount: Number(window24hCount || 0),
+        active24hPct,
+        avgMonthlyUsage,
+        descriptionsMonth: Number(global?.monthCount || 0),
+        descriptionsToday: Number(global?.dayCount || 0),
+        monthLabel: String(global?.month || ""),
+        dayLabel: String(global?.day || ""),
+      },
+      quality: {
+        usersWithName,
+        usersWithBilling,
+        usersWithAsaasCustomer,
+        usersWithSubscription,
+        totalUsageCounter,
+      },
+      series: {
+        monthlyUsage,
+        statusSeries,
+        paymentMethods,
+      },
+      plans,
+      cities,
+      states,
+      recentPayments,
+      ledger: ledgerMetrics,
+      inconsistencies: inconsistencyData,
+    };
+  }
+
+  router.get("/finance-saas-data", async (req, res) => {
+    try {
+      const data = await buildFinanceSaasDashboardData();
+      return res.json(data);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/finance-saas-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad" style="margin-bottom:14px;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">📈 Dashboard Financeiro SaaS</h3>
+            <div class="muted">Visão financeira consolidada: MRR, ARR, conversão, cobertura Asaas, composição da base e eventos recentes do faturamento.</div>
+          </div>
+          <div class="row" style="gap:8px; flex-wrap:wrap;">
+            <a class="pill" href="/admin/plans">💳 Planos</a>
+            <a class="pill" href="/admin/finance-asaas-ui">🧾 Reconciliação Asaas</a>
+            <a class="pill" href="/admin/inconsistencies-ui">🩺 Inconsistências</a>
+            <button type="button" class="primary" id="financeReloadBtn">Atualizar</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid cols3">
+        <div class="kpi"><div class="t">MRR estimado</div><div class="v" id="finMrr">—</div><div class="muted" id="finArrHint">—</div></div>
+        <div class="kpi"><div class="t">ARR estimado</div><div class="v" id="finArr">—</div><div class="muted" id="finAvgTicket">—</div></div>
+        <div class="kpi"><div class="t">Conversão trial → pago</div><div class="v" id="finConversion">—</div><div class="muted" id="finBaseUsers">—</div></div>
+      </div>
+
+      <div class="grid cols3" style="margin-top:12px;">
+        <div class="kpi"><div class="t">Base ativa na janela 24h</div><div class="v" id="fin24h">—</div><div class="muted" id="fin24hHint">—</div></div>
+        <div class="kpi"><div class="t">Cobertura Asaas</div><div class="v" id="finAsaasCoverage">—</div><div class="muted" id="finBillingCoverage">—</div></div>
+        <div class="kpi"><div class="t">Cobertura de assinaturas</div><div class="v" id="finSubCoverage">—</div><div class="muted" id="finUsageAvg">—</div></div>
+      </div>
+
+      <div class="grid cols3" style="margin-top:12px;">
+        <div class="kpi"><div class="t">Usuários pagos</div><div class="v" id="finPaidUsers">—</div><div class="muted" id="finPaidHint">—</div></div>
+        <div class="kpi"><div class="t">Usuários trial</div><div class="v" id="finTrialUsers">—</div><div class="muted" id="finStatusHint">—</div></div>
+        <div class="kpi"><div class="t">Usuários cancelados</div><div class="v" id="finCanceledUsers">—</div><div class="muted" id="finLedgerHint">—</div></div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <div>
+              <h4 style="margin:0;">Composição atual da base</h4>
+              <div class="muted">Status do funil comercial e operacional.</div>
+            </div>
+            <span class="badge info">Tempo real</span>
+          </div>
+          <div class="hr"></div>
+          <div id="finStatusChart"></div>
+        </div>
+
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <div>
+              <h4 style="margin:0;">Métodos de pagamento</h4>
+              <div class="muted">Cobrança atual cadastrada na base.</div>
+            </div>
+            <span class="badge soft">Distribuição</span>
+          </div>
+          <div class="hr"></div>
+          <div id="finPaymentChart"></div>
+        </div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <div>
+              <h4 style="margin:0;">Receita por plano</h4>
+              <div class="muted">MRR atual distribuído por plano ativo na base.</div>
+            </div>
+            <span class="badge ok">Receita recorrente</span>
+          </div>
+          <div class="hr"></div>
+          <div id="finPlanRevenueChart"></div>
+        </div>
+
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <div>
+              <h4 style="margin:0;">Evolução operacional</h4>
+              <div class="muted">Descrições por mês + referência da receita recorrente atual.</div>
+            </div>
+            <span class="badge warn">Últimos 12 meses</span>
+          </div>
+          <div class="hr"></div>
+          <div id="finMonthlyUsageChart"></div>
+        </div>
+      </div>
+
+      <div class="grid cols3" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <div>
+              <h4 style="margin:0;">Planos com maior MRR</h4>
+              <div class="muted">Ranking financeiro atual.</div>
+            </div>
+            <span class="badge soft">Top planos</span>
+          </div>
+          <div class="hr"></div>
+          <div style="overflow:auto;">
+            <table>
+              <thead>
+                <tr><th>Plano</th><th>Usuários</th><th>MRR</th><th>Uso médio</th></tr>
+              </thead>
+              <tbody id="finPlansRows"><tr><td colspan="4" class="muted">Carregando...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <div>
+              <h4 style="margin:0;">Top cidades</h4>
+              <div class="muted">billingCityState com maior concentração.</div>
+            </div>
+            <span class="badge soft">Localização</span>
+          </div>
+          <div class="hr"></div>
+          <div style="overflow:auto;">
+            <table>
+              <thead>
+                <tr><th>Cidade</th><th>Usuários</th></tr>
+              </thead>
+              <tbody id="finCitiesRows"><tr><td colspan="2" class="muted">Carregando...</td></tr></tbody>
+            </table>
+          </div>
+          <div class="hr"></div>
+          <div style="overflow:auto;">
+            <table>
+              <thead>
+                <tr><th>UF</th><th>Usuários</th></tr>
+              </thead>
+              <tbody id="finStatesRows"><tr><td colspan="2" class="muted">Carregando...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <div>
+              <h4 style="margin:0;">Pagamentos recentes (Asaas)</h4>
+              <div class="muted">Normalizados a partir do ledger de webhooks.</div>
+            </div>
+            <span class="badge info">Asaas</span>
+          </div>
+          <div class="hr"></div>
+          <div style="overflow:auto; max-height:430px;">
+            <table>
+              <thead>
+                <tr><th>Quando</th><th>Status</th><th>Valor</th><th>Cliente</th></tr>
+              </thead>
+              <tbody id="finPaymentsRows"><tr><td colspan="4" class="muted">Carregando...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; gap:8px; flex-wrap:wrap;">
+            <div>
+              <h4 style="margin:0;">Cobertura e saúde de cobrança</h4>
+              <div class="muted">Indicadores rápidos de integridade financeira da base.</div>
+            </div>
+            <span class="badge warn">Saúde</span>
+          </div>
+          <div class="hr"></div>
+          <div id="finHealthPills"></div>
+        </div>
+
+        <div class="card pad">
+          <details>
+            <summary class="muted">Ver JSON bruto</summary>
+            <pre id="finRaw" style="white-space:pre-wrap; overflow:auto; max-height:360px;"></pre>
+          </details>
+        </div>
+      </div>
+    `;
+
+    const headExtra = `
+      <style>
+        .fin-bars{ display:grid; gap:10px; }
+        .fin-bar{ display:grid; gap:6px; }
+        .fin-bar__top{ display:flex; justify-content:space-between; gap:10px; align-items:center; font-size:13px; }
+        .fin-bar__track{ width:100%; height:12px; border-radius:999px; background:#e5e7eb; overflow:hidden; }
+        .fin-bar__fill{ height:100%; border-radius:999px; background:linear-gradient(90deg, rgba(37,99,235,.95), rgba(16,185,129,.92)); }
+        .fin-mini{ font-size:12px; color:#6b7280; }
+      </style>
+    `;
+
+    const scriptExtra = `
+      <script>
+        (function(){
+          function esc(value){
+            return String(value ?? '')
+              .replaceAll('&','&amp;')
+              .replaceAll('<','&lt;')
+              .replaceAll('>','&gt;')
+              .replaceAll('"','&quot;')
+              .replaceAll("'",'&#39;');
+          }
+          function setText(id, value){
+            const el = document.getElementById(id);
+            if (el) el.textContent = String(value ?? '—');
+          }
+          function fmtBRL(cents){
+            const v = (Number(cents) || 0) / 100;
+            try { return v.toLocaleString('pt-BR', { style:'currency', currency:'BRL' }); }
+            catch (_) { return 'R$ ' + v.toFixed(2); }
+          }
+          function fmtMoney(value){
+            const n = Number(value || 0);
+            try { return n.toLocaleString('pt-BR', { style:'currency', currency:'BRL' }); }
+            catch (_) { return 'R$ ' + n.toFixed(2); }
+          }
+          function fmtPct(value){
+            return Number(value || 0).toFixed(1).replace('.', ',') + '%';
+          }
+          function fmtNum(value){
+            return Number(value || 0).toLocaleString('pt-BR');
+          }
+          function renderTableRows(containerId, rowsHtml, emptyColspan, emptyText){
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            el.innerHTML = rowsHtml || '<tr><td colspan="' + String(emptyColspan) + '" class="muted">' + esc(emptyText || 'Sem dados.') + '</td></tr>';
+          }
+          function renderBars(containerId, items, options){
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            const rows = Array.isArray(items) ? items : [];
+            if (!rows.length) {
+              el.innerHTML = '<div class="muted">Sem dados suficientes.</div>';
+              return;
+            }
+            const max = rows.reduce(function(acc, item){ return Math.max(acc, Number(options.value(item) || 0)); }, 0) || 1;
+            el.innerHTML = '<div class="fin-bars">' + rows.map(function(item){
+              const value = Number(options.value(item) || 0);
+              const pct = Math.max(2, Math.round((value / max) * 100));
+              const meta = typeof options.meta === 'function' ? options.meta(item) : '';
+              return '' +
+                '<div class="fin-bar">' +
+                  '<div class="fin-bar__top">' +
+                    '<div><b>' + esc(options.label(item)) + '</b>' + (meta ? ('<div class="fin-mini">' + esc(meta) + '</div>') : '') + '</div>' +
+                    '<div><b>' + esc(options.display(item)) + '</b></div>' +
+                  '</div>' +
+                  '<div class="fin-bar__track"><div class="fin-bar__fill" style="width:' + pct + '%;"></div></div>' +
+                '</div>';
+            }).join('') + '</div>';
+          }
+          function renderHealthPills(containerId, items){
+            const el = document.getElementById(containerId);
+            if (!el) return;
+            if (!Array.isArray(items) || !items.length) {
+              el.innerHTML = '<span class="muted">Sem dados.</span>';
+              return;
+            }
+            el.innerHTML = items.map(function(item){
+              return '<span class="pill"><b>' + esc(item.label) + '</b>: ' + esc(item.value) + '</span>';
+            }).join(' ');
+          }
+          async function loadFinance(){
+            const response = await fetch('/admin/finance-saas-data');
+            const data = await response.json().catch(function(){ return {}; });
+            document.getElementById('finRaw').textContent = JSON.stringify(data, null, 2);
+            if (!response.ok || !data.ok) {
+              renderTableRows('finPlansRows', '', 4, 'Erro ao carregar dashboard financeiro.');
+              renderTableRows('finCitiesRows', '', 2, 'Erro ao carregar dashboard financeiro.');
+              renderTableRows('finStatesRows', '', 2, 'Erro ao carregar dashboard financeiro.');
+              renderTableRows('finPaymentsRows', '', 4, 'Erro ao carregar dashboard financeiro.');
+              return;
+            }
+
+            const headline = data.headline || {};
+            const plans = Array.isArray(data.plans) ? data.plans : [];
+            const cities = Array.isArray(data.cities) ? data.cities : [];
+            const states = Array.isArray(data.states) ? data.states : [];
+            const recentPayments = Array.isArray(data.recentPayments) ? data.recentPayments : [];
+            const statusSeries = Array.isArray(data?.series?.statusSeries) ? data.series.statusSeries : [];
+            const paymentMethods = Array.isArray(data?.series?.paymentMethods) ? data.series.paymentMethods : [];
+            const monthlyUsage = Array.isArray(data?.series?.monthlyUsage) ? data.series.monthlyUsage : [];
+            const issueSummary = Array.isArray(data?.inconsistencies?.summary) ? data.inconsistencies.summary : [];
+
+            setText('finMrr', fmtBRL(headline.mrrCents || 0));
+            setText('finArrHint', 'Base mensal recorrente estimada');
+            setText('finArr', fmtBRL(headline.arrCents || 0));
+            setText('finAvgTicket', 'Ticket médio: ' + fmtBRL(headline.avgTicketCents || 0));
+            setText('finConversion', fmtPct(headline.trialToPaidPct || 0));
+            setText('finBaseUsers', 'Total base: ' + fmtNum(headline.totalUsers || 0));
+
+            setText('fin24h', fmtNum(headline.active24hCount || 0));
+            setText('fin24hHint', 'Cobertura da base: ' + fmtPct(headline.active24hPct || 0));
+            setText('finAsaasCoverage', fmtPct(headline.asaasCoveragePct || 0));
+            setText('finBillingCoverage', 'Cobrança coberta: ' + fmtPct(headline.billableCoveragePct || 0));
+            setText('finSubCoverage', fmtPct(headline.subscriptionCoveragePct || 0));
+            setText('finUsageAvg', 'Uso médio mensal: ' + String(headline.avgMonthlyUsage || 0).replace('.', ','));
+
+            setText('finPaidUsers', fmtNum(headline.paidUsers || 0));
+            setText('finPaidHint', 'Ativos pagos com plano válido');
+            setText('finTrialUsers', fmtNum(headline.trialUsers || 0));
+            setText('finStatusHint', 'Ativos: ' + fmtNum(headline.activeUsers || 0) + ' · Bloqueados: ' + fmtNum(headline.blockedUsers || 0));
+            setText('finCanceledUsers', fmtNum(headline.canceledUsers || 0));
+            setText('finLedgerHint', 'Eventos financeiros no ledger: ' + fmtNum(data?.ledger?.financialEvents || 0));
+
+            renderBars('finStatusChart', statusSeries, {
+              label: function(item){ return item.label || '—'; },
+              value: function(item){ return item.count || 0; },
+              display: function(item){ return fmtNum(item.count || 0) + ' · ' + fmtPct(item.pct || 0); },
+              meta: function(item){ return 'Participação na base'; }
+            });
+
+            renderBars('finPaymentChart', paymentMethods, {
+              label: function(item){ return item.label || '—'; },
+              value: function(item){ return item.count || 0; },
+              display: function(item){ return fmtNum(item.count || 0); },
+              meta: function(item){ return 'Método salvo'; }
+            });
+
+            renderBars('finPlanRevenueChart', plans.slice(0, 8), {
+              label: function(item){ return (item.name || item.code || '—') + ' (' + (item.code || '—') + ')'; },
+              value: function(item){ return item.mrrCents || 0; },
+              display: function(item){ return fmtBRL(item.mrrCents || 0); },
+              meta: function(item){ return 'Usuários: ' + fmtNum(item.count || 0) + ' · Uso médio: ' + String(item.avgUsagePerUser || 0).replace('.', ','); }
+            });
+
+            renderBars('finMonthlyUsageChart', monthlyUsage, {
+              label: function(item){ return item.label || '—'; },
+              value: function(item){ return item.descriptions || 0; },
+              display: function(item){ return fmtNum(item.descriptions || 0) + ' descrições'; },
+              meta: function(item){ return 'MRR de referência: ' + fmtBRL(item.mrrCents || 0); }
+            });
+
+            const plansRows = plans.map(function(item){
+              return '<tr>' +
+                '<td><b>' + esc(item.name || item.code || '—') + '</b><div class="muted" style="font-size:12px;">' + esc(item.code || '') + '</div></td>' +
+                '<td>' + esc(fmtNum(item.count || 0)) + '</td>' +
+                '<td>' + esc(fmtBRL(item.mrrCents || 0)) + '</td>' +
+                '<td>' + esc(String(item.avgUsagePerUser || 0).replace('.', ',')) + '</td>' +
+              '</tr>';
+            }).join('');
+            renderTableRows('finPlansRows', plansRows, 4, 'Nenhum plano encontrado.');
+
+            const citiesRows = cities.map(function(item){
+              return '<tr><td>' + esc(item.city || '—') + '</td><td><b>' + esc(fmtNum(item.count || 0)) + '</b></td></tr>';
+            }).join('');
+            renderTableRows('finCitiesRows', citiesRows, 2, 'Nenhuma cidade preenchida.');
+
+            const statesRows = states.map(function(item){
+              return '<tr><td>' + esc(item.state || '—') + '</td><td><b>' + esc(fmtNum(item.count || 0)) + '</b></td></tr>';
+            }).join('');
+            renderTableRows('finStatesRows', statesRows, 2, 'Nenhum estado preenchido.');
+
+            const paymentsRows = recentPayments.map(function(item){
+              const desc = [item.event, item.description].filter(Boolean).join(' · ');
+              const value = item.value === null || item.value === undefined || Number.isNaN(Number(item.value)) ? '—' : fmtMoney(item.value);
+              return '<tr>' +
+                '<td><code>' + esc(item.when || '—') + '</code><div class="muted" style="font-size:12px;">' + esc(desc || 'Evento financeiro') + '</div></td>' +
+                '<td>' + esc(item.status || '—') + '<div class="muted" style="font-size:12px;">' + esc(item.paymentId || item.subscriptionId || '—') + '</div></td>' +
+                '<td><b>' + esc(value) + '</b></td>' +
+                '<td>' + esc(item.customerName || '—') + '</td>' +
+              '</tr>';
+            }).join('');
+            renderTableRows('finPaymentsRows', paymentsRows, 4, 'Nenhum evento financeiro recente localizado no ledger.');
+
+            renderHealthPills('finHealthPills', [
+              { label: 'Com billing', value: fmtPct(headline.billingCoveragePct || 0) },
+              { label: 'Com nome', value: fmtPct(headline.nameCoveragePct || 0) },
+              { label: 'Com cliente Asaas', value: fmtNum(data?.quality?.usersWithAsaasCustomer || 0) },
+              { label: 'Com assinatura Asaas', value: fmtNum(data?.quality?.usersWithSubscription || 0) },
+              { label: 'Descrições no mês', value: fmtNum(headline.descriptionsMonth || 0) },
+              { label: 'Inconsistências', value: fmtNum(issueSummary.reduce(function(acc, item){ return acc + Number(item.count || 0); }, 0)) },
+            ]);
+          }
+
+          document.addEventListener('DOMContentLoaded', function(){
+            const reloadBtn = document.getElementById('financeReloadBtn');
+            if (reloadBtn) reloadBtn.addEventListener('click', loadFinance);
+            loadFinance();
+          });
+        })();
+      </script>
+    `;
+
+    const html = layoutBase({
+      title: "Dashboard Financeiro SaaS",
+      activePath: "/admin/finance-saas-ui",
+      content: inner,
+      headExtra,
+      scriptExtra,
+    });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
   // ===================== Financeiro • Asaas (UI + APIs) =====================
   // Página: Reconciliação + Histórico (Ledger de webhooks)
   router.get("/finance-asaas-ui", async (req, res) => {
