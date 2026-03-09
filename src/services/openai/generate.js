@@ -31,14 +31,19 @@ export async function generateAdText({
 
   const system = mode === "FREE" ? systemFree : systemFixed;
 
+  const modeGuard = mode === "FREE"
+    ? "Modo LIVRE: escolha a melhor estrutura para conversão, mantendo clareza, visual bonito e fidelidade às informações do usuário."
+    : "Modo FIXO: mantenha estrutura consistente, bem organizada, visualmente bonita e focada em conversão no WhatsApp.";
+
   const payload = {
     model: OPENAI_MODEL,
     messages: [
       { role: "system", content: system },
+      { role: "system", content: modeGuard },
       { role: "user", content: clean },
     ],
-    max_tokens: Number(maxTokens), // 🔥 CORRIGIDO AQUI
-    temperature: 0.7,
+    max_tokens: Number(maxTokens),
+    temperature: 0.45,
   };
 
   const url = "https://api.openai.com/v1/chat/completions";
