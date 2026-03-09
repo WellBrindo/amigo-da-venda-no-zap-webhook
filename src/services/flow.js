@@ -673,6 +673,16 @@ async function msgAskSaveProfile(waId, profile) {
   return lines.join("\n");
 }
 
+function buildRefinementReminder(maxRefinements) {
+  const qty = Number.isFinite(Number(maxRefinements)) && Number(maxRefinements) >= 0
+    ? Math.trunc(Number(maxRefinements))
+    : 2;
+
+  return `* Para refinar: responda com o que você quer mudar (ex.: "deixa mais curto", "mais emocional", "com mais emoji", etc...).
+
+(Lembrete: até ${qty} refinamento(s) por descrição. No próximo, conta como uma nova descrição.)`;
+}
+
 async function msgAfterSaveProfile(waId, saved, maxRefinements) {
   const lines = [];
   lines.push(
@@ -682,7 +692,7 @@ async function msgAfterSaveProfile(waId, saved, maxRefinements) {
   );
   lines.push("");
   lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_QUESTION", { waId }));
-  lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_REFINE_HINT", { waId, vars: { maxRefinements } }));
+  lines.push(buildRefinementReminder(maxRefinements));
   lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_OK_HINT", { waId }));
   return lines.join("\n");
 }
