@@ -63,6 +63,15 @@ import { listAsaasEvents } from "../services/asaas/ledger.js";
 
 import { redisGet, redisSet, redisDel } from "../services/redis.js";
 import { logAdminAudit, listAdminAudit, getAdminAuditCount } from "../services/audit.js";
+import {
+  listManagedAdmins,
+  getManagedAdmin,
+  upsertManagedAdmin,
+  setManagedAdminActive,
+  updateManagedAdminPassword,
+  listAdminRoleDefinitions,
+  listAdminPermissionDefinitions,
+} from "../services/adminAccess.js";
 
 
 function escapeHtml(s) {
@@ -234,7 +243,7 @@ function renderSidebar(activePath){
   const ap = String(activePath||"");
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm") || ap.startsWith("/admin/bulk");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
-  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings");
+  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings") || ap.startsWith("/admin/admin-users");
   const reportsOpen = ap.startsWith("/admin/reports");
 
   const item = (href, label, icon) => {
@@ -296,10 +305,11 @@ function renderSidebar(activePath){
         ${item("/admin/inconsistencies-ui", "Inconsistências", "🩺")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
         ${item("/admin/settings-ui", "Configurações Globais", "🛠️")}
+        ${item("/admin/admin-users-ui", "Administradores e Acessos", "🛡️")}
         ${item("/admin/asaas-test-ui", "Asaas Teste", "🧪")}
       </details>
 
-      <div class="hint" style="margin-top:10px;">Dica: tudo é protegido por Basic Auth (ADMIN_SECRET).</div>
+      <div class="hint" style="margin-top:10px;">Dica: o painel aceita o ADMIN_SECRET legado e também administradores gerenciados com perfis de acesso.</div>
     </nav>
   `;
 }
@@ -482,6 +492,99 @@ function buildAuditUserSnapshot(user) {
     cardValidUntil: String(u.cardValidUntil || "").trim(),
     cardCanceledAt: String(u.cardCanceledAt || "").trim(),
   };
+}
+
+function getAdminRequestSession(req) {
+  if (req?.adminAuth && typeof req.adminAuth === "object") return req.adminAuth;
+  const username = parseBasicAuthUser(req);
+  return {
+    username,
+    displayName: username,
+    role: "SUPER_ADMIN",
+    permissions: ["*"],
+    isLegacySharedSecret: true,
+    authMode: "legacy_shared_secret",
+  };
+}
+
+function adminHasPermission(session, permission) {
+  const perms = Array.isArray(session?.permissions) ? session.permissions : [];
+  if (session?.isLegacySharedSecret) return true;
+  if (perms.includes("*")) return true;
+  return perms.includes(String(permission || "").trim());
+}
+
+function getAdminRequiredPermission(pathname) {
+  const path = String(pathname || "").trim();
+  if (!path || path === "/" || path.startsWith("/dashboard") || path.startsWith("/executive")) return "dashboard.view";
+  if (path.startsWith("/reports") || path.startsWith("/export")) return "reports.view";
+  if (path.startsWith("/users") || path.startsWith("/crm") || path.startsWith("/bulk") || path.startsWith("/window24h")) return "users.manage";
+  if (path.startsWith("/plans") || path.startsWith("/health-plans")) return "plans.manage";
+  if (path.startsWith("/finance") || path.startsWith("/api/finance") || path.startsWith("/asaas-test") || path.startsWith("/api/asaas")) return "finance.view";
+  if (path.startsWith("/broadcast") || path.startsWith("/campaigns")) return "marketing.manage";
+  if (path.startsWith("/copy")) return "copy.manage";
+  if (path.startsWith("/settings")) return "settings.manage";
+  if (path.startsWith("/alerts")) return "alerts.view";
+  if (path.startsWith("/audit")) return "audit.view";
+  if (path.startsWith("/inconsistencies")) return "inconsistencies.view";
+  if (path.startsWith("/admin-users")) return "admin.manage";
+  if (path.startsWith("/state-test") || path.startsWith("/send-test")) return "admin.manage";
+  return "dashboard.view";
+}
+
+function getPermissionMeta(permission) {
+  const key = String(permission || "").trim();
+  return (listAdminPermissionDefinitions() || []).find((item) => item.key === key) || {
+    key,
+    label: key || "Permissão",
+    description: "Permissão operacional do Admin.",
+  };
+}
+
+function renderAdminForbiddenPage(req, requiredPermission) {
+  const session = getAdminRequestSession(req);
+  const permissionMeta = getPermissionMeta(requiredPermission);
+  const owned = Array.isArray(session?.permissions) ? session.permissions : [];
+  return layoutBase({
+    title: "Acesso restrito",
+    activePath: "/admin",
+    content: `
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:16px;">
+          <div>
+            <h3 style="margin:0 0 8px 0;">🛡️ Acesso restrito</h3>
+            <div class="muted">Seu perfil administrativo não possui autorização para acessar esta área.</div>
+          </div>
+          <div class="pill">Perfil atual: <b>${escapeHtml(String(session?.role || ""))}</b></div>
+        </div>
+        <div class="hr"></div>
+        <div class="grid cols2">
+          <div class="card pad">
+            <div class="muted">Permissão necessária</div>
+            <div style="font-size:18px; font-weight:800; margin-top:6px;">${escapeHtml(permissionMeta.label)}</div>
+            <div class="muted" style="margin-top:6px;">${escapeHtml(permissionMeta.description || "")}</div>
+            <div class="muted" style="font-size:12px; margin-top:6px;"><code>${escapeHtml(permissionMeta.key)}</code></div>
+          </div>
+          <div class="card pad">
+            <div class="muted">Sessão atual</div>
+            <div style="font-size:18px; font-weight:800; margin-top:6px;">${escapeHtml(String(session?.displayName || session?.username || "admin"))}</div>
+            <div class="muted" style="margin-top:6px;">Usuário: <code>${escapeHtml(String(session?.username || ""))}</code></div>
+            <div class="muted" style="margin-top:6px;">Autenticação: ${escapeHtml(String(session?.authMode || ""))}</div>
+          </div>
+        </div>
+        <div class="hr"></div>
+        <div class="muted" style="margin-bottom:8px;">Permissões recebidas nesta sessão</div>
+        <div class="row">
+          ${owned.length ? owned.map((item) => `<span class="badge soft">${escapeHtml(item)}</span>`).join("") : '<span class="badge warn">sem permissões</span>'}
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <a class="pill" href="/admin">🏠 Voltar ao início</a>
+          <a class="pill" href="/admin/admin-users-ui">🛡️ Administradores</a>
+        </div>
+      </div>
+    `,
+  });
 }
 
 async function safeRecordAdminAudit(req, entry) {
@@ -1191,6 +1294,23 @@ function buildExecutiveExportRows(data) {
 
 export function adminRouter() {
   const router = Router();
+
+  router.use((req, res, next) => {
+    const requiredPermission = getAdminRequiredPermission(req.path || "/");
+    if (!requiredPermission) return next();
+    const session = getAdminRequestSession(req);
+    if (adminHasPermission(session, requiredPermission)) return next();
+    if (String(req.headers.accept || "").includes("text/html")) {
+      return res.status(403).send(renderAdminForbiddenPage(req, requiredPermission));
+    }
+    return res.status(403).json({
+      ok: false,
+      error: "forbidden",
+      requiredPermission,
+      profile: String(session?.role || ""),
+      username: String(session?.username || ""),
+    });
+  });
 
   // ===================== Dashboard (Métricas consolidadas) =====================
   // ✅ V16.4.9 — Dashboard consolidado (global + por usuário)
@@ -2649,6 +2769,381 @@ router.get("/", async (req, res) => {
   // -----------------------------
   // 👥 Usuários — Lista (UI)
   // -----------------------------
+  router.get("/admin-users/data", async (req, res) => {
+    try {
+      const [admins, roles, permissions] = await Promise.all([
+        listManagedAdmins(),
+        Promise.resolve(listAdminRoleDefinitions()),
+        Promise.resolve(listAdminPermissionDefinitions()),
+      ]);
+      return res.json({
+        ok: true,
+        ts: Date.now(),
+        currentAdmin: getAdminRequestSession(req),
+        counts: {
+          total: admins.length,
+          active: admins.filter((item) => item.isActive).length,
+          inactive: admins.filter((item) => !item.isActive).length,
+          superAdmins: admins.filter((item) => item.isActive && item.role === "SUPER_ADMIN").length,
+        },
+        roles,
+        permissions,
+        admins,
+      });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/admin-users/upsert", async (req, res) => {
+    try {
+      const username = String(req.body?.username || "").trim().toLowerCase();
+      const displayName = String(req.body?.displayName || "").trim();
+      const role = String(req.body?.role || "").trim().toUpperCase();
+      const password = String(req.body?.password || "");
+      const isActive = req.body?.isActive === undefined ? true : ["1", "true", "on", true].includes(req.body?.isActive);
+      const before = await getManagedAdmin(username);
+      const adminsBefore = await listManagedAdmins();
+      const activeSuperAdminsBefore = adminsBefore.filter((item) => item.isActive && item.role === "SUPER_ADMIN").length;
+      if (before && before.isActive && before.role === "SUPER_ADMIN" && (!isActive || role !== "SUPER_ADMIN") && activeSuperAdminsBefore <= 1) {
+        return res.status(400).send(layoutBase({
+          title: "Administradores e Acessos",
+          activePath: "/admin/admin-users-ui",
+          content: `<div class="card pad"><h3 style="margin-top:0;">Operação bloqueada</h3><div class="muted">É obrigatório manter pelo menos um SUPER_ADMIN ativo.</div><div class="hr"></div><a class="pill" href="/admin/admin-users-ui">Voltar</a></div>`,
+        }));
+      }
+      const saved = await upsertManagedAdmin({ username, displayName, role, password, isActive });
+      await safeRecordAdminAudit(req, {
+        module: "admin_access",
+        action: before ? "UPDATE_ADMIN_USER" : "CREATE_ADMIN_USER",
+        targetId: saved.username,
+        targetLabel: saved.displayName || saved.username,
+        summary: before ? `Atualizou o administrador ${saved.username}.` : `Criou o administrador ${saved.username}.`,
+        before: before || {},
+        after: saved,
+        meta: { role: saved.role, isActive: saved.isActive, passwordChanged: Boolean(password) },
+      });
+      return res.redirect("/admin/admin-users-ui?saved=1");
+    } catch (err) {
+      return res.status(500).send(layoutBase({
+        title: "Administradores e Acessos",
+        activePath: "/admin/admin-users-ui",
+        content: `<div class="card pad"><h3 style="margin-top:0;">Erro ao salvar administrador</h3><div class="muted">${escapeHtml(String(err?.message || err))}</div><div class="hr"></div><a class="pill" href="/admin/admin-users-ui">Voltar</a></div>`,
+      }));
+    }
+  });
+
+  router.post("/admin-users/toggle", async (req, res) => {
+    try {
+      const username = String(req.body?.username || "").trim().toLowerCase();
+      const isActive = ["1", "true", "on", true].includes(req.body?.isActive);
+      const before = await getManagedAdmin(username);
+      if (!before) {
+        return res.status(404).send(layoutBase({
+          title: "Administradores e Acessos",
+          activePath: "/admin/admin-users-ui",
+          content: `<div class="card pad"><h3 style="margin-top:0;">Administrador não encontrado</h3><div class="hr"></div><a class="pill" href="/admin/admin-users-ui">Voltar</a></div>`,
+        }));
+      }
+      const adminsBefore = await listManagedAdmins();
+      const activeSuperAdminsBefore = adminsBefore.filter((item) => item.isActive && item.role === "SUPER_ADMIN").length;
+      if (before.isActive && before.role === "SUPER_ADMIN" && !isActive && activeSuperAdminsBefore <= 1) {
+        return res.status(400).send(layoutBase({
+          title: "Administradores e Acessos",
+          activePath: "/admin/admin-users-ui",
+          content: `<div class="card pad"><h3 style="margin-top:0;">Operação bloqueada</h3><div class="muted">É obrigatório manter pelo menos um SUPER_ADMIN ativo.</div><div class="hr"></div><a class="pill" href="/admin/admin-users-ui">Voltar</a></div>`,
+        }));
+      }
+      const saved = await setManagedAdminActive(username, isActive);
+      await safeRecordAdminAudit(req, {
+        module: "admin_access",
+        action: saved.isActive ? "ENABLE_ADMIN_USER" : "DISABLE_ADMIN_USER",
+        targetId: saved.username,
+        targetLabel: saved.displayName || saved.username,
+        summary: saved.isActive ? `Reativou o administrador ${saved.username}.` : `Desativou o administrador ${saved.username}.`,
+        before,
+        after: saved,
+        meta: { role: saved.role, isActive: saved.isActive },
+      });
+      return res.redirect("/admin/admin-users-ui?toggled=1");
+    } catch (err) {
+      return res.status(500).send(layoutBase({
+        title: "Administradores e Acessos",
+        activePath: "/admin/admin-users-ui",
+        content: `<div class="card pad"><h3 style="margin-top:0;">Erro ao atualizar status</h3><div class="muted">${escapeHtml(String(err?.message || err))}</div><div class="hr"></div><a class="pill" href="/admin/admin-users-ui">Voltar</a></div>`,
+      }));
+    }
+  });
+
+  router.post("/admin-users/password", async (req, res) => {
+    try {
+      const username = String(req.body?.username || "").trim().toLowerCase();
+      const password = String(req.body?.password || "");
+      const before = await getManagedAdmin(username);
+      if (!before) return res.status(404).json({ ok: false, error: "Administrador não encontrado." });
+      const saved = await updateManagedAdminPassword(username, password);
+      await safeRecordAdminAudit(req, {
+        module: "admin_access",
+        action: "RESET_ADMIN_PASSWORD",
+        targetId: saved.username,
+        targetLabel: saved.displayName || saved.username,
+        summary: `Atualizou a senha do administrador ${saved.username}.`,
+        before,
+        after: { username: saved.username, role: saved.role, isActive: saved.isActive, updatedAt: saved.updatedAt },
+        meta: { passwordChanged: true },
+      });
+      return res.json({ ok: true, admin: saved });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/admin-users-ui", async (req, res) => {
+    try {
+      const [admins, roles, permissions] = await Promise.all([
+        listManagedAdmins(),
+        Promise.resolve(listAdminRoleDefinitions()),
+        Promise.resolve(listAdminPermissionDefinitions()),
+      ]);
+      const currentAdmin = getAdminRequestSession(req);
+      const roleOptions = roles.map((role) => `<option value="${escapeHtml(role.key)}">${escapeHtml(role.label)}</option>`).join("");
+      const adminRows = admins.map((admin) => {
+        const roleMeta = roles.find((item) => item.key === admin.role) || { label: admin.role, description: "" };
+        return `
+          <tr>
+            <td>
+              <div><b>${escapeHtml(admin.displayName || admin.username)}</b></div>
+              <div class="muted" style="font-size:12px;"><code>${escapeHtml(admin.username)}</code></div>
+            </td>
+            <td>
+              <span class="badge info">${escapeHtml(roleMeta.label)}</span>
+              <div class="muted" style="font-size:12px; margin-top:4px;">${escapeHtml(roleMeta.description || "")}</div>
+            </td>
+            <td>${admin.isActive ? '<span class="badge ok">ativo</span>' : '<span class="badge warn">inativo</span>'}</td>
+            <td>
+              <div class="muted" style="font-size:12px;">Criado em ${escapeHtml(String(admin.createdAt || "—"))}</div>
+              <div class="muted" style="font-size:12px;">Atualizado em ${escapeHtml(String(admin.updatedAt || "—"))}</div>
+            </td>
+            <td>
+              <div class="row" style="gap:8px;">
+                <button type="button" class="primary" data-admin-edit='${escapeHtml(JSON.stringify(admin))}'>Editar</button>
+                <form method="POST" action="/admin/admin-users/toggle" style="display:inline; margin:0;">
+                  <input type="hidden" name="username" value="${escapeHtml(admin.username)}" />
+                  <input type="hidden" name="isActive" value="${admin.isActive ? "0" : "1"}" />
+                  <button type="submit">${admin.isActive ? "Desativar" : "Ativar"}</button>
+                </form>
+                <button type="button" data-admin-password="${escapeHtml(admin.username)}">Senha</button>
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join("");
+      const roleCards = roles.map((role) => `
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div>
+              <div style="font-weight:800; font-size:16px;">${escapeHtml(role.label)}</div>
+              <div class="muted" style="margin-top:4px;">${escapeHtml(role.description || "")}</div>
+            </div>
+            <div class="pill">${escapeHtml(role.key)}</div>
+          </div>
+          <div class="hr"></div>
+          <div class="row" style="gap:8px;">
+            ${(role.permissions || []).map((perm) => {
+              const meta = getPermissionMeta(perm);
+              return `<span class="badge soft" title="${escapeHtml(meta.description || "")}">${escapeHtml(meta.label)}</span>`;
+            }).join("")}
+          </div>
+        </div>
+      `).join("");
+      const permissionRows = permissions.map((perm) => `
+        <tr>
+          <td><b>${escapeHtml(perm.label)}</b><div class="muted" style="font-size:12px;"><code>${escapeHtml(perm.key)}</code></div></td>
+          <td>${escapeHtml(perm.description || "")}</td>
+        </tr>
+      `).join("");
+      const html = layoutBase({
+        title: "Administradores e Acessos",
+        activePath: "/admin/admin-users-ui",
+        content: `
+          <div class="grid cols3" style="margin-bottom:14px;">
+            <div class="kpi"><div class="t">Administradores gerenciados</div><div class="v">${admins.length}</div></div>
+            <div class="kpi"><div class="t">Administradores ativos</div><div class="v">${admins.filter((item) => item.isActive).length}</div></div>
+            <div class="kpi"><div class="t">Perfis disponíveis</div><div class="v">${roles.length}</div></div>
+          </div>
+          <div class="card pad" style="margin-bottom:14px;">
+            <div class="row" style="justify-content:space-between; align-items:flex-start; gap:16px;">
+              <div>
+                <h3 style="margin:0 0 6px 0;">🛡️ Gestão de administradores e perfis de acesso</h3>
+                <div class="muted">Esta camada convive com o <code>ADMIN_SECRET</code> legado. O segredo legado continua com acesso total, mas agora você pode criar usuários administrativos dedicados com perfis específicos por área.</div>
+              </div>
+              <div class="pill">Sessão atual: <b>${escapeHtml(String(currentAdmin.displayName || currentAdmin.username || "admin"))}</b></div>
+            </div>
+            <div class="hr"></div>
+            <div class="grid cols3">
+              <div class="card pad">
+                <div class="muted">Usuário autenticado</div>
+                <div style="font-size:18px; font-weight:800; margin-top:6px;">${escapeHtml(String(currentAdmin.username || "admin"))}</div>
+                <div class="muted" style="margin-top:6px;">${escapeHtml(String(currentAdmin.displayName || ""))}</div>
+              </div>
+              <div class="card pad">
+                <div class="muted">Perfil atual</div>
+                <div style="font-size:18px; font-weight:800; margin-top:6px;">${escapeHtml(String(currentAdmin.role || "SUPER_ADMIN"))}</div>
+                <div class="muted" style="margin-top:6px;">Modo: ${escapeHtml(String(currentAdmin.authMode || "legacy_shared_secret"))}</div>
+              </div>
+              <div class="card pad">
+                <div class="muted">Permissões da sessão</div>
+                <div class="row" style="margin-top:10px; gap:8px;">
+                  ${(Array.isArray(currentAdmin.permissions) ? currentAdmin.permissions : []).map((item) => `<span class="badge soft">${escapeHtml(item)}</span>`).join("") || '<span class="badge soft">*</span>'}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="card pad" style="margin-bottom:14px;">
+            <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+              <div>
+                <h3 style="margin:0 0 6px 0;">Cadastrar ou editar administrador</h3>
+                <div class="muted">Use um usuário exclusivo para cada pessoa. Ao editar, deixe a senha em branco para mantê-la como está.</div>
+              </div>
+              <div class="pill">Proteção adicional por perfil</div>
+            </div>
+            <div class="hr"></div>
+            <form method="POST" action="/admin/admin-users/upsert" id="adminUserForm" class="grid cols2">
+              <div>
+                <div class="muted" style="font-size:12px; margin-bottom:4px;">Usuário de login</div>
+                <input type="text" name="username" id="adminUsername" placeholder="ex.: financeiro" minlength="3" maxlength="40" required />
+              </div>
+              <div>
+                <div class="muted" style="font-size:12px; margin-bottom:4px;">Nome de exibição</div>
+                <input type="text" name="displayName" id="adminDisplayName" placeholder="Ex.: Financeiro Simetria" required />
+              </div>
+              <div>
+                <div class="muted" style="font-size:12px; margin-bottom:4px;">Perfil</div>
+                <select name="role" id="adminRole" required>${roleOptions}</select>
+              </div>
+              <div>
+                <div class="muted" style="font-size:12px; margin-bottom:4px;">Senha</div>
+                <input type="password" name="password" id="adminPassword" placeholder="mínimo 8 caracteres" minlength="8" />
+              </div>
+              <div class="row" style="align-items:center; gap:10px;">
+                <label class="pill"><input type="checkbox" name="isActive" id="adminIsActive" value="1" checked /> Ativo</label>
+                <span class="muted" style="font-size:12px;">Desative em vez de apagar para preservar o histórico de auditoria.</span>
+              </div>
+              <div class="row" style="justify-content:flex-end; gap:10px;">
+                <button type="button" id="adminFormReset">Novo</button>
+                <button type="submit" class="primary">Salvar administrador</button>
+              </div>
+            </form>
+          </div>
+          <div class="card pad" style="margin-bottom:14px;">
+            <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+              <div>
+                <h3 style="margin:0 0 6px 0;">Administradores cadastrados</h3>
+                <div class="muted">Perfis com credenciais próprias para o Admin. O ADMIN_SECRET legado continua funcionando como contingência total.</div>
+              </div>
+              <a class="pill" href="/admin/admin-users/data">Ver JSON</a>
+            </div>
+            <div class="hr"></div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Administrador</th>
+                  <th>Perfil</th>
+                  <th>Status</th>
+                  <th>Registro</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody>${adminRows || '<tr><td colspan="5"><div class="muted">Nenhum administrador gerenciado cadastrado ainda. Você pode começar criando o primeiro sem perder o ADMIN_SECRET legado.</div></td></tr>'}</tbody>
+            </table>
+          </div>
+          <div class="grid cols2" style="margin-bottom:14px;">
+            <div class="card pad">
+              <h3 style="margin:0 0 6px 0;">Perfis disponíveis</h3>
+              <div class="muted">Cada perfil agrupa permissões coerentes com a função operacional do Admin.</div>
+              <div class="hr"></div>
+              <div class="grid">${roleCards}</div>
+            </div>
+            <div class="card pad">
+              <h3 style="margin:0 0 6px 0;">Catálogo de permissões</h3>
+              <div class="muted">Essas permissões são aplicadas automaticamente conforme o perfil escolhido.</div>
+              <div class="hr"></div>
+              <table>
+                <thead><tr><th>Permissão</th><th>Descrição</th></tr></thead>
+                <tbody>${permissionRows}</tbody>
+              </table>
+            </div>
+          </div>
+        `,
+        scriptExtra: `
+          <script>
+            (function(){
+              const resetButton = document.getElementById('adminFormReset');
+              const usernameEl = document.getElementById('adminUsername');
+              const displayNameEl = document.getElementById('adminDisplayName');
+              const roleEl = document.getElementById('adminRole');
+              const passwordEl = document.getElementById('adminPassword');
+              const activeEl = document.getElementById('adminIsActive');
+              const editButtons = document.querySelectorAll('[data-admin-edit]');
+              const passwordButtons = document.querySelectorAll('[data-admin-password]');
+              function resetForm(){
+                usernameEl.value = '';
+                displayNameEl.value = '';
+                roleEl.selectedIndex = 0;
+                passwordEl.value = '';
+                activeEl.checked = true;
+                usernameEl.readOnly = false;
+                usernameEl.focus();
+              }
+              resetButton?.addEventListener('click', resetForm);
+              editButtons.forEach(function(btn){
+                btn.addEventListener('click', function(){
+                  try {
+                    const payload = JSON.parse(btn.getAttribute('data-admin-edit') || '{}');
+                    usernameEl.value = payload.username || '';
+                    displayNameEl.value = payload.displayName || '';
+                    roleEl.value = payload.role || 'SUPORTE';
+                    passwordEl.value = '';
+                    activeEl.checked = !!payload.isActive;
+                    usernameEl.readOnly = true;
+                    displayNameEl.focus();
+                  } catch (_) {
+                    alert('Não foi possível preparar a edição do administrador.');
+                  }
+                });
+              });
+              passwordButtons.forEach(function(btn){
+                btn.addEventListener('click', async function(){
+                  const username = btn.getAttribute('data-admin-password') || '';
+                  const password = window.prompt('Nova senha para ' + username + ' (mínimo 8 caracteres):');
+                  if (!password) return;
+                  const response = await fetch('/admin/admin-users/password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                  });
+                  const data = await response.json().catch(function(){ return {}; });
+                  if (!response.ok || !data.ok) {
+                    alert((data && data.error) || 'Não foi possível atualizar a senha.');
+                    return;
+                  }
+                  alert('Senha atualizada com sucesso.');
+                });
+              });
+            })();
+          </script>
+        `,
+      });
+      return res.status(200).send(html);
+    } catch (err) {
+      return res.status(500).send(layoutBase({
+        title: "Administradores e Acessos",
+        activePath: "/admin/admin-users-ui",
+        content: `<div class="card pad"><h3 style="margin-top:0;">Erro ao carregar a gestão de administradores</h3><div class="muted">${escapeHtml(String(err?.message || err))}</div><div class="hr"></div><a class="pill" href="/admin">Voltar ao início</a></div>`,
+      }));
+    }
+  });
+
   router.get("/users-list-ui", async (req, res) => {
     const content = `
       <div class="card pad">
