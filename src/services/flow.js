@@ -1528,7 +1528,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
         if (prof.productList) parts.push(`Catálogo/Lista: ${prof.productList}`);
         if (Array.isArray(prof.socials) && prof.socials.length) parts.push(`Redes: ${prof.socials.join(' | ')}`);
         if (parts.length) {
-          promptToSend = `CONTEXTO_DA_EMPRESA (use somente se ajudar; não é obrigatório repetir literalmente):\n${parts.join("\n")}\n\nDESCRIÇÃO_DO_USUÁRIO:\n${userText}`;
+          promptToSend = `CONTEXTO_DA_EMPRESA (use somente se ajudar; trate como contexto invisível e priorize a DESCRIÇÃO_DO_USUÁRIO se houver conflito):\n${parts.join("\n")}\n\nDESCRIÇÃO_DO_USUÁRIO:\n${userText}`;
         }
       }
     }
