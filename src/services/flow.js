@@ -874,8 +874,7 @@ function buildGenerationPrompt({ userText, lastAd, isRefinement, bizContext }) {
     "2. As informações complementares respondidas nesta conversa.",
     "3. Os dados salvos da empresa, apenas para preencher o que faltar.",
     "Se houver conflito, siga exatamente essa ordem e nunca invente placeholders.",
-  ].join("
-"));
+  ].join("\n"));
 
   sections.push([
     "REGRAS_FIXAS_DE_MARCA_E_CONTATO:",
@@ -883,8 +882,7 @@ function buildGenerationPrompt({ userText, lastAd, isRefinement, bizContext }) {
     "- Se houver site salvo, ele deve aparecer em TODO anúncio final.",
     "- Se houver redes sociais salvas, elas devem aparecer em TODO anúncio final.",
     "- Só deixe de mostrar nome da empresa, site ou redes sociais se o usuário pedir explicitamente para retirar, remover, ocultar ou não mostrar esses dados no refinamento.",
-  ].join("
-"));
+  ].join("\n"));
 
   if (bizContext) sections.push(bizContext);
 
@@ -898,9 +896,7 @@ ${userText}`);
 ${userText}`);
   }
 
-  return sections.join("
-
-");
+  return sections.join("\n\n");
 }
 
 // -------------------- Copy / Mensagens --------------------
