@@ -869,19 +869,36 @@ function buildGenerationPrompt({ userText, lastAd, isRefinement, bizContext }) {
   const sections = [];
 
   sections.push(
-    "REGRA_DE_PRIORIDADE:\n1. O que o usuário escreveu na descrição atual.\n2. As informações complementares respondidas nesta conversa.\n3. Os dados salvos da empresa, apenas para preencher o que faltar.\nSe houver conflito, siga exatamente essa ordem e nunca invente placeholders."
+    "REGRA_DE_PRIORIDADE:
+1. O que o usuário escreveu na descrição atual.
+2. As informações complementares respondidas nesta conversa.
+3. Os dados salvos da empresa, apenas para preencher o que faltar.
+Se houver conflito, siga exatamente essa ordem e nunca invente placeholders."
+  );
+
+  sections.push(
+    "REGRAS_FIXAS_DE_MARCA_E_CONTATO:
+- Se houver nome da empresa salvo, ele deve aparecer em TODO anúncio final e em negrito.
+- Se houver site salvo, ele deve aparecer em TODO anúncio final.
+- Se houver redes sociais salvas, elas devem aparecer em TODO anúncio final.
+- Só deixe de mostrar nome da empresa, site ou redes sociais se o usuário pedir explicitamente para retirar, remover, ocultar ou não mostrar esses dados no refinamento."
   );
 
   if (bizContext) sections.push(bizContext);
 
   if (isRefinement) {
-    sections.push(`ANUNCIO_ATUAL:\n${lastAd}`);
-    sections.push(`AJUSTES_SOLICITADOS:\n${userText}`);
+    sections.push(`ANUNCIO_ATUAL:
+${lastAd}`);
+    sections.push(`AJUSTES_SOLICITADOS:
+${userText}`);
   } else {
-    sections.push(`DESCRIÇÃO_DO_USUÁRIO:\n${userText}`);
+    sections.push(`DESCRIÇÃO_DO_USUÁRIO:
+${userText}`);
   }
 
-  return sections.join("\n\n");
+  return sections.join("
+
+");
 }
 
 // -------------------- Copy / Mensagens --------------------
@@ -1006,6 +1023,130 @@ async function msgRefinementPrompt(waId, maxRefinements) {
 
 function normalizeProfileScalar(value) {
   return String(value ?? "").replace(/\\/g, "/").trim();
+}
+
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\]/g, "\$&");
+}
+
+function textRequestsRemovingCompanyInfo(text) {
+  const s = upper(text);
+  return /(RETIRA|RETIRAR|REMOVE|REMOVER|SEM|TIRA|OCULTA|OCULTAR|N[ÃA]O COLOCA|NAO COLOCA|N[ÃA]O MOSTRA|NAO MOSTRA)/.test(s)
+    && /(EMPRESA|NOME DA EMPRESA|MARCA|SITE|REDES?|REDE SOCIAL|INSTAGRAM|FACEBOOK|TIKTOK)/.test(s);
+}
+
+function textRequestsRemovingField(text, fieldType) {
+  const s = upper(text);
+  const removeIntent = /(RETIRA|RETIRAR|REMOVE|REMOVER|SEM|TIRA|OCULTA|OCULTAR|N[ÃA]O COLOCA|NAO COLOCA|N[ÃA]O MOSTRA|NAO MOSTRA)/.test(s);
+  if (!removeIntent) return false;
+
+  if (fieldType === "website") {
+    return /(SITE|LINK|WEBSITE|WWW)/.test(s);
+  }
+
+  if (fieldType === "socials") {
+    return /(REDES?|REDE SOCIAL|INSTAGRAM|FACEBOOK|TIKTOK|SOCIAL)/.test(s);
+  }
+
+  if (fieldType === "companyName") {
+    return /(EMPRESA|NOME DA EMPRESA|MARCA)/.test(s);
+  }
+
+  return false;
+}
+
+function hasLineWithText(lines, value) {
+  const target = normalizeProfileScalar(value).toLowerCase();
+  if (!target) return false;
+  return lines.some((line) => normalizeProfileScalar(line).toLowerCase().includes(target));
+}
+
+function ensureCompanyNameBold(adText, companyName) {
+  const name = normalizeProfileScalar(companyName);
+  if (!name) return adText;
+
+  const escaped = escapeRegex(name);
+  const alreadyBold = new RegExp(`\*${escaped}\*`, "i");
+  if (alreadyBold.test(adText)) return adText;
+
+  const plain = new RegExp(escaped, "i");
+  if (plain.test(adText)) {
+    return adText.replace(plain, `*${name}*`);
+  }
+
+  const lines = String(adText || "").split("
+");
+  const insertLine = `🏢 *${name}*`;
+
+  if (!lines.length) return insertLine;
+
+  if (lines.length === 1) {
+    return [lines[0], "", insertLine].join("
+");
+  }
+
+  lines.splice(2, 0, insertLine, "");
+  return lines.join("
+").replace(/
+{3,}/g, "
+
+");
+}
+
+function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement) {
+  if (!bizProfile || typeof bizProfile !== "object") return adText;
+
+  const refinementText = isRefinement ? String(userText || "") : "";
+  let text = String(adText || "");
+
+  const companyName = normalizeProfileScalar(bizProfile.companyName);
+  const website = normalizeProfileScalar(bizProfile.website);
+  const socials = ensureArray(bizProfile.socials)
+    .map((item) => normalizeProfileScalar(item))
+    .filter(Boolean);
+
+  if (companyName && !textRequestsRemovingField(refinementText, "companyName") && !textRequestsRemovingCompanyInfo(refinementText)) {
+    text = ensureCompanyNameBold(text, companyName);
+  }
+
+  const lines = String(text || "").split("
+").map((line) => String(line || "").trimRight());
+  const infoLinesToAdd = [];
+
+  if (website && !textRequestsRemovingField(refinementText, "website") && !hasLineWithText(lines, website)) {
+    infoLinesToAdd.push(`🌐 ${website}`);
+  }
+
+  if (socials.length && !textRequestsRemovingField(refinementText, "socials")) {
+    const missingSocials = socials.filter((item) => !hasLineWithText(lines, item));
+    if (missingSocials.length) {
+      infoLinesToAdd.push(`📱 ${missingSocials.join(" | ")}`);
+    }
+  }
+
+  if (!infoLinesToAdd.length) return text;
+
+  let insertAt = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const s = String(lines[i] || "").trim().toLowerCase();
+    if (!s) continue;
+    if (s.startsWith("converse") || s.startsWith("chame") || s.startsWith("fale") || s.startsWith("me chame") || s.startsWith("📲") || s.startsWith("💬")) {
+      insertAt = i;
+      break;
+    }
+  }
+
+  const payload = [];
+  if (insertAt > 0 && String(lines[insertAt - 1] || "").trim() !== "") payload.push("");
+  payload.push(...infoLinesToAdd);
+  if (insertAt < lines.length && String(lines[insertAt] || "").trim() !== "") payload.push("");
+
+  lines.splice(insertAt, 0, ...payload);
+  return lines.join("
+").replace(/
+{3,}/g, "
+
+").trim();
 }
 
 function buildBizProfileContext(profile) {
@@ -1991,7 +2132,9 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     }
   }
 
-  const formattedAd = enforceAdFormatting(ad);
+  let formattedAd = enforceAdFormatting(ad);
+  formattedAd = applyPersistentBusinessInfo(formattedAd, bizProfile, userText, isRefinement);
+  formattedAd = enforceAdFormatting(formattedAd);
 
   // Pós-anúncio:
   // - A escolha FIXO/LIVRE aparece apenas na 1ª descrição (templatePrompted = false)
