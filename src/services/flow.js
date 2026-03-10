@@ -756,12 +756,42 @@ function detectCategorySchema(text) {
   return CATEGORY_SCHEMAS.GENERIC;
 }
 
-function getMissingCategoryFields(schema, text) {
-  return schema.fields.filter((field) => !field.detect(text));
+function profileHasUsefulValue(value) {
+  if (value === undefined || value === null) return false;
+  if (Array.isArray(value)) return value.map((item) => cleanText(item)).filter(Boolean).length > 0;
+  return cleanText(value).length > 0;
+}
+
+function hasProfileSupportForField(fieldKey, bizProfile) {
+  const profile = bizProfile && typeof bizProfile === "object" ? bizProfile : null;
+  if (!profile) return false;
+
+  if (fieldKey === "location") {
+    return [profile.location, profile.address, profile.serviceArea].some(profileHasUsefulValue);
+  }
+
+  if (fieldKey === "hours") {
+    return profileHasUsefulValue(profile.hours);
+  }
+
+  if (fieldKey === "items") {
+    return profileHasUsefulValue(profile.productList) || profileHasUsefulValue(profile.productsUrl);
+  }
+
+  return false;
+}
+
+function getMissingCategoryFields(schema, text, bizProfile) {
+  return schema.fields.filter((field) => {
+    if (field.detect(text)) return false;
+    if (hasProfileSupportForField(field.key, bizProfile)) return false;
+    return true;
+  });
 }
 
 function shouldAskCategoryQuestions(schema, text, missingFields) {
   const words = countWords(text);
+  if (!missingFields.length) return false;
   if (schema.key === "GENERIC") {
     return words <= 5 && missingFields.length >= 2;
   }
@@ -769,28 +799,43 @@ function shouldAskCategoryQuestions(schema, text, missingFields) {
   return missingFields.length >= Number(schema.askWhenMissingAtLeast || 2);
 }
 
-function buildCategoryQuestionPrompt({ schema, missingFields }) {
+function buildCategoryQuestionPrompt({ schema, missingFields, bizProfile }) {
   const missing = missingFields.slice(0, 5);
+  const hints = [];
+
+  if (hasProfileSupportForField("location", bizProfile)) {
+    hints.push("região já aproveito dos seus dados salvos");
+  }
+  if (hasProfileSupportForField("hours", bizProfile)) {
+    hints.push("horário já aproveito dos seus dados salvos");
+  }
+
   const lines = [
     `Perfeito! Para montar um anúncio mais forte de ${schema.label}, me responde em *uma única mensagem* só o que faltar:`,
     "",
     ...missing.map((field) => `• ${field.label}`),
-    "",
-    "Se preferir, digite *PULAR* e eu gero com o que já tenho. ✅",
   ];
+
+  if (hints.length) {
+    lines.push("");
+    lines.push(`✅ ${hints.join(" e ")}.`);
+  }
+
+  lines.push("");
+  lines.push("Se preferir, digite *PULAR* e eu gero com o que já tenho. ✅");
   return lines.join("\n");
 }
 
-function planCategoryQuestion(text) {
+function planCategoryQuestion(text, bizProfile) {
   const schema = detectCategorySchema(text);
-  const missingFields = getMissingCategoryFields(schema, text);
+  const missingFields = getMissingCategoryFields(schema, text, bizProfile);
   if (!shouldAskCategoryQuestions(schema, text, missingFields)) return null;
 
   return {
     categoryKey: schema.key,
     categoryLabel: schema.label,
     missingFields: missingFields.map((field) => field.key),
-    prompt: buildCategoryQuestionPrompt({ schema, missingFields }),
+    prompt: buildCategoryQuestionPrompt({ schema, missingFields, bizProfile }),
   };
 }
 
@@ -818,6 +863,25 @@ function buildLeadIntakeCombinedText(baseText, complementText) {
     "INFORMAÇÕES COMPLEMENTARES DO USUÁRIO:",
     complementText,
   ].join("\n");
+}
+
+function buildGenerationPrompt({ userText, lastAd, isRefinement, bizContext }) {
+  const sections = [];
+
+  sections.push(
+    "REGRA_DE_PRIORIDADE:\n1. O que o usuário escreveu na descrição atual.\n2. As informações complementares respondidas nesta conversa.\n3. Os dados salvos da empresa, apenas para preencher o que faltar.\nSe houver conflito, siga exatamente essa ordem e nunca invente placeholders."
+  );
+
+  if (bizContext) sections.push(bizContext);
+
+  if (isRefinement) {
+    sections.push(`ANUNCIO_ATUAL:\n${lastAd}`);
+    sections.push(`AJUSTES_SOLICITADOS:\n${userText}`);
+  } else {
+    sections.push(`DESCRIÇÃO_DO_USUÁRIO:\n${userText}`);
+  }
+
+  return sections.join("\n\n");
 }
 
 // -------------------- Copy / Mensagens --------------------
@@ -1806,9 +1870,10 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   const lastAd = await getLastAd(id);
   const isRefinement = !!lastAd;
+  const bizProfile = await getBizProfile(id);
 
   if (!isRefinement) {
-    const categoryQuestion = planCategoryQuestion(userText);
+    const categoryQuestion = planCategoryQuestion(userText, bizProfile);
     if (categoryQuestion) {
       await setLeadIntakePayload(id, {
         kind: "CATEGORY_DETAILS",
@@ -1878,30 +1943,13 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   // OpenAI
   let ad = "";
   try {
-    let promptToSend = isRefinement
-      ? `ANUNCIO_ATUAL:
-${lastAd}
-
-AJUSTES_SOLICITADOS:
-${userText}`
-      : userText;
-
-    const prof = await getBizProfile(id);
-    const bizContext = buildBizProfileContext(prof);
-    if (bizContext) {
-      promptToSend = isRefinement
-        ? `${bizContext}
-
-ANUNCIO_ATUAL:
-${lastAd}
-
-AJUSTES_SOLICITADOS:
-${userText}`
-        : `${bizContext}
-
-DESCRIÇÃO_DO_USUÁRIO:
-${userText}`;
-    }
+    const bizContext = buildBizProfileContext(bizProfile);
+    const promptToSend = buildGenerationPrompt({
+      userText,
+      lastAd,
+      isRefinement,
+      bizContext,
+    });
 
     const r = await generateAdText({ userText: promptToSend, mode });
     ad = r.text;
