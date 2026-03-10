@@ -868,21 +868,23 @@ function buildLeadIntakeCombinedText(baseText, complementText) {
 function buildGenerationPrompt({ userText, lastAd, isRefinement, bizContext }) {
   const sections = [];
 
-  sections.push(
-    "REGRA_DE_PRIORIDADE:
-1. O que o usuário escreveu na descrição atual.
-2. As informações complementares respondidas nesta conversa.
-3. Os dados salvos da empresa, apenas para preencher o que faltar.
-Se houver conflito, siga exatamente essa ordem e nunca invente placeholders."
-  );
+  sections.push([
+    "REGRA_DE_PRIORIDADE:",
+    "1. O que o usuário escreveu na descrição atual.",
+    "2. As informações complementares respondidas nesta conversa.",
+    "3. Os dados salvos da empresa, apenas para preencher o que faltar.",
+    "Se houver conflito, siga exatamente essa ordem e nunca invente placeholders.",
+  ].join("
+"));
 
-  sections.push(
-    "REGRAS_FIXAS_DE_MARCA_E_CONTATO:
-- Se houver nome da empresa salvo, ele deve aparecer em TODO anúncio final e em negrito.
-- Se houver site salvo, ele deve aparecer em TODO anúncio final.
-- Se houver redes sociais salvas, elas devem aparecer em TODO anúncio final.
-- Só deixe de mostrar nome da empresa, site ou redes sociais se o usuário pedir explicitamente para retirar, remover, ocultar ou não mostrar esses dados no refinamento."
-  );
+  sections.push([
+    "REGRAS_FIXAS_DE_MARCA_E_CONTATO:",
+    "- Se houver nome da empresa salvo, ele deve aparecer em TODO anúncio final e em negrito.",
+    "- Se houver site salvo, ele deve aparecer em TODO anúncio final.",
+    "- Se houver redes sociais salvas, elas devem aparecer em TODO anúncio final.",
+    "- Só deixe de mostrar nome da empresa, site ou redes sociais se o usuário pedir explicitamente para retirar, remover, ocultar ou não mostrar esses dados no refinamento.",
+  ].join("
+"));
 
   if (bizContext) sections.push(bizContext);
 
@@ -1074,23 +1076,17 @@ function ensureCompanyNameBold(adText, companyName) {
     return adText.replace(plain, `*${name}*`);
   }
 
-  const lines = String(adText || "").split("
-");
+  const lines = String(adText || "").split("\n");
   const insertLine = `🏢 *${name}*`;
 
   if (!lines.length) return insertLine;
 
   if (lines.length === 1) {
-    return [lines[0], "", insertLine].join("
-");
+    return [lines[0], "", insertLine].join("\n");
   }
 
   lines.splice(2, 0, insertLine, "");
-  return lines.join("
-").replace(/
-{3,}/g, "
-
-");
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
 function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement) {
@@ -1109,8 +1105,7 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
     text = ensureCompanyNameBold(text, companyName);
   }
 
-  const lines = String(text || "").split("
-").map((line) => String(line || "").trimRight());
+  const lines = String(text || "").split("\n").map((line) => String(line || "").trimRight());
   const infoLinesToAdd = [];
 
   if (website && !textRequestsRemovingField(refinementText, "website") && !hasLineWithText(lines, website)) {
@@ -1142,11 +1137,7 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   if (insertAt < lines.length && String(lines[insertAt] || "").trim() !== "") payload.push("");
 
   lines.splice(insertAt, 0, ...payload);
-  return lines.join("
-").replace(/
-{3,}/g, "
-
-").trim();
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function buildBizProfileContext(profile) {
