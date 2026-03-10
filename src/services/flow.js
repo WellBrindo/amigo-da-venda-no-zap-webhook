@@ -611,6 +611,52 @@ function buildRefinementReminder(maxRefinements) {
 (Lembrete: até ${qty} refinamento(s) por descrição. No próximo, conta como uma nova descrição.)`;
 }
 
+async function msgRefinementPrompt(waId, maxRefinements) {
+  const lines = [];
+  lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_QUESTION", { waId }));
+  lines.push(buildRefinementReminder(maxRefinements));
+  lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_OK_HINT", { waId }));
+  return lines.join("
+");
+}
+
+function normalizeProfileScalar(value) {
+  return String(value ?? "").replace(/\/g, "/").trim();
+}
+
+function buildBizProfileContext(profile) {
+  if (!profile || typeof profile !== "object") return "";
+
+  const parts = [];
+  const companyName = normalizeProfileScalar(profile.companyName);
+  const serviceArea = normalizeProfileScalar(profile.serviceArea);
+  const location = normalizeProfileScalar(profile.location);
+  const hours = normalizeProfileScalar(profile.hours);
+  const whatsapp = normalizeProfileScalar(profile.whatsapp);
+  const website = normalizeProfileScalar(profile.website);
+  const productList = normalizeProfileScalar(profile.productList || profile.productsUrl);
+  const socials = ensureArray(profile.socials)
+    .map((item) => normalizeProfileScalar(item))
+    .filter(Boolean);
+
+  if (companyName) parts.push(`Empresa: ${companyName}`);
+  if (serviceArea) parts.push(`Atendimento: ${serviceArea}`);
+  if (location) parts.push(`Local: ${location}`);
+  if (hours) parts.push(`Horário: ${hours}`);
+  if (whatsapp) parts.push(`WhatsApp: ${whatsapp}`);
+  if (website) parts.push(`Site: ${website}`);
+  if (productList) parts.push(`Catálogo/Lista: ${productList}`);
+  if (socials.length) parts.push(`Redes: ${socials.join(" | ")}`);
+
+  if (!parts.length) return "";
+
+  return [
+    "CONTEXTO_DA_EMPRESA (dados salvos do usuário; trate como fonte de verdade quando ele pedir para incluir ou ajustar dados da empresa, sem inventar placeholders ou substituir por exemplos):",
+    parts.join("\n"),
+  ].join("
+");
+}
+
 async function msgAfterSaveProfile(waId, saved, maxRefinements) {
   const lines = [];
   lines.push(
@@ -1463,26 +1509,28 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   let ad = "";
   try {
     let promptToSend = isRefinement
-      ? `ANUNCIO_ATUAL:\n${lastAd}\n\nAJUSTES_SOLICITADOS:\n${userText}`
+      ? `ANUNCIO_ATUAL:
+${lastAd}
+
+AJUSTES_SOLICITADOS:
+${userText}`
       : userText;
 
-    // Se já temos um perfil salvo da empresa, envia como contexto (sem obrigar o usuário a repetir)
-    if (!isRefinement) {
-      const prof = await getBizProfile(id);
-      if (prof && typeof prof === "object") {
-        const parts = [];
-        if (prof.companyName) parts.push(`Empresa: ${prof.companyName}`);
-        if (prof.serviceArea) parts.push(`Atendimento: ${prof.serviceArea}`);
-        if (prof.location) parts.push(`Local: ${prof.location}`);
-        if (prof.hours) parts.push(`Horário: ${prof.hours}`);
-        if (prof.whatsapp) parts.push(`WhatsApp: ${prof.whatsapp}`);
-        if (prof.website) parts.push(`Site: ${prof.website}`);
-        if (prof.productList) parts.push(`Catálogo/Lista: ${prof.productList}`);
-        if (Array.isArray(prof.socials) && prof.socials.length) parts.push(`Redes: ${prof.socials.join(' | ')}`);
-        if (parts.length) {
-          promptToSend = `CONTEXTO_DA_EMPRESA (use somente se ajudar; não é obrigatório repetir literalmente):\n${parts.join("\n")}\n\nDESCRIÇÃO_DO_USUÁRIO:\n${userText}`;
-        }
-      }
+    const prof = await getBizProfile(id);
+    const bizContext = buildBizProfileContext(prof);
+    if (bizContext) {
+      promptToSend = isRefinement
+        ? `${bizContext}
+
+ANUNCIO_ATUAL:
+${lastAd}
+
+AJUSTES_SOLICITADOS:
+${userText}`
+        : `${bizContext}
+
+DESCRIÇÃO_DO_USUÁRIO:
+${userText}`;
     }
 
     const r = await generateAdText({ userText: promptToSend, mode });
@@ -1539,7 +1587,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   }
 
   // Mantém o status atual e apenas orienta refinamentos
-  const refineMsg = await getCopyText("FLOW_REFINE_PROMPT_SHORT", { waId: id });
+  const refineMsg = await msgRefinementPrompt(id, maxRefinements);
   return replyMulti([formattedAd, refineMsg]);
 }
 
