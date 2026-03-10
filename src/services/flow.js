@@ -115,6 +115,7 @@ const ST = Object.freeze({
   // Pós-anúncio
   WAIT_TEMPLATE_MODE: "WAIT_TEMPLATE_MODE",
   WAIT_SAVE_PROFILE: "WAIT_SAVE_PROFILE",
+  WAIT_CATEGORY_DETAILS: "WAIT_CATEGORY_DETAILS",
 
   // Wizard: adicionar/ajustar dados da empresa (manual)
   WAIT_PROFILE_ADD_COMPANY: "WAIT_PROFILE_ADD_COMPANY",
@@ -499,6 +500,326 @@ function firstNameFromFullName(fullName) {
   return parts.length ? parts[0] : "";
 }
 
+
+
+const CATEGORY_SCHEMAS = Object.freeze({
+  VEHICLE: {
+    key: "VEHICLE",
+    label: "veículo",
+    minSignals: 1,
+    askWhenMissingAtLeast: 2,
+    detect(text) {
+      const s = upper(text);
+      const brands = [
+        "FORD", "CHEVROLET", "GM", "VOLKSWAGEN", "VW", "FIAT", "HONDA", "TOYOTA", "HYUNDAI",
+        "RENAULT", "JEEP", "NISSAN", "PEUGEOT", "CITROEN", "MITSUBISHI", "KIA", "BMW", "AUDI",
+        "MERCEDES", "VOLVO", "BYD", "CHERY", "CAOA", "RAM"
+      ];
+      const generic = /\b(CARRO|VEICULO|VEÍCULO|MOTO|MOTOCICLETA|CAMINHONETE|SUV|SEDAN|HATCH|PICK[- ]?UP)\b/;
+      return brands.some((b) => s.includes(b)) || generic.test(s);
+    },
+    fields: [
+      { key: "price", label: "Preço pedido", detect: hasPriceSignal },
+      { key: "year", label: "Ano/modelo", detect: hasVehicleYearSignal },
+      { key: "km", label: "Quilometragem", detect: hasKmSignal },
+      { key: "version", label: "Versão / motor", detect: hasVehicleVersionSignal },
+      { key: "transmissionFuel", label: "Câmbio e combustível", detect: hasTransmissionOrFuelSignal },
+      { key: "condition", label: "Estado do veículo / documentos", detect: hasConditionSignal },
+      { key: "highlights", label: "Destaques ou opcionais", detect: hasHighlightsSignal },
+    ],
+  },
+  PROPERTY: {
+    key: "PROPERTY",
+    label: "imóvel",
+    minSignals: 1,
+    askWhenMissingAtLeast: 2,
+    detect(text) {
+      const s = upper(text);
+      return /\b(APARTAMENTO|APTO|CASA|SOBRADO|KITNET|TERRENO|LOTE|IMÓVEL|IMOVEL|SALA COMERCIAL|GALPÃO|GALPAO)\b/.test(s);
+    },
+    fields: [
+      { key: "price", label: "Preço / aluguel / condomínio", detect: hasPriceSignal },
+      { key: "location", label: "Bairro ou região", detect: hasLocationSignal },
+      { key: "size", label: "Metragem / quartos / vagas", detect: hasPropertySizeSignal },
+      { key: "condition", label: "Estado / diferenciais", detect: hasConditionSignal },
+      { key: "availability", label: "Se está pronto para mudar / visitar", detect: hasAvailabilitySignal },
+    ],
+  },
+  ELECTRONICS: {
+    key: "ELECTRONICS",
+    label: "produto eletrônico",
+    minSignals: 1,
+    askWhenMissingAtLeast: 2,
+    detect(text) {
+      const s = upper(text);
+      return /\b(IPHONE|SAMSUNG|MOTOROLA|XIAOMI|CELULAR|SMARTPHONE|NOTEBOOK|MACBOOK|COMPUTADOR|TV|PLAYSTATION|PS4|PS5|XBOX|NINTENDO|IPAD|TABLET)\b/.test(s);
+    },
+    fields: [
+      { key: "price", label: "Preço", detect: hasPriceSignal },
+      { key: "exactModel", label: "Modelo exato / armazenamento / configuração", detect: hasElectronicsModelSignal },
+      { key: "condition", label: "Estado de conservação", detect: hasConditionSignal },
+      { key: "accessories", label: "Acessórios / caixa / nota / garantia", detect: hasAccessorySignal },
+      { key: "batteryOrUsage", label: "Bateria / tempo de uso / funcionamento", detect: hasBatteryOrUsageSignal },
+    ],
+  },
+  SERVICE: {
+    key: "SERVICE",
+    label: "serviço",
+    minSignals: 1,
+    askWhenMissingAtLeast: 2,
+    detect(text) {
+      const s = upper(text);
+      return /\b(SERVIÇO|SERVICO|FAÇO|FACO|ATENDO|ATENDEMOS|MANICURE|DIARISTA|PEDREIRO|PINTOR|ELETRICISTA|ENCANADOR|MECÂNICO|MECANICO|FRETE|MASSAGEM|DESIGNER|AULA|CONSULTORIA)\b/.test(s);
+    },
+    fields: [
+      { key: "what", label: "O que você faz exatamente", detect: hasServiceDefinitionSignal },
+      { key: "price", label: "Preço ou forma de orçamento", detect: hasPriceSignal },
+      { key: "location", label: "Região de atendimento", detect: hasLocationSignal },
+      { key: "hours", label: "Horário / disponibilidade", detect: hasHoursSignal },
+      { key: "differential", label: "Seu principal diferencial", detect: hasDifferentialSignal },
+    ],
+  },
+  FOOD: {
+    key: "FOOD",
+    label: "produto de alimentação",
+    minSignals: 1,
+    askWhenMissingAtLeast: 2,
+    detect(text) {
+      const s = upper(text);
+      return /\b(BOLO|DOCINHO|DOCINHOS|DOCE|SALGADO|SALGADINHO|MARMITA|LANCHE|LANCHES|PIZZA|AÇAÍ|ACAI|HAMBÚRGUER|HAMBURGUER|BRIGADEIRO|CONFEITARIA|SOBREMESA)\b/.test(s);
+    },
+    fields: [
+      { key: "items", label: "Sabores / produtos principais", detect: hasFoodItemsSignal },
+      { key: "price", label: "Preço ou faixa de valores", detect: hasPriceSignal },
+      { key: "location", label: "Entrega / retirada / região", detect: hasLocationSignal },
+      { key: "hours", label: "Horário de atendimento", detect: hasHoursSignal },
+      { key: "differential", label: "Seu destaque (caseiro, por encomenda, etc.)", detect: hasDifferentialSignal },
+    ],
+  },
+  FASHION: {
+    key: "FASHION",
+    label: "roupa ou acessório",
+    minSignals: 1,
+    askWhenMissingAtLeast: 2,
+    detect(text) {
+      const s = upper(text);
+      return /\b(VESTIDO|CAMISETA|CALÇA|TENIS|TÊNIS|SAPATO|BOLSA|JAQUETA|ROUPA|LOOK|ACESSÓRIO|ACESSORIO|RELÓGIO|RELOGIO)\b/.test(s);
+    },
+    fields: [
+      { key: "price", label: "Preço", detect: hasPriceSignal },
+      { key: "size", label: "Tamanho / numeração", detect: hasFashionSizeSignal },
+      { key: "condition", label: "Estado / cor / marca", detect: hasConditionSignal },
+      { key: "location", label: "Entrega / retirada / cidade", detect: hasLocationSignal },
+    ],
+  },
+  HOME: {
+    key: "HOME",
+    label: "móvel ou eletrodoméstico",
+    minSignals: 1,
+    askWhenMissingAtLeast: 2,
+    detect(text) {
+      const s = upper(text);
+      return /\b(GELADEIRA|FREEZER|FOGÃO|FOGAO|MICRO-ONDAS|MICROONDAS|MÁQUINA|MAQUINA|LAVA E SECA|SOFÁ|SOFA|ARMÁRIO|ARMARIO|MESA|CADEIRA|GUARDA-ROUPA|COLCHÃO|COLCHAO)\b/.test(s);
+    },
+    fields: [
+      { key: "price", label: "Preço", detect: hasPriceSignal },
+      { key: "model", label: "Marca / modelo / tamanho / capacidade", detect: hasHomeModelSignal },
+      { key: "condition", label: "Estado de conservação", detect: hasConditionSignal },
+      { key: "voltageOrMeasure", label: "Voltagem / medidas", detect: hasVoltageOrMeasureSignal },
+      { key: "location", label: "Entrega / retirada / cidade", detect: hasLocationSignal },
+    ],
+  },
+  GENERIC: {
+    key: "GENERIC",
+    label: "produto",
+    minSignals: 0,
+    askWhenMissingAtLeast: 2,
+    detect() {
+      return true;
+    },
+    fields: [
+      { key: "price", label: "Preço", detect: hasPriceSignal },
+      { key: "condition", label: "Estado / tempo de uso", detect: hasConditionSignal },
+      { key: "location", label: "Cidade / entrega / retirada", detect: hasLocationSignal },
+      { key: "differential", label: "Principal destaque do item", detect: hasDifferentialSignal },
+    ],
+  },
+});
+
+function countWords(text) {
+  return cleanText(text).split(/\s+/).filter(Boolean).length;
+}
+
+function hasPriceSignal(text) {
+  const s = upper(text);
+  return /R\$\s*\d/.test(s) || /\b\d+\s*(MIL|REAIS|R\$)\b/.test(s);
+}
+
+function hasKmSignal(text) {
+  return /\b\d{1,3}(\.\d{3})*\s*KM\b/i.test(text) || /\b\d{1,3}\s*MIL\s*KM\b/i.test(text);
+}
+
+function hasVehicleYearSignal(text) {
+  return /\b(19|20)\d{2}\b/.test(text);
+}
+
+function hasVehicleVersionSignal(text) {
+  const s = upper(text);
+  return /\b(LTZ|LT|EX|EXL|XLT|TITANIUM|TREND|SE|SEL|GL|GLS|GLX|SPORT|TURBO|1\.0|1\.6|2\.0|V6|V8)\b/.test(s);
+}
+
+function hasTransmissionOrFuelSignal(text) {
+  const s = upper(text);
+  return /\b(MANUAL|AUTOM[AÁ]TICO|AUTOMATICO|CVT|FLEX|GASOLINA|DIESEL|H[ÍI]BRIDO|HIBRIDO|EL[ÉE]TRICO|ELETRICO)\b/.test(s);
+}
+
+function hasConditionSignal(text) {
+  const s = upper(text);
+  return /\b(CONSERVADO|CONSERVADA|NOVO|NOVA|SEMINOVO|SEMINOVA|REVISADO|REVISADA|PERFEITO ESTADO|ESTADO DE NOVO|USADO|USADA|FUNCIONANDO|FUNCIONA|DOCUMENTA[CÇ][AÃ]O|DOCS?)\b/.test(s);
+}
+
+function hasHighlightsSignal(text) {
+  const s = upper(text);
+  return /\b(AR[- ]CONDICIONADO|MULTIM[ÍI]DIA|COURO|AIRBAG|ABS|RODA|TETO|CAMERA DE R[ÉE]|C[ÂA]MERA DE R[ÉE]|COMPLETO|OPCIONAIS?)\b/.test(s);
+}
+
+function hasLocationSignal(text) {
+  const s = upper(text);
+  return /\b(ENTREGO|RETIRAR|RETIRADA|ENTREGA|BAIRRO|CIDADE|REGI[AÃ]O|ATENDO|ATENDIMENTO|ONLINE|DOMIC[ÍI]LIO|DOMICILIO|FRETE)\b/.test(s);
+}
+
+function hasPropertySizeSignal(text) {
+  const s = upper(text);
+  return /\b(M2|M²|QUARTO|QUARTOS|SU[ÍI]TE|SUITE|VAGA|VAGAS|BANHEIRO|BANHEIROS)\b/.test(s);
+}
+
+function hasAvailabilitySignal(text) {
+  const s = upper(text);
+  return /\b(PRONTO|DISPON[ÍI]VEL|VISITA|VISITAR|MUDAR|IMEDIATO|IMEDIATA)\b/.test(s);
+}
+
+function hasElectronicsModelSignal(text) {
+  const s = upper(text);
+  return /\b(64GB|128GB|256GB|512GB|I5|I7|I9|M1|M2|M3|POLEGADAS?|INCH|\"|GB|SSD|RAM)\b/.test(s);
+}
+
+function hasAccessorySignal(text) {
+  const s = upper(text);
+  return /\b(CAIXA|CARREGADOR|NOTA FISCAL|GARANTIA|CABO|CAPA|PEL[ÍI]CULA|FONE|ACESS[ÓO]RIOS?)\b/.test(s);
+}
+
+function hasBatteryOrUsageSignal(text) {
+  const s = upper(text);
+  return /\b(BATERIA|SA[ÚU]DE DA BATERIA|USO|ANO DE USO|FUNCIONANDO|SEM MARCAS|SEM DETALHES)\b/.test(s);
+}
+
+function hasServiceDefinitionSignal(text) {
+  const s = upper(text);
+  return countWords(s) >= 4;
+}
+
+function hasHoursSignal(text) {
+  const s = upper(text);
+  return /\b(SEG|SEGUNDA|TER|QUA|QUI|SEX|SAB|SÁB|DOM|HOR[ÁA]RIO|HORARIO|\d{1,2}H)\b/.test(s);
+}
+
+function hasDifferentialSignal(text) {
+  const s = upper(text);
+  return /\b(EXPERI[ÊE]NCIA|QUALIDADE|R[ÁA]PIDO|RAPIDO|CAPRICHO|GARANTIA|ATENDIMENTO|PERSONALIZADO|ARTESANAL|CASEIRO|ORIGINAL|ÚNICO DONO|UNICO DONO)\b/.test(s);
+}
+
+function hasFoodItemsSignal(text) {
+  const s = upper(text);
+  return /\b(SABOR|SABORES|BRIGADEIRO|BOLO|POTE|PIZZA|HAMB[ÚU]RGUER|COMBO|KIT|ENCOMENDA)\b/.test(s);
+}
+
+function hasFashionSizeSignal(text) {
+  const s = upper(text);
+  return /\b(PP|P|M|G|GG|XG|36|37|38|39|40|41|42|43|44|NUMERA[CÇ][AÃ]O|TAMANHO)\b/.test(s);
+}
+
+function hasHomeModelSignal(text) {
+  const s = upper(text);
+  return /\b(LITROS|L|KG|BRASTEMP|ELECTROLUX|CONSUL|SAMSUNG|LG|PHILCO|MIDEA|6 BOCAS|4 BOCAS|PORTAS?)\b/.test(s);
+}
+
+function hasVoltageOrMeasureSignal(text) {
+  const s = upper(text);
+  return /\b(110V|127V|220V|VOLTS?|CM|METROS?|LARGURA|ALTURA|PROFUNDIDADE|MEDIDAS?)\b/.test(s);
+}
+
+function detectCategorySchema(text) {
+  const values = Object.values(CATEGORY_SCHEMAS).filter((schema) => schema.key !== "GENERIC");
+  for (const schema of values) {
+    if (schema.detect(text)) return schema;
+  }
+  return CATEGORY_SCHEMAS.GENERIC;
+}
+
+function getMissingCategoryFields(schema, text) {
+  return schema.fields.filter((field) => !field.detect(text));
+}
+
+function shouldAskCategoryQuestions(schema, text, missingFields) {
+  const words = countWords(text);
+  if (schema.key === "GENERIC") {
+    return words <= 5 && missingFields.length >= 2;
+  }
+  if (words <= 3) return true;
+  return missingFields.length >= Number(schema.askWhenMissingAtLeast || 2);
+}
+
+function buildCategoryQuestionPrompt({ schema, missingFields }) {
+  const missing = missingFields.slice(0, 5);
+  const lines = [
+    `Perfeito! Para montar um anúncio mais forte de ${schema.label}, me responde em *uma única mensagem* só o que faltar:`,
+    "",
+    ...missing.map((field) => `• ${field.label}`),
+    "",
+    "Se preferir, digite *PULAR* e eu gero com o que já tenho. ✅",
+  ];
+  return lines.join("\n");
+}
+
+function planCategoryQuestion(text) {
+  const schema = detectCategorySchema(text);
+  const missingFields = getMissingCategoryFields(schema, text);
+  if (!shouldAskCategoryQuestions(schema, text, missingFields)) return null;
+
+  return {
+    categoryKey: schema.key,
+    categoryLabel: schema.label,
+    missingFields: missingFields.map((field) => field.key),
+    prompt: buildCategoryQuestionPrompt({ schema, missingFields }),
+  };
+}
+
+async function setLeadIntakePayload(waId, payload) {
+  await setPendingBizProfile(waId, { __leadIntake: payload });
+}
+
+async function getLeadIntakePayload(waId) {
+  const pending = await getPendingBizProfile(waId);
+  if (!pending || typeof pending !== "object") return null;
+  return pending.__leadIntake && typeof pending.__leadIntake === "object" ? pending.__leadIntake : null;
+}
+
+async function clearLeadIntakePayload(waId) {
+  const pending = await getPendingBizProfile(waId);
+  if (!pending || typeof pending !== "object") return;
+  if (!pending.__leadIntake) return;
+  await clearPendingBizProfile(waId);
+}
+
+function buildLeadIntakeCombinedText(baseText, complementText) {
+  return [
+    baseText,
+    "",
+    "INFORMAÇÕES COMPLEMENTARES DO USUÁRIO:",
+    complementText,
+  ].join("\n");
+}
+
 // -------------------- Copy / Mensagens --------------------
 async function msgAskName(waId){
   return await getCopyText("FLOW_ASK_NAME", { waId });
@@ -511,11 +832,36 @@ async function msgAskProduct(waId){
 }
 
 async function msgTrialOverAndPlans() {
-  return await renderPlansMenu({ variant: "trialEnded" });
+  // renderPlansMenu já vem com o cabeçalho do trial concluído
+  return "Não entendi 😅\n\n" + (await renderPlansMenu());
 }
 
 async function msgPlansOnly() {
-  return await renderPlansMenu({ variant: "plansOnly" });
+  // Versão sem o "trial concluído"
+  const menu = await getMenuPlans();
+  if (!menu || menu.length === 0) {
+    return (
+      "Para continuar, escolha um plano:\n\n" +
+      "1) De Vez em Quando — R$ 24.90\n   • 20 descrições/mês\n\n" +
+      "2) Sempre por Perto — R$ 34.90\n   • 60 descrições/mês\n\n" +
+      "3) Melhor Amigo — R$ 49.90\n   • 200 descrições/mês\n\n" +
+      "Responda com *1*, *2* ou *3*."
+    );
+  }
+
+  const lines = [];
+  lines.push("Para continuar, escolha um plano:");
+  lines.push("");
+
+  menu.forEach((p, idx) => {
+    const n = idx + 1;
+    lines.push(`${n}) ${p.name} — R$ ${moneyBRFromCents(p.priceCents)}`);
+    lines.push(`   • ${p.description || `${p.monthlyQuota} descrições/mês`}`);
+    lines.push("");
+  });
+
+  lines.push("Responda com *1*, *2* ou *3*.");
+  return lines.join("\n");
 }
 
 async function msgAskPaymentMethod(waId, plan){
@@ -1065,6 +1411,42 @@ export async function handleInboundText({ waId, text }) {
   }
 
 
+  // 0.45) Complemento de informações antes de gerar anúncio
+  if (status === ST.WAIT_CATEGORY_DETAILS) {
+    const intake = await getLeadIntakePayload(id);
+
+    if (!intake?.baseText) {
+      await clearLeadIntakePayload(id);
+      await setUserStatus(id, ST.WAIT_PRODUCT);
+      return reply(await msgAskProduct(id));
+    }
+
+    const baseStatus = intake.prevStatus === ST.ACTIVE ? ST.ACTIVE : ST.TRIAL;
+    const isTrialFlow = baseStatus !== ST.ACTIVE;
+
+    await clearLeadIntakePayload(id);
+    await setUserStatus(id, baseStatus);
+
+    if (wantsSkipCommand(inbound) || wantsOkCommand(inbound)) {
+      return await handleGenerateAdInTrialOrActive({
+        waId: id,
+        inboundText: intake.baseText,
+        isTrial: isTrialFlow,
+        currentStatus: baseStatus,
+      });
+    }
+
+    const combinedText = buildLeadIntakeCombinedText(intake.baseText, inbound);
+    return await handleGenerateAdInTrialOrActive({
+      waId: id,
+      inboundText: combinedText,
+      isTrial: isTrialFlow,
+      currentStatus: baseStatus,
+    });
+  }
+
+
+
   // 0.5) Wizard — adicionar/ajustar dados da empresa (manual)
   if (
     status === ST.WAIT_PROFILE_ADD_COMPANY ||
@@ -1424,6 +1806,21 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   const lastAd = await getLastAd(id);
   const isRefinement = !!lastAd;
+
+  if (!isRefinement) {
+    const categoryQuestion = planCategoryQuestion(userText);
+    if (categoryQuestion) {
+      await setLeadIntakePayload(id, {
+        kind: "CATEGORY_DETAILS",
+        baseText: userText,
+        prevStatus: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+        categoryKey: categoryQuestion.categoryKey,
+        missingFields: categoryQuestion.missingFields,
+      });
+      await setUserStatus(id, ST.WAIT_CATEGORY_DETAILS);
+      return reply(categoryQuestion.prompt);
+    }
+  }
 
   // Regra de consumo (refinamentos):
   // - 1 descrição inicial sempre consome 1 crédito
