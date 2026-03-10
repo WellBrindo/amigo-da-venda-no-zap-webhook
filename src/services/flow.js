@@ -78,7 +78,7 @@ import {
   clearCurrentAdSession,
 } from "./state.js";
 
-import { getMenuPlans, getPlan, getPlanByChoice, renderPlansMenu } from "./Plans.js";
+import { getMenuPlans, getPlan, getPlanByChoice } from "./Plans.js";
 import { validateDoc } from "./brDoc.js";
 
 import {
@@ -245,6 +245,76 @@ function todayISO() {
 function moneyBRFromCents(cents) {
   const v = (Number(cents) || 0) / 100;
   return v.toFixed(2);
+}
+
+function normalizePriceDisplayFromCents(cents) {
+  return String(moneyBRFromCents(cents)).replace('.', ',');
+}
+
+function formatPlanQuotaLabel(plan) {
+  const desc = cleanText(plan?.description || "");
+  if (desc) return desc;
+
+  const quota = Number(plan?.monthlyQuota || 0);
+  if (!quota) return "Plano mensal";
+  return `${quota} descrições por mês`;
+}
+
+function formatPlanMenuLine(plan, index) {
+  const n = Number(index) + 1;
+  const badge = n === 1 ? "1️⃣" : n === 2 ? "2️⃣" : n === 3 ? "3️⃣" : `${n})`;
+  const name = cleanText(plan?.name || `Plano ${n}`);
+  const price = normalizePriceDisplayFromCents(plan?.priceCents);
+  const quotaLabel = formatPlanQuotaLabel(plan);
+  return `${badge} *${name}* — R$ ${price}
+${quotaLabel}`;
+}
+
+async function buildDynamicPlansMenu({ includeTrialIntro = false } = {}) {
+  const menu = await getMenuPlans();
+  const validMenu = Array.isArray(menu) ? menu.filter(Boolean) : [];
+
+  if (!validMenu.length) {
+    const intro = includeTrialIntro ? "Seu teste grátis acabou 😄
+
+" : "";
+    return (
+      `${intro}Para continuar, escolha um plano:
+
+` +
+      `1️⃣ *De Vez em Quando* — R$ 24,90
+20 descrições por mês
+
+` +
+      `2️⃣ *Sempre por Perto* — R$ 34,90
+60 descrições por mês
+
+` +
+      `3️⃣ *Melhor Amigo* — R$ 49,90
+200 descrições por mês
+
+` +
+      `Responda com *1*, *2* ou *3*.`
+    );
+  }
+
+  const lines = [];
+  if (includeTrialIntro) {
+    lines.push("Seu teste grátis acabou 😄");
+    lines.push("");
+  }
+  lines.push("Para continuar, escolha um plano:");
+  lines.push("");
+
+  validMenu.forEach((plan, index) => {
+    lines.push(formatPlanMenuLine(plan, index));
+    if (index < validMenu.length - 1) lines.push("");
+  });
+
+  lines.push("");
+  lines.push("Responda com *1*, *2* ou *3*.");
+  return lines.join("
+");
 }
 
 function reply(text) {
@@ -423,30 +493,55 @@ function enforceAdFormatting(adText) {
   });
 
   // --------------------------
-  // 5) Mais 2 destaques (sem exagero): bullets informativos
+  // 5) Linhas informativas no padrão FIXO
+  // - 📍 *Localização:* valor
+  // - 🕒 *Horário:* valor
+  // - 📞 *WhatsApp:* valor
   // --------------------------
   let arr = text.split("\n").map((l) => String(l || "").trimRight());
   const infoEmojiRe = /^(🇧🇷|🕒|📍|🚚|📞|🌐|💬|✅)\s+/;
-  let applied = 0;
+  const infoLabelMap = {
+    "📍": ["Localização", "Local", "Endereço", "Região"],
+    "🕒": ["Horário"],
+    "📞": ["WhatsApp", "Contato", "Telefone"],
+    "💬": ["WhatsApp", "Contato"],
+    "🌐": ["Site"],
+    "🚚": ["Entrega"],
+    "✅": ["Observação"],
+    "🇧🇷": ["Brasil"],
+  };
 
-  for (let i = 0; i < arr.length; i++) {
-    if (applied >= 2) break;
-    const line = String(arr[i] || "");
-    if (!line.trim()) continue;
-
-    const m = line.match(infoEmojiRe);
-    if (!m) continue;
-
-    // evita se já tiver negrito na linha
-    if (line.includes("*")) continue;
+  const formatInfoLine = (line) => {
+    const current = String(line || "").trimRight();
+    const m = current.match(/^\s*(🇧🇷|🕒|📍|🚚|📞|🌐|💬|✅)\s+([^
+]+)$/);
+    if (!m) return current;
 
     const emoji = m[1];
-    const rest = line.replace(infoEmojiRe, "").trim();
-    if (!rest) continue;
+    let rest = String(m[2] || "").trim();
+    if (!rest) return current;
 
-    arr[i] = `${emoji} ${boldWrapSafe(rest)}`;
-    applied += 1;
-  }
+    const colonMatch = rest.match(/^\*?([^:*]{1,40})\*?\s*:\s*(.+)$/);
+    if (colonMatch) {
+      const label = stripOuterStars(colonMatch[1] || "");
+      const value = String(colonMatch[2] || "").trim();
+      if (!label || !value) return current;
+      return `${emoji} ${boldWrapSafe(label)}: ${value}`;
+    }
+
+    const knownLabels = infoLabelMap[emoji] || [];
+    for (const label of knownLabels) {
+      const rx = new RegExp(`^${escapeRegex(label)}\s*[-–—]?\s*(.+)$`, "i");
+      const mm = rest.match(rx);
+      if (mm && mm[1]) {
+        return `${emoji} ${boldWrapSafe(label)}: ${String(mm[1]).trim()}`;
+      }
+    }
+
+    return `${emoji} ${rest}`;
+  };
+
+  arr = arr.map(formatInfoLine);
 
   // --------------------------
   // 6) Ordenação: CTA de avanço ("Envie...") antes de informações (🇧🇷/🕒/📍...)
@@ -543,7 +638,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
     minAskScore: 75,
     detect(text) {
       const s = upper(text);
-      return /\b(CARRO|VE[IÍ]CULO|VEICULO|MOTO|MOTOCICLETA|CAMINHONETE|SUV|SEDAN|HATCH|PICK[- ]?UP|ONIX|HB20|PALIO|GOL|UNO|CORSA|CELTA|CRUZE|CIVIC|COROLLA|JETTA|FOX|SAVEIRO|STRADA|TORO|RENEGADE|COMPASS|HR-V|T-CROSS)\b/.test(s);
+      return /\b(CARRO|VE[IÍ]CULO|VEICULO|MOTO|MOTOCICLETA|CAMINHONETE|SUV|SEDAN|HATCH|PICK[- ]?UP|ONIX|HB20|PALIO|GOL|UNO|CORSA|CELTA|CRUZE|CIVIC|COROLLA|JETTA|FOX|SAVEIRO|STRADA|TORO|RENEGADE|COMPASS|HR-V|T-CROSS|FASTBACK|PULSE|NIVUS|ARGO|MOBI|TRACKER|CRETA)\b/.test(s);
     },
     fields: [
       { key: "price", label: "Preço", weight: 20, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
@@ -806,15 +901,86 @@ function hasHomeModelSignal(text) {
 
 function hasVoltageOrMeasureSignal(text) {
   const s = upper(text);
-  return /\b(110V|127V|220V|VOLTS?|CM|METROS?|LARGURA|ALTURA|PROFUNDIDADE|MEDIDAS?)\b/.test(s);
+  return /(110V|127V|220V|VOLTS?|CM|METROS?|LARGURA|ALTURA|PROFUNDIDADE|MEDIDAS?)/.test(s);
+}
+
+const CATEGORY_HINTS = Object.freeze({
+  VEHICLE: [
+    "CARRO", "VEICULO", "VEÍCULO", "AUTO", "AUTOMOVEL", "AUTOMÓVEL", "MOTO", "MOTOCICLETA", "CAMINHONETE", "SUV", "SEDAN", "HATCH",
+    "PICKUP", "PICK-UP", "PICK UP", "ONIX", "HB20", "PALIO", "GOL", "UNO", "CORSA", "CELTA", "CRUZE", "CIVIC", "COROLLA", "JETTA",
+    "FOX", "SAVEIRO", "STRADA", "TORO", "RENEGADE", "COMPASS", "HR-V", "HRV", "T-CROSS", "TCROSS", "FASTBACK", "PULSE", "NIVUS",
+    "ARGO", "MOBI", "TRACKER", "CRETA", "KWID", "S10", "HILUX", "SW4", "FIAT", "CHEVROLET", "VW", "VOLKSWAGEN", "HYUNDAI", "TOYOTA", "HONDA"
+  ],
+  PROPERTY: [
+    "APARTAMENTO", "APTO", "CASA", "SOBRADO", "KITNET", "TERRENO", "LOTE", "IMOVEL", "IMÓVEL", "SALA COMERCIAL", "GALPAO", "GALPÃO",
+    "CHACARA", "CHÁCARA", "FAZENDA", "COBERTURA", "ALUGO", "ALUGUEL", "VENDO CASA", "VENDE-SE CASA", "CONDOMINIO", "CONDOMÍNIO"
+  ],
+  ELECTRONICS: [
+    "IPHONE", "SAMSUNG", "MOTOROLA", "XIAOMI", "CELULAR", "SMARTPHONE", "NOTEBOOK", "MACBOOK", "COMPUTADOR", "TV", "PLAYSTATION",
+    "PS4", "PS5", "XBOX", "NINTENDO", "IPAD", "TABLET", "AIRPODS", "SMARTWATCH", "APPLE WATCH", "MONITOR", "IMPRESSORA"
+  ],
+  SERVICE: [
+    "SERVIÇO", "SERVICO", "FAÇO", "FACO", "ATENDO", "ATENDEMOS", "MANICURE", "DIARISTA", "PEDREIRO", "PINTOR", "ELETRICISTA",
+    "ENCANADOR", "MECÂNICO", "MECANICO", "FRETE", "MASSAGEM", "DESIGNER", "AULA", "CONSULTORIA", "INSTALAÇÃO", "INSTALACAO",
+    "MANUTENÇÃO", "MANUTENCAO", "LIMPEZA", "CABELO", "BARBEIRO", "UNHAS"
+  ],
+  FOOD: [
+    "BOLO", "DOCINHO", "DOCINHOS", "DOCE", "SALGADO", "SALGADINHO", "MARMITA", "LANCHE", "LANCHES", "PIZZA", "AÇAÍ", "ACAI",
+    "HAMBÚRGUER", "HAMBURGUER", "BRIGADEIRO", "CONFEITARIA", "SOBREMESA", "COMIDA", "PORÇÃO", "PORCAO", "PRATO", "TRUFA"
+  ],
+  FASHION: [
+    "VESTIDO", "CAMISETA", "CALÇA", "CALCA", "TENIS", "TÊNIS", "SAPATO", "BOLSA", "JAQUETA", "ROUPA", "LOOK", "ACESSORIO", "ACESSÓRIO",
+    "RELÓGIO", "RELOGIO", "BONÉ", "BONE", "SHORT", "SAIA", "BLUSA", "CROPPED"
+  ],
+  HOME: [
+    "GELADEIRA", "FREEZER", "FOGÃO", "FOGAO", "MICROONDAS", "MICRO-ONDAS", "MÁQUINA", "MAQUINA", "LAVA E SECA", "SOFÁ", "SOFA",
+    "ARMÁRIO", "ARMARIO", "MESA", "CADEIRA", "GUARDA-ROUPA", "COLCHÃO", "COLCHAO", "COOKTOP", "PAINEL", "RAQUE", "LAVADORA", "SECADORA"
+  ],
+});
+
+function scoreKeywordHits(text, hints) {
+  const normalized = ` ${upper(text).replace(/[^A-Z0-9ÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ\- ]+/g, " ")} `;
+  let score = 0;
+
+  for (const hint of ensureArray(hints)) {
+    const token = cleanText(hint).toUpperCase();
+    if (!token) continue;
+    if (normalized.includes(` ${token} `)) score += token.length >= 6 ? 8 : 6;
+  }
+
+  return score;
+}
+
+function scoreCategorySchema(text, schema) {
+  if (!schema || schema.key === "GENERIC") return 0;
+
+  let score = 0;
+  if (schema.detect(text)) score += 40;
+  score += scoreKeywordHits(text, CATEGORY_HINTS[schema.key]);
+
+  const completeness = computeCategoryCompleteness({ schema, text, bizProfile: null });
+  score += Math.min(36, completeness.presentWeight);
+
+  const words = countWords(text);
+  if (schema.key === "SERVICE" && words <= 2) score -= 10;
+
+  return score;
 }
 
 function detectCategorySchema(text) {
-  const values = Object.values(CATEGORY_SCHEMAS).filter((schema) => schema.key !== "GENERIC");
-  for (const schema of values) {
-    if (schema.detect(text)) return schema;
+  const candidates = Object.values(CATEGORY_SCHEMAS).filter((schema) => schema.key !== "GENERIC");
+  let bestSchema = CATEGORY_SCHEMAS.GENERIC;
+  let bestScore = 0;
+
+  for (const schema of candidates) {
+    const score = scoreCategorySchema(text, schema);
+    if (score > bestScore) {
+      bestSchema = schema;
+      bestScore = score;
+    }
   }
-  return CATEGORY_SCHEMAS.GENERIC;
+
+  return bestScore >= 40 ? bestSchema : CATEGORY_SCHEMAS.GENERIC;
 }
 
 function profileHasUsefulValue(value) {
@@ -887,7 +1053,15 @@ function computeCategoryCompleteness({ schema, text, bizProfile }) {
 }
 
 function pickFieldsToAsk({ completeness, maxFields = 5 }) {
-  const ordered = [...completeness.missingCritical, ...completeness.missingDesired];
+  const sortByWeightDesc = (a, b) => {
+    const wa = Number(a?.weight || 0);
+    const wb = Number(b?.weight || 0);
+    return wb - wa;
+  };
+
+  const critical = [...ensureArray(completeness?.missingCritical)].sort(sortByWeightDesc);
+  const desired = [...ensureArray(completeness?.missingDesired)].sort(sortByWeightDesc);
+  const ordered = [...critical, ...desired];
   return ordered.slice(0, maxFields);
 }
 
@@ -1029,36 +1203,11 @@ async function msgAskProduct(waId){
 }
 
 async function msgTrialOverAndPlans() {
-  // renderPlansMenu já vem com o cabeçalho do trial concluído
-  return "Não entendi 😅\n\n" + (await renderPlansMenu());
+  return await buildDynamicPlansMenu({ includeTrialIntro: true });
 }
 
 async function msgPlansOnly() {
-  // Versão sem o "trial concluído"
-  const menu = await getMenuPlans();
-  if (!menu || menu.length === 0) {
-    return (
-      "Para continuar, escolha um plano:\n\n" +
-      "1) De Vez em Quando — R$ 24.90\n   • 20 descrições/mês\n\n" +
-      "2) Sempre por Perto — R$ 34.90\n   • 60 descrições/mês\n\n" +
-      "3) Melhor Amigo — R$ 49.90\n   • 200 descrições/mês\n\n" +
-      "Responda com *1*, *2* ou *3*."
-    );
-  }
-
-  const lines = [];
-  lines.push("Para continuar, escolha um plano:");
-  lines.push("");
-
-  menu.forEach((p, idx) => {
-    const n = idx + 1;
-    lines.push(`${n}) ${p.name} — R$ ${moneyBRFromCents(p.priceCents)}`);
-    lines.push(`   • ${p.description || `${p.monthlyQuota} descrições/mês`}`);
-    lines.push("");
-  });
-
-  lines.push("Responda com *1*, *2* ou *3*.");
-  return lines.join("\n");
+  return await buildDynamicPlansMenu({ includeTrialIntro: false });
 }
 
 async function msgAskPaymentMethod(waId, plan){
@@ -1177,6 +1326,17 @@ function hasLineWithText(lines, value) {
   return lines.some((line) => normalizeProfileScalar(line).toLowerCase().includes(target));
 }
 
+function normalizeCompanyCtas(adText, bizProfile) {
+  const companyName = normalizeProfileScalar(bizProfile?.companyName);
+  if (!companyName) return String(adText || "");
+
+  return String(adText || "")
+    .replace(/Fale comigo/gi, "Fale conosco")
+    .replace(/Entre em contato comigo/gi, "Entre em contato conosco")
+    .replace(/Me chame/gi, "Nos chame")
+    .replace(/Agende comigo/gi, "Agende conosco");
+}
+
 function ensureCompanyNameBold(adText, companyName) {
   const name = normalizeProfileScalar(companyName);
   if (!name) return adText;
@@ -1207,7 +1367,7 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   if (!bizProfile || typeof bizProfile !== "object") return adText;
 
   const refinementText = isRefinement ? String(userText || "") : "";
-  let text = String(adText || "");
+  let text = normalizeCompanyCtas(adText, bizProfile);
 
   const companyName = normalizeProfileScalar(bizProfile.companyName);
   const website = normalizeProfileScalar(bizProfile.website);
@@ -1223,7 +1383,7 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   const infoLinesToAdd = [];
 
   if (website && !textRequestsRemovingField(refinementText, "website") && !hasLineWithText(lines, website)) {
-    infoLinesToAdd.push(`🌐 ${website}`);
+    infoLinesToAdd.push(`🌐 *Site:* ${website}`);
   }
 
   if (socials.length && !textRequestsRemovingField(refinementText, "socials")) {
