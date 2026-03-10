@@ -378,8 +378,7 @@ export async function renderPlansMenu({ variant = "trialEnded" } = {}) {
 
   lines.push("");
   lines.push(`Responda com *1*, *2* ou *3*.`);
-  return lines.join("
-");
+  return lines.join("\n");
 }
 
 // -------------------------
