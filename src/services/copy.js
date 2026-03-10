@@ -80,20 +80,17 @@ Qual é o seu NOME COMPLETO?`,
   FLOW_TRIAL_BLOCKED:
     "Seu teste grátis acabou 😄\n\nPara continuar, escolha um plano:\n\n1️⃣ *De Vez em Quando* — R$ 24,90 (20 descrições/mês)\n2️⃣ *Sempre por Perto* — R$ 34,90 (60 descrições/mês)\n3️⃣ *Melhor Amigo* — R$ 49,90 (200 descrições/mês)\n\nResponda com *1*, *2* ou *3*.",
 
-  FLOW_TRIAL_PREFIX: "Não entendi 😅",
+  FLOW_TRIAL_PREFIX: "Seu teste grátis acabou 😄",
 
   // FLOW — Fallback de planos (quando o Redis não tem planos cadastrados)
   FLOW_PLANS_FALLBACK_STATIC:
-    `Para continuar, escolha um plano:
+    `Seu teste grátis acabou 😄
 
-1) De Vez em Quando — R$ 24.90
-   • 20 descrições/mês
+Para continuar, escolha um plano:
 
-2) Sempre por Perto — R$ 34.90
-   • 60 descrições/mês
-
-3) Melhor Amigo — R$ 49.90
-   • 200 descrições/mês
+1️⃣ *De Vez em Quando* — R$ 24,90 (20 descrições/mês)
+2️⃣ *Sempre por Perto* — R$ 34,90 (60 descrições/mês)
+3️⃣ *Melhor Amigo* — R$ 49,90 (200 descrições/mês)
 
 Responda com *1*, *2* ou *3*.`,
 
