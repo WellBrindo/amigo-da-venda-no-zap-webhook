@@ -1064,7 +1064,7 @@ function ensureCompanyNameBold(adText, companyName) {
   if (!name) return adText;
 
   const escaped = escapeRegex(name);
-  const alreadyBold = new RegExp(`\*${escaped}\*`, "i");
+  const alreadyBold = new RegExp(`\\*${escaped}\\*`, "i");
   if (alreadyBold.test(adText)) return adText;
 
   const plain = new RegExp(escaped, "i");
