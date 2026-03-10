@@ -511,36 +511,11 @@ async function msgAskProduct(waId){
 }
 
 async function msgTrialOverAndPlans() {
-  // renderPlansMenu já vem com o cabeçalho do trial concluído
-  return "Não entendi 😅\n\n" + (await renderPlansMenu());
+  return await renderPlansMenu({ variant: "trialEnded" });
 }
 
 async function msgPlansOnly() {
-  // Versão sem o "trial concluído"
-  const menu = await getMenuPlans();
-  if (!menu || menu.length === 0) {
-    return (
-      "Para continuar, escolha um plano:\n\n" +
-      "1) De Vez em Quando — R$ 24.90\n   • 20 descrições/mês\n\n" +
-      "2) Sempre por Perto — R$ 34.90\n   • 60 descrições/mês\n\n" +
-      "3) Melhor Amigo — R$ 49.90\n   • 200 descrições/mês\n\n" +
-      "Responda com *1*, *2* ou *3*."
-    );
-  }
-
-  const lines = [];
-  lines.push("Para continuar, escolha um plano:");
-  lines.push("");
-
-  menu.forEach((p, idx) => {
-    const n = idx + 1;
-    lines.push(`${n}) ${p.name} — R$ ${moneyBRFromCents(p.priceCents)}`);
-    lines.push(`   • ${p.description || `${p.monthlyQuota} descrições/mês`}`);
-    lines.push("");
-  });
-
-  lines.push("Responda com *1*, *2* ou *3*.");
-  return lines.join("\n");
+  return await renderPlansMenu({ variant: "plansOnly" });
 }
 
 async function msgAskPaymentMethod(waId, plan){
