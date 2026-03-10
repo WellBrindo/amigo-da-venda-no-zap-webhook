@@ -86,6 +86,8 @@ const keyCardCanceledAt = (waId) => `user:${waId}:cardCanceledAt`;
 const keyBizProfile = (waId) => `user:${waId}:bizProfile`;
 // Perfil pendente (sugestão detectada) aguardando confirmação do usuário
 const keyPendingBizProfile = (waId) => `user:${waId}:pendingBizProfile`;
+// Sessão do anúncio atual (complemento estruturado / intake de categoria)
+const keyCurrentAdSession = (waId) => `user:${waId}:currentAdSession`;
 // Status anterior (para estados transitórios como escolha de template / salvar perfil)
 const keyPrevStatus = (waId) => `user:${waId}:prevStatus`;
 
@@ -714,6 +716,26 @@ export async function clearPendingBizProfile(waId) {
   return true;
 }
 
+// ===================== Ad Session (anúncio atual) =====================
+export async function getCurrentAdSession(waId) {
+  const raw = await redisGet(keyCurrentAdSession(waId));
+  const obj = safeJsonParse(raw);
+  return obj && typeof obj === "object" ? obj : null;
+}
+
+export async function setCurrentAdSession(waId, sessionObj) {
+  await indexUser(waId);
+  const s = safeJsonStringify(sessionObj);
+  await redisSet(keyCurrentAdSession(waId), s);
+  return true;
+}
+
+export async function clearCurrentAdSession(waId) {
+  await indexUser(waId);
+  await redisDel(keyCurrentAdSession(waId));
+  return true;
+}
+
 // ===================== Card Validity / Cancel =====================
 export async function setCardValidUntil(waId, isoDate) {
   await indexUser(waId);
@@ -766,6 +788,7 @@ export async function resetUserToTrial(waId) {
     clearPrevStatus(waId),
     clearBizProfile(waId),
     clearPendingBizProfile(waId),
+    clearCurrentAdSession(waId),
     setCardValidUntil(waId, ""),
     setCardCanceledAt(waId, ""),
   ]);
@@ -803,6 +826,7 @@ export async function resetUserAsNew(waId) {
     keyPrevStatus(id),
     keyBizProfile(id),
     keyPendingBizProfile(id),
+    keyCurrentAdSession(id),
   ];
 
   // best-effort: apaga todas as chaves conhecidas
@@ -837,6 +861,7 @@ export async function getUserSnapshot(waId) {
     billingAddress,
     bizProfile,
     pendingBizProfile,
+    currentAdSession,
     asaasCustomerId,
     asaasSubscriptionId,
     cardValidUntil,
@@ -855,6 +880,7 @@ export async function getUserSnapshot(waId) {
     getBillingAddress(waId),
     getBizProfile(waId),
     getPendingBizProfile(waId),
+    getCurrentAdSession(waId),
     getAsaasCustomerId(waId),
     getAsaasSubscriptionId(waId),
     getCardValidUntil(waId),
@@ -876,6 +902,7 @@ export async function getUserSnapshot(waId) {
     billingAddress: billingAddress || "",
     bizProfile: bizProfile || null,
     pendingBizProfile: pendingBizProfile || null,
+    currentAdSession: currentAdSession || null,
     asaasCustomerId: asaasCustomerId || "",
     asaasSubscriptionId: asaasSubscriptionId || "",
     cardValidUntil: cardValidUntil || "",
