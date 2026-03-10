@@ -616,12 +616,11 @@ async function msgRefinementPrompt(waId, maxRefinements) {
   lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_QUESTION", { waId }));
   lines.push(buildRefinementReminder(maxRefinements));
   lines.push(await getCopyText("FLOW_AFTER_SAVE_PROFILE_OK_HINT", { waId }));
-  return lines.join("
-");
+  return lines.join("\n");
 }
 
 function normalizeProfileScalar(value) {
-  return String(value ?? "").replace(/\/g, "/").trim();
+  return String(value ?? "").replace(/\\/g, "/").trim();
 }
 
 function buildBizProfileContext(profile) {
@@ -653,8 +652,7 @@ function buildBizProfileContext(profile) {
   return [
     "CONTEXTO_DA_EMPRESA (dados salvos do usuário; trate como fonte de verdade quando ele pedir para incluir ou ajustar dados da empresa, sem inventar placeholders ou substituir por exemplos):",
     parts.join("\n"),
-  ].join("
-");
+  ].join("\n");
 }
 
 async function msgAfterSaveProfile(waId, saved, maxRefinements) {
