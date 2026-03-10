@@ -266,8 +266,7 @@ function formatPlanMenuLine(plan, index) {
   const name = cleanText(plan?.name || `Plano ${n}`);
   const price = normalizePriceDisplayFromCents(plan?.priceCents);
   const quotaLabel = formatPlanQuotaLabel(plan);
-  return `${badge} *${name}* — R$ ${price}
-${quotaLabel}`;
+  return `${badge} *${name}* — R$ ${price}\n${quotaLabel}`;
 }
 
 async function buildDynamicPlansMenu({ includeTrialIntro = false } = {}) {
@@ -275,25 +274,12 @@ async function buildDynamicPlansMenu({ includeTrialIntro = false } = {}) {
   const validMenu = Array.isArray(menu) ? menu.filter(Boolean) : [];
 
   if (!validMenu.length) {
-    const intro = includeTrialIntro ? "Seu teste grátis acabou 😄
-
-" : "";
+    const intro = includeTrialIntro ? "Seu teste grátis acabou 😄\n\n" : "";
     return (
-      `${intro}Para continuar, escolha um plano:
-
-` +
-      `1️⃣ *De Vez em Quando* — R$ 24,90
-20 descrições por mês
-
-` +
-      `2️⃣ *Sempre por Perto* — R$ 34,90
-60 descrições por mês
-
-` +
-      `3️⃣ *Melhor Amigo* — R$ 49,90
-200 descrições por mês
-
-` +
+      `${intro}Para continuar, escolha um plano:\n\n` +
+      `1️⃣ *De Vez em Quando* — R$ 24,90\n20 descrições por mês\n\n` +
+      `2️⃣ *Sempre por Perto* — R$ 34,90\n60 descrições por mês\n\n` +
+      `3️⃣ *Melhor Amigo* — R$ 49,90\n200 descrições por mês\n\n` +
       `Responda com *1*, *2* ou *3*.`
     );
   }
@@ -313,8 +299,7 @@ async function buildDynamicPlansMenu({ includeTrialIntro = false } = {}) {
 
   lines.push("");
   lines.push("Responda com *1*, *2* ou *3*.");
-  return lines.join("
-");
+  return lines.join("\n");
 }
 
 function reply(text) {
@@ -901,7 +886,7 @@ function hasHomeModelSignal(text) {
 
 function hasVoltageOrMeasureSignal(text) {
   const s = upper(text);
-  return /(110V|127V|220V|VOLTS?|CM|METROS?|LARGURA|ALTURA|PROFUNDIDADE|MEDIDAS?)/.test(s);
+  return /\b(110V|127V|220V|VOLTS?|CM|METROS?|LARGURA|ALTURA|PROFUNDIDADE|MEDIDAS?)\b/.test(s);
 }
 
 const CATEGORY_HINTS = Object.freeze({
@@ -1331,10 +1316,10 @@ function normalizeCompanyCtas(adText, bizProfile) {
   if (!companyName) return String(adText || "");
 
   return String(adText || "")
-    .replace(/Fale comigo/gi, "Fale conosco")
-    .replace(/Entre em contato comigo/gi, "Entre em contato conosco")
-    .replace(/Me chame/gi, "Nos chame")
-    .replace(/Agende comigo/gi, "Agende conosco");
+    .replace(/\bFale comigo\b/gi, "Fale conosco")
+    .replace(/\bEntre em contato comigo\b/gi, "Entre em contato conosco")
+    .replace(/\bMe chame\b/gi, "Nos chame")
+    .replace(/\bAgende comigo\b/gi, "Agende conosco");
 }
 
 function ensureCompanyNameBold(adText, companyName) {
