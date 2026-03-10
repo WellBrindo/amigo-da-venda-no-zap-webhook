@@ -381,9 +381,40 @@ function enforceAdFormatting(adText) {
   }
 
   // --------------------------
-  // 3) Preço em negrito (somente o preço)
+  // 3) Normalização de bullets e labels
+  // - separa bullets colados na mesma linha
+  // - garante "- *Campo:* valor" sem capturar a linha seguinte
   // --------------------------
   let text = lines.join("\n");
+
+  // separa itens de lista quando o GPT colar "- Campo: valor- Outro: valor"
+  text = text
+    .replace(/([^\n])\s*(-\s*[A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][^\n:]{1,80}:)/g, "$1\n$2")
+    .replace(/([^\n])\s*(•\s*[A-ZÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ][^\n:]{1,80}:)/g, "$1\n$2");
+
+  const bulletLabelRe = /^(\s*[-•]\s*)([^\n:*]{1,80}?)(\s*:\s*)(.*)$/;
+  text = text
+    .split("\n")
+    .map((line) => {
+      const current = String(line || "").trimRight();
+      const match = current.match(bulletLabelRe);
+      if (!match) return current;
+
+      const prefix = match[1] || "";
+      const label = stripOuterStars(match[2] || "");
+      const separator = ":";
+      const value = String(match[4] || "").trim();
+
+      if (!label) return current;
+      return value
+        ? `${prefix}${boldWrapSafe(label)}${separator} ${value}`
+        : `${prefix}${boldWrapSafe(label)}${separator}`;
+    })
+    .join("\n");
+
+  // --------------------------
+  // 4) Preço em negrito (somente o valor)
+  // --------------------------
   text = text.replace(/R\$\s*\d[\d\.\s]*([,]\d{2})?/g, (m) => {
     const cleaned = m.replace(/\s+/g, " ").trim();
     if (!cleaned) return m;
@@ -392,7 +423,7 @@ function enforceAdFormatting(adText) {
   });
 
   // --------------------------
-  // 4) Mais 2 destaques (sem exagero): bullets informativos
+  // 5) Mais 2 destaques (sem exagero): bullets informativos
   // --------------------------
   let arr = text.split("\n").map((l) => String(l || "").trimRight());
   const infoEmojiRe = /^(🇧🇷|🕒|📍|🚚|📞|🌐|💬|✅)\s+/;
@@ -418,7 +449,7 @@ function enforceAdFormatting(adText) {
   }
 
   // --------------------------
-  // 5) Ordenação: CTA de avanço ("Envie...") antes de informações (🇧🇷/🕒/📍...)
+  // 6) Ordenação: CTA de avanço ("Envie...") antes de informações (🇧🇷/🕒/📍...)
   // --------------------------
   const isInfoLine = (l) => infoEmojiRe.test(String(l || "").trim());
   const isAdvanceCTA = (l) => {
@@ -475,7 +506,7 @@ function enforceAdFormatting(adText) {
   }
 
   // --------------------------
-  // 6) Sempre pular uma linha entre os dois CTAs finais (se estiverem colados)
+  // 7) Sempre pular uma linha entre os dois CTAs finais (se estiverem colados)
   // --------------------------
   const nonEmptyIdx = [];
   for (let i = 0; i < arr.length; i++) {
