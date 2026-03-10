@@ -309,8 +309,16 @@ export async function getPlanByChoice(choice) {
   return menu.find((p) => p.code === upper) || null;
 }
 
-export async function renderPlansMenu() {
+function renderPlanLine(plan, index) {
+  const price = formatBRLFromCents(plan?.priceCents || 0);
+  const description = safeStr(plan?.description) || `${Number(plan?.monthlyQuota || 0)} descrições/mês`;
+  const emojiNumber = ["1️⃣", "2️⃣", "3️⃣"][index] || `${index + 1})`;
+  return `${emojiNumber} *${safeStr(plan?.name)}* — ${price} (${description})`;
+}
+
+export async function renderPlansMenu({ variant = "trialEnded" } = {}) {
   const menu = await getMenuPlans();
+  const isTrialEnded = String(variant || "trialEnded") === "trialEnded";
 
   // fallback (se não tiver seed por algum motivo)
   if (menu.length === 0) {
@@ -319,34 +327,59 @@ export async function renderPlansMenu() {
       ctx: "renderPlansMenu",
       key: PLANS_SET_KEY,
       reason: "MENU_EMPTY",
+      variant: isTrialEnded ? "trialEnded" : "plansOnly",
     });
 
+    if (isTrialEnded) {
+      return (
+        `Seu teste grátis acabou 😄
+
+` +
+        `Para continuar, escolha um plano:
+
+` +
+        `1️⃣ *De Vez em Quando* — R$ 24,90 (20 descrições/mês)
+` +
+        `2️⃣ *Sempre por Perto* — R$ 34,90 (60 descrições/mês)
+` +
+        `3️⃣ *Melhor Amigo* — R$ 49,90 (200 descrições/mês)
+
+` +
+        `Responda com *1*, *2* ou *3*.`
+      );
+    }
+
     return (
-      `😄 Seu trial gratuito foi concluído!\n\n` +
-      `Para continuar, escolha um plano:\n\n` +
-      `1) De Vez em Quando — R$ 24.90\n   • 20 descrições/mês\n\n` +
-      `2) Sempre por Perto — R$ 34.90\n   • 60 descrições/mês\n\n` +
-      `3) Melhor Amigo — R$ 49.90\n   • 200 descrições/mês\n\n` +
-      `Responda com 1, 2 ou 3.`
+      `Para continuar, escolha um plano:
+
+` +
+      `1️⃣ *De Vez em Quando* — R$ 24,90 (20 descrições/mês)
+` +
+      `2️⃣ *Sempre por Perto* — R$ 34,90 (60 descrições/mês)
+` +
+      `3️⃣ *Melhor Amigo* — R$ 49,90 (200 descrições/mês)
+
+` +
+      `Responda com *1*, *2* ou *3*.`
     );
   }
 
   const lines = [];
-  lines.push(`😄 Seu trial gratuito foi concluído!`);
-  lines.push(``);
+  if (isTrialEnded) {
+    lines.push(`Seu teste grátis acabou 😄`);
+    lines.push("");
+  }
   lines.push(`Para continuar, escolha um plano:`);
-  lines.push(``);
+  lines.push("");
 
   menu.forEach((p, idx) => {
-    const n = idx + 1;
-    const price = formatBRLFromCents(p.priceCents).replace("R$", "R$ ").replace(".", ",");
-    lines.push(`${n}) ${p.name} — ${price}`);
-    lines.push(`   • ${p.description || `${p.monthlyQuota} descrições/mês`}`);
-    lines.push(``);
+    lines.push(renderPlanLine(p, idx));
   });
 
-  lines.push(`Responda com 1, 2 ou 3.`);
-  return lines.join("\n");
+  lines.push("");
+  lines.push(`Responda com *1*, *2* ou *3*.`);
+  return lines.join("
+");
 }
 
 // -------------------------
