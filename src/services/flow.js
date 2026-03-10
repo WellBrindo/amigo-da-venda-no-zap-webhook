@@ -73,6 +73,9 @@ import {
   setCardValidUntil,
   getCardValidUntil,
   setCardCanceledAt,
+  getCurrentAdSession,
+  setCurrentAdSession,
+  clearCurrentAdSession,
 } from "./state.js";
 
 import { getMenuPlans, getPlan, getPlanByChoice, renderPlansMenu } from "./Plans.js";
@@ -506,142 +509,134 @@ const CATEGORY_SCHEMAS = Object.freeze({
   VEHICLE: {
     key: "VEHICLE",
     label: "veículo",
-    minSignals: 1,
-    askWhenMissingAtLeast: 2,
+    minAskScore: 75,
     detect(text) {
       const s = upper(text);
-      const brands = [
-        "FORD", "CHEVROLET", "GM", "VOLKSWAGEN", "VW", "FIAT", "HONDA", "TOYOTA", "HYUNDAI",
-        "RENAULT", "JEEP", "NISSAN", "PEUGEOT", "CITROEN", "MITSUBISHI", "KIA", "BMW", "AUDI",
-        "MERCEDES", "VOLVO", "BYD", "CHERY", "CAOA", "RAM"
-      ];
-      const generic = /\b(CARRO|VEICULO|VEÍCULO|MOTO|MOTOCICLETA|CAMINHONETE|SUV|SEDAN|HATCH|PICK[- ]?UP)\b/;
-      return brands.some((b) => s.includes(b)) || generic.test(s);
+      return /\b(CARRO|VE[IÍ]CULO|VEICULO|MOTO|MOTOCICLETA|CAMINHONETE|SUV|SEDAN|HATCH|PICK[- ]?UP|ONIX|HB20|PALIO|GOL|UNO|CORSA|CELTA|CRUZE|CIVIC|COROLLA|JETTA|FOX|SAVEIRO|STRADA|TORO|RENEGADE|COMPASS|HR-V|T-CROSS)\b/.test(s);
     },
     fields: [
-      { key: "price", label: "Preço pedido", detect: hasPriceSignal },
-      { key: "year", label: "Ano/modelo", detect: hasVehicleYearSignal },
-      { key: "km", label: "Quilometragem", detect: hasKmSignal },
-      { key: "version", label: "Versão / motor", detect: hasVehicleVersionSignal },
-      { key: "transmissionFuel", label: "Câmbio e combustível", detect: hasTransmissionOrFuelSignal },
-      { key: "condition", label: "Estado do veículo / documentos", detect: hasConditionSignal },
-      { key: "highlights", label: "Destaques ou opcionais", detect: hasHighlightsSignal },
+      { key: "price", label: "Preço", weight: 20, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "year", label: "Ano / modelo", weight: 10, importance: "desired", allowProfileSupport: false, detect: hasVehicleYearSignal },
+      { key: "km", label: "Quilometragem", weight: 16, importance: "critical", allowProfileSupport: false, detect: hasKmSignal },
+      { key: "transmission", label: "Câmbio", weight: 12, importance: "critical", allowProfileSupport: false, detect: hasTransmissionSignal },
+      { key: "fuel", label: "Combustível", weight: 10, importance: "critical", allowProfileSupport: false, detect: hasFuelSignal },
+      { key: "version", label: "Versão / motor", weight: 6, importance: "desired", allowProfileSupport: false, detect: hasVehicleVersionSignal },
+      { key: "conditionDocs", label: "Estado do veículo / documentação", weight: 16, importance: "critical", allowProfileSupport: false, detect: hasVehicleConditionOrDocsSignal },
+      { key: "location", label: "Cidade / retirada / entrega", weight: 5, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "highlights", label: "Opcionais ou destaque principal", weight: 5, importance: "desired", allowProfileSupport: false, detect: hasHighlightsSignal },
     ],
   },
   PROPERTY: {
     key: "PROPERTY",
     label: "imóvel",
-    minSignals: 1,
-    askWhenMissingAtLeast: 2,
+    minAskScore: 70,
     detect(text) {
       const s = upper(text);
-      return /\b(APARTAMENTO|APTO|CASA|SOBRADO|KITNET|TERRENO|LOTE|IMÓVEL|IMOVEL|SALA COMERCIAL|GALPÃO|GALPAO)\b/.test(s);
+      return /\b(APARTAMENTO|APTO|CASA|SOBRADO|KITNET|TERRENO|LOTE|IM[ÓO]VEL|SALA COMERCIAL|GALP[ÃA]O|CH[ÁA]CARA|FAZENDA|COBERTURA|ALUGO|ALUGUEL)\b/.test(s);
     },
     fields: [
-      { key: "price", label: "Preço / aluguel / condomínio", detect: hasPriceSignal },
-      { key: "location", label: "Bairro ou região", detect: hasLocationSignal },
-      { key: "size", label: "Metragem / quartos / vagas", detect: hasPropertySizeSignal },
-      { key: "condition", label: "Estado / diferenciais", detect: hasConditionSignal },
-      { key: "availability", label: "Se está pronto para mudar / visitar", detect: hasAvailabilitySignal },
+      { key: "price", label: "Preço / aluguel / condomínio", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "location", label: "Bairro / região / cidade", weight: 20, importance: "critical", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "size", label: "Metragem / quartos / vagas", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasPropertySizeSignal },
+      { key: "condition", label: "Estado / diferenciais", weight: 16, importance: "desired", allowProfileSupport: false, detect: hasPropertyConditionSignal },
+      { key: "availability", label: "Se está pronto para mudar / visitar", weight: 8, importance: "desired", allowProfileSupport: false, detect: hasAvailabilitySignal },
+      { key: "highlights", label: "Destaque principal do imóvel", weight: 8, importance: "desired", allowProfileSupport: false, detect: hasPropertyHighlightSignal },
     ],
   },
   ELECTRONICS: {
     key: "ELECTRONICS",
     label: "produto eletrônico",
-    minSignals: 1,
-    askWhenMissingAtLeast: 2,
+    minAskScore: 68,
     detect(text) {
       const s = upper(text);
-      return /\b(IPHONE|SAMSUNG|MOTOROLA|XIAOMI|CELULAR|SMARTPHONE|NOTEBOOK|MACBOOK|COMPUTADOR|TV|PLAYSTATION|PS4|PS5|XBOX|NINTENDO|IPAD|TABLET)\b/.test(s);
+      return /\b(IPHONE|SAMSUNG|MOTOROLA|XIAOMI|CELULAR|SMARTPHONE|NOTEBOOK|MACBOOK|COMPUTADOR|TV|PLAYSTATION|PS4|PS5|XBOX|NINTENDO|IPAD|TABLET|AIRPODS|SMARTWATCH|APPLE WATCH)\b/.test(s);
     },
     fields: [
-      { key: "price", label: "Preço", detect: hasPriceSignal },
-      { key: "exactModel", label: "Modelo exato / armazenamento / configuração", detect: hasElectronicsModelSignal },
-      { key: "condition", label: "Estado de conservação", detect: hasConditionSignal },
-      { key: "accessories", label: "Acessórios / caixa / nota / garantia", detect: hasAccessorySignal },
-      { key: "batteryOrUsage", label: "Bateria / tempo de uso / funcionamento", detect: hasBatteryOrUsageSignal },
+      { key: "price", label: "Preço", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "exactModel", label: "Modelo exato / armazenamento / configuração", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasElectronicsModelSignal },
+      { key: "condition", label: "Estado de conservação", weight: 20, importance: "critical", allowProfileSupport: false, detect: hasConditionSignal },
+      { key: "usage", label: "Tempo de uso / bateria / funcionamento", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasBatteryOrUsageSignal },
+      { key: "accessories", label: "Acessórios / caixa / nota / garantia", weight: 10, importance: "desired", allowProfileSupport: false, detect: hasAccessorySignal },
+      { key: "location", label: "Entrega / retirada / cidade", weight: 6, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
     ],
   },
   SERVICE: {
     key: "SERVICE",
     label: "serviço",
-    minSignals: 1,
-    askWhenMissingAtLeast: 2,
+    minAskScore: 68,
     detect(text) {
       const s = upper(text);
-      return /\b(SERVIÇO|SERVICO|FAÇO|FACO|ATENDO|ATENDEMOS|MANICURE|DIARISTA|PEDREIRO|PINTOR|ELETRICISTA|ENCANADOR|MECÂNICO|MECANICO|FRETE|MASSAGEM|DESIGNER|AULA|CONSULTORIA)\b/.test(s);
+      return /\b(SERVI[CÇ]O|FA[ÇC]O|ATENDO|ATENDEMOS|MANICURE|DIARISTA|PEDREIRO|PINTOR|ELETRICISTA|ENCANADOR|MEC[ÂA]NICO|FRETE|MASSAGEM|DESIGNER|AULA|CONSULTORIA|INSTALA[CÇ][ÃA]O|MANUTEN[CÇ][ÃA]O)\b/.test(s);
     },
     fields: [
-      { key: "what", label: "O que você faz exatamente", detect: hasServiceDefinitionSignal },
-      { key: "price", label: "Preço ou forma de orçamento", detect: hasPriceSignal },
-      { key: "location", label: "Região de atendimento", detect: hasLocationSignal },
-      { key: "hours", label: "Horário / disponibilidade", detect: hasHoursSignal },
-      { key: "differential", label: "Seu principal diferencial", detect: hasDifferentialSignal },
+      { key: "what", label: "O que você faz exatamente", weight: 30, importance: "critical", allowProfileSupport: false, detect: hasServiceDefinitionSignal },
+      { key: "price", label: "Preço ou forma de orçamento", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "location", label: "Região de atendimento", weight: 18, importance: "critical", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "hours", label: "Horário / disponibilidade", weight: 12, importance: "desired", allowProfileSupport: true, detect: hasHoursSignal },
+      { key: "differential", label: "Seu principal diferencial", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
     ],
   },
   FOOD: {
     key: "FOOD",
     label: "produto de alimentação",
-    minSignals: 1,
-    askWhenMissingAtLeast: 2,
+    minAskScore: 68,
     detect(text) {
       const s = upper(text);
-      return /\b(BOLO|DOCINHO|DOCINHOS|DOCE|SALGADO|SALGADINHO|MARMITA|LANCHE|LANCHES|PIZZA|AÇAÍ|ACAI|HAMBÚRGUER|HAMBURGUER|BRIGADEIRO|CONFEITARIA|SOBREMESA)\b/.test(s);
+      return /\b(BOLO|DOCINHO|DOCINHOS|DOCE|SALGADO|SALGADINHO|MARMITA|LANCHE|LANCHES|PIZZA|A[ÇC][AÁ]I|HAMB[ÚU]RGUER|BRIGADEIRO|CONFEITARIA|SOBREMESA|COMIDA|POR[CÇ][ÃA]O|PRATO)\b/.test(s);
     },
     fields: [
-      { key: "items", label: "Sabores / produtos principais", detect: hasFoodItemsSignal },
-      { key: "price", label: "Preço ou faixa de valores", detect: hasPriceSignal },
-      { key: "location", label: "Entrega / retirada / região", detect: hasLocationSignal },
-      { key: "hours", label: "Horário de atendimento", detect: hasHoursSignal },
-      { key: "differential", label: "Seu destaque (caseiro, por encomenda, etc.)", detect: hasDifferentialSignal },
+      { key: "items", label: "Sabores / produtos principais", weight: 24, importance: "critical", allowProfileSupport: true, detect: hasFoodItemsSignal },
+      { key: "price", label: "Preço ou faixa de valores", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "location", label: "Entrega / retirada / região", weight: 20, importance: "critical", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "hours", label: "Horário de atendimento", weight: 10, importance: "desired", allowProfileSupport: true, detect: hasHoursSignal },
+      { key: "availability", label: "Disponibilidade / encomenda / pronta entrega", weight: 10, importance: "desired", allowProfileSupport: false, detect: hasFoodAvailabilitySignal },
+      { key: "differential", label: "Seu destaque principal", weight: 12, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
     ],
   },
   FASHION: {
     key: "FASHION",
     label: "roupa ou acessório",
-    minSignals: 1,
-    askWhenMissingAtLeast: 2,
+    minAskScore: 65,
     detect(text) {
       const s = upper(text);
-      return /\b(VESTIDO|CAMISETA|CALÇA|TENIS|TÊNIS|SAPATO|BOLSA|JAQUETA|ROUPA|LOOK|ACESSÓRIO|ACESSORIO|RELÓGIO|RELOGIO)\b/.test(s);
+      return /\b(VESTIDO|CAMISETA|CAL[CÇ]A|TENIS|T[ÊE]NIS|SAPATO|BOLSA|JAQUETA|ROUPA|LOOK|ACESS[ÓO]RIO|REL[ÓO]GIO|BON[ÉE]|SHORT|SAIA)\b/.test(s);
     },
     fields: [
-      { key: "price", label: "Preço", detect: hasPriceSignal },
-      { key: "size", label: "Tamanho / numeração", detect: hasFashionSizeSignal },
-      { key: "condition", label: "Estado / cor / marca", detect: hasConditionSignal },
-      { key: "location", label: "Entrega / retirada / cidade", detect: hasLocationSignal },
+      { key: "price", label: "Preço", weight: 26, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "size", label: "Tamanho / numeração", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasFashionSizeSignal },
+      { key: "condition", label: "Estado / cor / marca", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasFashionConditionSignal },
+      { key: "location", label: "Entrega / retirada / cidade", weight: 14, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "highlight", label: "Destaque principal da peça", weight: 12, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
     ],
   },
   HOME: {
     key: "HOME",
     label: "móvel ou eletrodoméstico",
-    minSignals: 1,
-    askWhenMissingAtLeast: 2,
+    minAskScore: 68,
     detect(text) {
       const s = upper(text);
-      return /\b(GELADEIRA|FREEZER|FOGÃO|FOGAO|MICRO-ONDAS|MICROONDAS|MÁQUINA|MAQUINA|LAVA E SECA|SOFÁ|SOFA|ARMÁRIO|ARMARIO|MESA|CADEIRA|GUARDA-ROUPA|COLCHÃO|COLCHAO)\b/.test(s);
+      return /\b(GELADEIRA|FREEZER|FOG[ÃA]O|MICRO-?ONDAS|M[ÁA]QUINA|LAVA E SECA|SOF[ÁA]|ARM[ÁA]RIO|MESA|CADEIRA|GUARDA-ROUPA|COLCH[ÃA]O|COOKTOP|PAINEL|RAQUE|LAVADORA|SECADORA)\b/.test(s);
     },
     fields: [
-      { key: "price", label: "Preço", detect: hasPriceSignal },
-      { key: "model", label: "Marca / modelo / tamanho / capacidade", detect: hasHomeModelSignal },
-      { key: "condition", label: "Estado de conservação", detect: hasConditionSignal },
-      { key: "voltageOrMeasure", label: "Voltagem / medidas", detect: hasVoltageOrMeasureSignal },
-      { key: "location", label: "Entrega / retirada / cidade", detect: hasLocationSignal },
+      { key: "price", label: "Preço", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "model", label: "Marca / modelo / tamanho / capacidade", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasHomeModelSignal },
+      { key: "condition", label: "Estado de conservação", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasConditionSignal },
+      { key: "voltageOrMeasure", label: "Voltagem / medidas", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasVoltageOrMeasureSignal },
+      { key: "location", label: "Entrega / retirada / cidade", weight: 14, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
     ],
   },
   GENERIC: {
     key: "GENERIC",
     label: "produto",
-    minSignals: 0,
-    askWhenMissingAtLeast: 2,
+    minAskScore: 60,
     detect() {
       return true;
     },
     fields: [
-      { key: "price", label: "Preço", detect: hasPriceSignal },
-      { key: "condition", label: "Estado / tempo de uso", detect: hasConditionSignal },
-      { key: "location", label: "Cidade / entrega / retirada", detect: hasLocationSignal },
-      { key: "differential", label: "Principal destaque do item", detect: hasDifferentialSignal },
+      { key: "price", label: "Preço", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "condition", label: "Estado / tempo de uso", weight: 26, importance: "critical", allowProfileSupport: false, detect: hasConditionSignal },
+      { key: "location", label: "Cidade / entrega / retirada", weight: 20, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "differential", label: "Principal destaque do item", weight: 26, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
     ],
   },
 });
@@ -668,14 +663,24 @@ function hasVehicleVersionSignal(text) {
   return /\b(LTZ|LT|EX|EXL|XLT|TITANIUM|TREND|SE|SEL|GL|GLS|GLX|SPORT|TURBO|1\.0|1\.6|2\.0|V6|V8)\b/.test(s);
 }
 
-function hasTransmissionOrFuelSignal(text) {
+function hasTransmissionSignal(text) {
   const s = upper(text);
-  return /\b(MANUAL|AUTOM[AÁ]TICO|AUTOMATICO|CVT|FLEX|GASOLINA|DIESEL|H[ÍI]BRIDO|HIBRIDO|EL[ÉE]TRICO|ELETRICO)\b/.test(s);
+  return /\b(MANUAL|AUTOM[AÁ]TICO|AUTOMATICO|CVT)\b/.test(s);
+}
+
+function hasFuelSignal(text) {
+  const s = upper(text);
+  return /\b(FLEX|GASOLINA|DIESEL|ETANOL|H[ÍI]BRIDO|HIBRIDO|EL[ÉE]TRICO|ELETRICO|GNV)\b/.test(s);
 }
 
 function hasConditionSignal(text) {
   const s = upper(text);
-  return /\b(CONSERVADO|CONSERVADA|NOVO|NOVA|SEMINOVO|SEMINOVA|REVISADO|REVISADA|PERFEITO ESTADO|ESTADO DE NOVO|USADO|USADA|FUNCIONANDO|FUNCIONA|DOCUMENTA[CÇ][AÃ]O|DOCS?)\b/.test(s);
+  return /\b(CONSERVADO|CONSERVADA|NOVO|NOVA|SEMINOVO|SEMINOVA|REVISADO|REVISADA|PERFEITO ESTADO|ESTADO DE NOVO|USADO|USADA|FUNCIONANDO|FUNCIONA|BOAS? CONDI[CÇ][ÕO]ES|BOM ESTADO|PINTURA|POUCO USO|CARRO DE GARAGEM|GARAGEM|IMPEC[ÁA]VEL|ZERADO)\b/.test(s);
+}
+
+function hasVehicleConditionOrDocsSignal(text) {
+  const s = upper(text);
+  return hasConditionSignal(s) || /\b(DOCUMENTA[CÇ][AÃ]O|DOCS?|DOC OK|DOCUMENTA[CÇ][AÃ]O OK|SEM D[ÉE]BITOS|LICENCIADO|IPVA PAGO)\b/.test(s);
 }
 
 function hasHighlightsSignal(text) {
@@ -698,6 +703,16 @@ function hasAvailabilitySignal(text) {
   return /\b(PRONTO|DISPON[ÍI]VEL|VISITA|VISITAR|MUDAR|IMEDIATO|IMEDIATA)\b/.test(s);
 }
 
+function hasPropertyConditionSignal(text) {
+  const s = upper(text);
+  return hasConditionSignal(s) || /\b(REFORMADO|MOBILIADO|PLANEJADO|VARANDA|SU[ÍI]TE|CONDOM[ÍI]NIO|LAZER)\b/.test(s);
+}
+
+function hasPropertyHighlightSignal(text) {
+  const s = upper(text);
+  return /\b(VISTA|VARANDA|SU[ÍI]TE|CONDOM[ÍI]NIO|LAZER|CHURRASQUEIRA|PISCINA|PORTARIA|PR[ÓO]XIMO|LOCALIZA[CÇ][AÃ]O)\b/.test(s);
+}
+
 function hasElectronicsModelSignal(text) {
   const s = upper(text);
   return /\b(64GB|128GB|256GB|512GB|I5|I7|I9|M1|M2|M3|POLEGADAS?|INCH|\"|GB|SSD|RAM)\b/.test(s);
@@ -715,7 +730,12 @@ function hasBatteryOrUsageSignal(text) {
 
 function hasServiceDefinitionSignal(text) {
   const s = upper(text);
-  return countWords(s) >= 4;
+  return countWords(s) >= 3;
+}
+
+function hasPriceOrBudgetSignal(text) {
+  const s = upper(text);
+  return hasPriceSignal(s) || /\b(OR[CÇ]AMENTO|A COMBINAR|CONSULTAR|SOB CONSULTA)\b/.test(s);
 }
 
 function hasHoursSignal(text) {
@@ -730,12 +750,22 @@ function hasDifferentialSignal(text) {
 
 function hasFoodItemsSignal(text) {
   const s = upper(text);
-  return /\b(SABOR|SABORES|BRIGADEIRO|BOLO|POTE|PIZZA|HAMB[ÚU]RGUER|COMBO|KIT|ENCOMENDA)\b/.test(s);
+  return /\b(SABOR|SABORES|BRIGADEIRO|BOLO|POTE|PIZZA|HAMB[ÚU]RGUER|COMBO|KIT|ENCOMENDA|MARMITA|LANCHE|POR[CÇ][ÃA]O)\b/.test(s);
+}
+
+function hasFoodAvailabilitySignal(text) {
+  const s = upper(text);
+  return /\b(ENCOMENDA|PRONTA ENTREGA|DISPON[ÍI]VEL HOJE|HOJE|SOB ENCOMENDA|RETIRADA HOJE)\b/.test(s);
 }
 
 function hasFashionSizeSignal(text) {
   const s = upper(text);
   return /\b(PP|P|M|G|GG|XG|36|37|38|39|40|41|42|43|44|NUMERA[CÇ][AÃ]O|TAMANHO)\b/.test(s);
+}
+
+function hasFashionConditionSignal(text) {
+  const s = upper(text);
+  return hasConditionSignal(s) || /\b(COR|MARCA|SEM USO|USADO UMA VEZ|ORIGINAL)\b/.test(s);
 }
 
 function hasHomeModelSignal(text) {
@@ -781,43 +811,94 @@ function hasProfileSupportForField(fieldKey, bizProfile) {
   return false;
 }
 
-function getMissingCategoryFields(schema, text, bizProfile) {
-  return schema.fields.filter((field) => {
-    if (field.detect(text)) return false;
-    if (hasProfileSupportForField(field.key, bizProfile)) return false;
-    return true;
+function getFieldPresence(field, text, bizProfile) {
+  const detectedInText = !!field?.detect?.(text || "");
+  const detectedFromProfile = !!field?.allowProfileSupport && hasProfileSupportForField(field.key, bizProfile);
+  return {
+    inText: detectedInText,
+    fromProfile: detectedFromProfile,
+    present: detectedInText || detectedFromProfile,
+  };
+}
+
+function computeCategoryCompleteness({ schema, text, bizProfile }) {
+  const fields = ensureArray(schema?.fields);
+  const details = fields.map((field) => {
+    const presence = getFieldPresence(field, text, bizProfile);
+    const weight = Number(field.weight || 0);
+    return {
+      key: field.key,
+      label: field.label,
+      importance: field.importance || "desired",
+      weight,
+      allowProfileSupport: !!field.allowProfileSupport,
+      ...presence,
+    };
   });
+
+  const totalWeight = details.reduce((sum, item) => sum + item.weight, 0) || 1;
+  const presentWeight = details.reduce((sum, item) => sum + (item.present ? item.weight : 0), 0);
+  const score = Math.round((presentWeight / totalWeight) * 100);
+
+  const missingCritical = details.filter((item) => item.importance === "critical" && !item.present);
+  const missingDesired = details.filter((item) => item.importance !== "critical" && !item.present);
+
+  return {
+    schema,
+    score,
+    totalWeight,
+    presentWeight,
+    details,
+    missingCritical,
+    missingDesired,
+    missingAll: details.filter((item) => !item.present),
+  };
 }
 
-function shouldAskCategoryQuestions(schema, text, missingFields) {
+function pickFieldsToAsk({ completeness, maxFields = 5 }) {
+  const ordered = [...completeness.missingCritical, ...completeness.missingDesired];
+  return ordered.slice(0, maxFields);
+}
+
+function shouldAskCategoryQuestions({ schema, text, completeness, attemptCount = 0 }) {
+  if (!schema || !completeness) return false;
+  if (attemptCount >= 1) return false;
+
   const words = countWords(text);
-  if (!missingFields.length) return false;
+  const askable = pickFieldsToAsk({ completeness });
+  if (!askable.length) return false;
+
+  if (completeness.missingCritical.length > 0) return true;
+
+  const threshold = Number(schema.minAskScore || 65);
+  if (completeness.score < threshold) return true;
+
   if (schema.key === "GENERIC") {
-    return words <= 5 && missingFields.length >= 2;
+    return words <= 5 && completeness.missingAll.length >= 2;
   }
-  if (words <= 3) return true;
-  return missingFields.length >= Number(schema.askWhenMissingAtLeast || 2);
+
+  return words <= 3 && completeness.missingAll.length >= 1;
 }
 
-function buildCategoryQuestionPrompt({ schema, missingFields, bizProfile }) {
-  const missing = missingFields.slice(0, 5);
+function buildCategoryQuestionPrompt({ schema, fieldsToAsk, bizProfile }) {
   const hints = [];
 
   if (hasProfileSupportForField("location", bizProfile)) {
-    hints.push("região já aproveito dos seus dados salvos");
+    hints.push("região eu já posso aproveitar dos seus dados salvos");
   }
   if (hasProfileSupportForField("hours", bizProfile)) {
-    hints.push("horário já aproveito dos seus dados salvos");
+    hints.push("horário eu já posso aproveitar dos seus dados salvos");
   }
 
   const lines = [
-    `Perfeito! Para montar um anúncio mais forte de ${schema.label}, me responde em *uma única mensagem* só o que faltar:`,
+    `Perfeito! Para o anúncio de ${schema.label} ficar mais forte, me manda em *uma única mensagem* só o que você quiser informar destes pontos:`,
     "",
-    ...missing.map((field) => `• ${field.label}`),
+    ...fieldsToAsk.map((field) => `* ${field.label}`),
+    "",
+    "Pode mandar apenas o que você tiver.",
   ];
 
   if (hints.length) {
-    lines.push("");
     lines.push(`✅ ${hints.join(" e ")}.`);
   }
 
@@ -826,34 +907,40 @@ function buildCategoryQuestionPrompt({ schema, missingFields, bizProfile }) {
   return lines.join("\n");
 }
 
-function planCategoryQuestion(text, bizProfile) {
+function buildCategoryIntakePlan({ text, bizProfile, attemptCount = 0 }) {
   const schema = detectCategorySchema(text);
-  const missingFields = getMissingCategoryFields(schema, text, bizProfile);
-  if (!shouldAskCategoryQuestions(schema, text, missingFields)) return null;
+  const completeness = computeCategoryCompleteness({ schema, text, bizProfile });
+  const fieldsToAsk = pickFieldsToAsk({ completeness });
+
+  if (!shouldAskCategoryQuestions({ schema, text, completeness, attemptCount })) {
+    return {
+      shouldAsk: false,
+      schema,
+      completeness,
+      fieldsToAsk: [],
+      prompt: "",
+    };
+  }
 
   return {
-    categoryKey: schema.key,
-    categoryLabel: schema.label,
-    missingFields: missingFields.map((field) => field.key),
-    prompt: buildCategoryQuestionPrompt({ schema, missingFields, bizProfile }),
+    shouldAsk: true,
+    schema,
+    completeness,
+    fieldsToAsk,
+    prompt: buildCategoryQuestionPrompt({ schema, fieldsToAsk, bizProfile }),
   };
 }
 
-async function setLeadIntakePayload(waId, payload) {
-  await setPendingBizProfile(waId, { __leadIntake: payload });
+async function setAdSessionPayload(waId, payload) {
+  await setCurrentAdSession(waId, payload);
 }
 
-async function getLeadIntakePayload(waId) {
-  const pending = await getPendingBizProfile(waId);
-  if (!pending || typeof pending !== "object") return null;
-  return pending.__leadIntake && typeof pending.__leadIntake === "object" ? pending.__leadIntake : null;
+async function getAdSessionPayload(waId) {
+  return await getCurrentAdSession(waId);
 }
 
-async function clearLeadIntakePayload(waId) {
-  const pending = await getPendingBizProfile(waId);
-  if (!pending || typeof pending !== "object") return;
-  if (!pending.__leadIntake) return;
-  await clearPendingBizProfile(waId);
+async function clearAdSessionPayload(waId) {
+  await clearCurrentAdSession(waId);
 }
 
 function buildLeadIntakeCombinedText(baseText, complementText) {
@@ -1605,10 +1692,10 @@ export async function handleInboundText({ waId, text }) {
 
   // 0.45) Complemento de informações antes de gerar anúncio
   if (status === ST.WAIT_CATEGORY_DETAILS) {
-    const intake = await getLeadIntakePayload(id);
+    const intake = await getAdSessionPayload(id);
 
     if (!intake?.baseText) {
-      await clearLeadIntakePayload(id);
+      await clearAdSessionPayload(id);
       await setUserStatus(id, ST.WAIT_PRODUCT);
       return reply(await msgAskProduct(id));
     }
@@ -1616,7 +1703,7 @@ export async function handleInboundText({ waId, text }) {
     const baseStatus = intake.prevStatus === ST.ACTIVE ? ST.ACTIVE : ST.TRIAL;
     const isTrialFlow = baseStatus !== ST.ACTIVE;
 
-    await clearLeadIntakePayload(id);
+    await clearAdSessionPayload(id);
     await setUserStatus(id, baseStatus);
 
     if (wantsSkipCommand(inbound) || wantsOkCommand(inbound)) {
@@ -1625,6 +1712,7 @@ export async function handleInboundText({ waId, text }) {
         inboundText: intake.baseText,
         isTrial: isTrialFlow,
         currentStatus: baseStatus,
+        skipCategoryIntake: true,
       });
     }
 
@@ -1634,6 +1722,7 @@ export async function handleInboundText({ waId, text }) {
       inboundText: combinedText,
       isTrial: isTrialFlow,
       currentStatus: baseStatus,
+      skipCategoryIntake: true,
     });
   }
 
@@ -1989,7 +2078,7 @@ async function handlePostAdDecisionCommand({ waId, inboundText }) {
 }
 
 // -------------------- Generate Ad --------------------
-async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, currentStatus }) {
+async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, currentStatus, skipCategoryIntake = false }) {
   const id = waId;
   const userText = inboundText;
 
@@ -2000,18 +2089,21 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   const isRefinement = !!lastAd;
   const bizProfile = await getBizProfile(id);
 
-  if (!isRefinement) {
-    const categoryQuestion = planCategoryQuestion(userText, bizProfile);
-    if (categoryQuestion) {
-      await setLeadIntakePayload(id, {
+  if (!isRefinement && !skipCategoryIntake) {
+    const intakePlan = buildCategoryIntakePlan({ text: userText, bizProfile, attemptCount: 0 });
+    if (intakePlan.shouldAsk) {
+      await setAdSessionPayload(id, {
         kind: "CATEGORY_DETAILS",
         baseText: userText,
         prevStatus: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
-        categoryKey: categoryQuestion.categoryKey,
-        missingFields: categoryQuestion.missingFields,
+        categoryKey: intakePlan.schema.key,
+        categoryLabel: intakePlan.schema.label,
+        askedFieldKeys: intakePlan.fieldsToAsk.map((field) => field.key),
+        scoreBeforeAsk: intakePlan.completeness.score,
+        attemptCount: 1,
       });
       await setUserStatus(id, ST.WAIT_CATEGORY_DETAILS);
-      return reply(categoryQuestion.prompt);
+      return reply(intakePlan.prompt);
     }
   }
 
