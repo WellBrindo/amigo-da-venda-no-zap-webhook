@@ -1311,9 +1311,10 @@ function normalizeGenericCtas(adText) {
 
 function removeGeneratedPlaceholders(adText) {
   const placeholderPatterns = [
-    /^\s*\[(Seu|Sua|Seus|Suas)\s+[^\]]+\]\s*$/gim,
-    /^\s*\[Contato\]\s*$/gim,
-    /\[(Seu|Sua|Seus|Suas)\s+[^\]]+\]/gi,
+    /^\s*\*?\s*\[(Seu|Sua|Seus|Suas)\s+[^\]]+\]\s*\*?\s*$/gim,
+    /^\s*\*?\s*\[Contato\]\s*\*?\s*$/gim,
+    /\*?\s*\[(Seu|Sua|Seus|Suas)\s+[^\]]+\]\s*\*?/gi,
+    /\*?\s*\[Contato\]\s*\*?/gi,
   ];
 
   let text = String(adText || "");
@@ -1323,8 +1324,10 @@ function removeGeneratedPlaceholders(adText) {
 
   const lines = text
     .split("\n")
-    .map((line) => String(line || "").trimRight())
-    .filter((line) => !/^\s*\[(Seu|Sua|Seus|Suas)\s+[^\]]+\]\s*$/i.test(line));
+    .map((line) => String(line || "").trim())
+    .filter((line) => !/^\*?\s*\[(Seu|Sua|Seus|Suas)\s+[^\]]+\]\s*\*?$/i.test(line))
+    .filter((line) => !/^\*?\s*\[Contato\]\s*\*?$/i.test(line))
+    .filter((line) => !/^\*+\s*$/i.test(line));
 
   while (lines.length && !lines[0].trim()) lines.shift();
   while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
