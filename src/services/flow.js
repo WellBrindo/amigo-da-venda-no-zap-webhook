@@ -621,7 +621,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
     minAskScore: 68,
     detect(text) {
       const s = upper(text);
-      return /\b(SERVI[CÇ]O|FA[ÇC]O|ATENDO|ATENDEMOS|MANICURE|DIARISTA|PEDREIRO|PINTOR|ELETRICISTA|ENCANADOR|MEC[ÂA]NICO|FRETE|MASSAGEM|DESIGNER|AULA|CONSULTORIA|INSTALA[CÇ][ÃA]O|MANUTEN[CÇ][ÃA]O)\b/.test(s);
+      return /\b(SERVI[CÇ]O|FA[ÇC]O|ATENDO|ATENDEMOS|MANICURE|DIARISTA|PEDREIRO|PINTOR|ELETRICISTA|ENCANADOR|MEC[ÂA]NICO|FRETE|MASSAGEM|DESIGNER|AULA|CONSULTORIA|INSTALA[CÇ][ÃA]O|MANUTEN[CÇ][ÃA]O|ADVOGADO|ADVOGADA|ADVOCACIA|JUR[IÍ]DIC[OA]|JURIDIC[OA]|CONDOMINIAL)\b/.test(s);
     },
     fields: [
       { key: "what", label: "O que você faz exatamente", weight: 30, importance: "critical", allowProfileSupport: false, detect: hasServiceDefinitionSignal },
@@ -833,12 +833,83 @@ function hasVoltageOrMeasureSignal(text) {
   return /\b(110V|127V|220V|VOLTS?|CM|METROS?|LARGURA|ALTURA|PROFUNDIDADE|MEDIDAS?)\b/.test(s);
 }
 
-function detectCategorySchema(text) {
-  const values = Object.values(CATEGORY_SCHEMAS).filter((schema) => schema.key !== "GENERIC");
-  for (const schema of values) {
-    if (schema.detect(text)) return schema;
+const CATEGORY_HINTS = Object.freeze({
+  VEHICLE: [
+    "CARRO", "VEICULO", "VEÍCULO", "AUTO", "AUTOMOVEL", "AUTOMÓVEL", "MOTO", "MOTOCICLETA", "CAMINHONETE", "SUV", "SEDAN", "HATCH",
+    "PICKUP", "PICK-UP", "PICK UP", "ONIX", "HB20", "PALIO", "GOL", "UNO", "CORSA", "CELTA", "CRUZE", "CIVIC", "COROLLA", "JETTA",
+    "FOX", "SAVEIRO", "STRADA", "TORO", "RENEGADE", "COMPASS", "HR-V", "HRV", "T-CROSS", "TCROSS", "FASTBACK", "PULSE", "NIVUS",
+    "ARGO", "MOBI", "TRACKER", "CRETA", "KWID", "S10", "HILUX", "SW4", "FIAT", "CHEVROLET", "VW", "VOLKSWAGEN", "HYUNDAI", "TOYOTA", "HONDA"
+  ],
+  PROPERTY: [
+    "APARTAMENTO", "APTO", "CASA", "SOBRADO", "KITNET", "TERRENO", "LOTE", "IMOVEL", "IMÓVEL", "SALA COMERCIAL", "GALPAO", "GALPÃO",
+    "CHACARA", "CHÁCARA", "FAZENDA", "COBERTURA", "ALUGO", "ALUGUEL", "CONDOMINIO", "CONDOMÍNIO"
+  ],
+  ELECTRONICS: [
+    "IPHONE", "SAMSUNG", "MOTOROLA", "XIAOMI", "CELULAR", "SMARTPHONE", "NOTEBOOK", "MACBOOK", "COMPUTADOR", "TV", "PLAYSTATION",
+    "PS4", "PS5", "XBOX", "NINTENDO", "IPAD", "TABLET", "AIRPODS", "SMARTWATCH", "APPLE WATCH", "MONITOR", "IMPRESSORA"
+  ],
+  SERVICE: [
+    "SERVIÇO", "SERVICO", "FAÇO", "FACO", "ATENDO", "ATENDEMOS", "CONSULTORIA", "ASSESSORIA", "ADVOGADO", "ADVOGADA", "ADVOCACIA",
+    "JURÍDICO", "JURIDICO", "CONDOMINIAL", "MANICURE", "DIARISTA", "PEDREIRO", "PINTOR", "ELETRICISTA", "ENCANADOR", "MECÂNICO", "MECANICO",
+    "FRETE", "MASSAGEM", "DESIGNER", "AULA", "INSTALAÇÃO", "INSTALACAO", "MANUTENÇÃO", "MANUTENCAO", "LIMPEZA", "CABELO", "BARBEIRO", "UNHAS"
+  ],
+  FOOD: [
+    "BOLO", "DOCINHO", "DOCINHOS", "DOCE", "SALGADO", "SALGADINHO", "MARMITA", "LANCHE", "LANCHES", "PIZZA", "AÇAÍ", "ACAI",
+    "HAMBÚRGUER", "HAMBURGUER", "BRIGADEIRO", "CONFEITARIA", "SOBREMESA", "COMIDA", "PORÇÃO", "PORCAO", "PRATO", "TRUFA"
+  ],
+  FASHION: [
+    "VESTIDO", "CAMISETA", "CALÇA", "CALCA", "TENIS", "TÊNIS", "SAPATO", "BOLSA", "JAQUETA", "ROUPA", "LOOK", "ACESSORIO", "ACESSÓRIO",
+    "RELÓGIO", "RELOGIO", "BONÉ", "BONE", "SHORT", "SAIA", "BLUSA", "CROPPED"
+  ],
+  HOME: [
+    "GELADEIRA", "FREEZER", "FOGÃO", "FOGAO", "MICROONDAS", "MICRO-ONDAS", "MÁQUINA", "MAQUINA", "LAVA E SECA", "SOFÁ", "SOFA",
+    "ARMÁRIO", "ARMARIO", "MESA", "CADEIRA", "GUARDA-ROUPA", "COLCHÃO", "COLCHAO", "COOKTOP", "PAINEL", "RAQUE", "LAVADORA", "SECADORA"
+  ],
+});
+
+function scoreKeywordHits(text, hints) {
+  const normalized = ` ${upper(text).replace(/[^A-Z0-9ÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ\- ]+/g, " ")} `;
+  let score = 0;
+
+  for (const hint of ensureArray(hints)) {
+    const token = cleanText(hint).toUpperCase();
+    if (!token) continue;
+    if (normalized.includes(` ${token} `)) score += token.length >= 6 ? 8 : 6;
   }
-  return CATEGORY_SCHEMAS.GENERIC;
+
+  return score;
+}
+
+function scoreCategorySchema(text, schema) {
+  if (!schema || schema.key === "GENERIC") return 0;
+
+  let score = 0;
+  if (schema.detect(text)) score += 40;
+  score += scoreKeywordHits(text, CATEGORY_HINTS[schema.key]);
+
+  const completeness = computeCategoryCompleteness({ schema, text, bizProfile: null });
+  score += Math.min(36, completeness.presentWeight);
+
+  const words = countWords(text);
+  if (schema.key === "SERVICE" && words <= 2) score -= 10;
+
+  return score;
+}
+
+function detectCategorySchema(text) {
+  const candidates = Object.values(CATEGORY_SCHEMAS).filter((schema) => schema.key !== "GENERIC");
+  let bestSchema = CATEGORY_SCHEMAS.GENERIC;
+  let bestScore = 0;
+
+  for (const schema of candidates) {
+    const score = scoreCategorySchema(text, schema);
+    if (score > bestScore) {
+      bestSchema = schema;
+      bestScore = score;
+    }
+  }
+
+  return bestScore >= 40 ? bestSchema : CATEGORY_SCHEMAS.GENERIC;
 }
 
 function profileHasUsefulValue(value) {
@@ -935,6 +1006,13 @@ function shouldAskCategoryQuestions({ schema, text, completeness, attemptCount =
 
   const threshold = Number(schema.minAskScore || 65);
   if (completeness.score < threshold) return true;
+
+  if (schema.key === "SERVICE") {
+    const missingDesiredWeighted = ensureArray(completeness.missingDesired)
+      .filter((item) => Number(item.weight || 0) >= 12);
+    if (missingDesiredWeighted.length >= 2) return true;
+    if (missingDesiredWeighted.length >= 1 && words <= 12) return true;
+  }
 
   if (schema.key === "GENERIC") {
     return words <= 5 && completeness.missingAll.length >= 2;
@@ -1233,13 +1311,9 @@ function normalizeGenericCtas(adText) {
 
 function removeGeneratedPlaceholders(adText) {
   const placeholderPatterns = [
-    /^\s*\[Seu Nome\]\s*$/gim,
-    /^\s*\[Seu Site\]\s*$/gim,
-    /^\s*\[Suas Redes Sociais\]\s*$/gim,
-    /^\s*\[Seu WhatsApp\]\s*$/gim,
-    /^\s*\[Seu Endere[cç]o\]\s*$/gim,
-    /^\s*\[Seu Hor[aá]rio\]\s*$/gim,
+    /^\s*\[(Seu|Sua|Seus|Suas)\s+[^\]]+\]\s*$/gim,
     /^\s*\[Contato\]\s*$/gim,
+    /\[(Seu|Sua|Seus|Suas)\s+[^\]]+\]/gi,
   ];
 
   let text = String(adText || "");
@@ -1247,7 +1321,11 @@ function removeGeneratedPlaceholders(adText) {
     text = text.replace(rx, "");
   }
 
-  const lines = text.split("\n").map((line) => String(line || "").trimRight());
+  const lines = text
+    .split("\n")
+    .map((line) => String(line || "").trimRight())
+    .filter((line) => !/^\s*\[(Seu|Sua|Seus|Suas)\s+[^\]]+\]\s*$/i.test(line));
+
   while (lines.length && !lines[0].trim()) lines.shift();
   while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
 
