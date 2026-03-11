@@ -811,8 +811,6 @@ export async function resetUserAsNew(waId) {
     keyQuotaUsed(id),
     keyTrialUsed(id),
     keyLastPrompt(id),
-    keyLastAd(id),
-    keyRefineCount(id),
     keyTemplateMode(id),
     keyTemplatePrompted(id),
     keyFullName(id),
@@ -820,8 +818,6 @@ export async function resetUserAsNew(waId) {
     keyDocLast4(id),
     keyDocLegacy(id),
     keyPaymentMethod(id),
-    keyBillingCityState(id),
-    keyBillingAddress(id),
     keyAsaasCustomerId(id),
     keyAsaasSubscriptionId(id),
     keyMenuPrevStatus(id),
@@ -831,6 +827,10 @@ export async function resetUserAsNew(waId) {
     keyBizProfile(id),
     keyPendingBizProfile(id),
     keyCurrentAdSession(id),
+    keyLastAd(id),
+    keyRefineCount(id),
+    keyBillingCityState(id),
+    keyBillingAddress(id),
   ];
 
   // best-effort: apaga todas as chaves conhecidas
