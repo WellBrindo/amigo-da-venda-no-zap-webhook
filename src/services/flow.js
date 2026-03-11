@@ -498,8 +498,7 @@ function enforceAdFormatting(adText) {
 
   const formatInfoLine = (line) => {
     const current = String(line || "").trimRight();
-    const m = current.match(/^\s*(🇧🇷|🕒|📍|🚚|📞|🌐|💬|✅)\s+([^
-]+)$/);
+    const m = current.match(/^\s*(🇧🇷|🕒|📍|🚚|📞|🌐|💬|✅)\s+([^\n]+)$/);
     if (!m) return current;
 
     const emoji = m[1];
