@@ -184,11 +184,67 @@ function wantsFinishCommand(t) {
 }
 
 function normalizeUrlLike(t) {
-  const s = cleanText(t);
+  let s = cleanText(t);
   if (!s) return "";
-  // aceita @instagram como atalho
-  if (s.startsWith("@")) return "https://instagram.com/" + s.slice(1);
+
+  if (s.startsWith("@")) {
+    s = "instagram.com/" + s.slice(1);
+  }
+
+  s = s.replace(/\s+/g, "");
+  s = s
+    .replace(/instagram\.ocm/gi, "instagram.com")
+    .replace(/instagram\.cmo/gi, "instagram.com")
+    .replace(/istagram\.com/gi, "instagram.com")
+    .replace(/instagran\.com/gi, "instagram.com")
+    .replace(/facebok\.com/gi, "facebook.com")
+    .replace(/faceboook\.com/gi, "facebook.com")
+    .replace(/facebook\.ocm/gi, "facebook.com")
+    .replace(/facebook\.cmo/gi, "facebook.com")
+    .replace(/tiktok\.ocm/gi, "tiktok.com")
+    .replace(/tiktok\.cmo/gi, "tiktok.com");
+
+  if (/^www\./i.test(s)) s = `https://${s}`;
   return s;
+}
+
+function normalizeWhatsappLike(t) {
+  const raw = cleanText(t);
+  if (!raw) return "";
+
+  const digits = raw.replace(/\D+/g, "");
+  if (digits.length >= 10) {
+    let local = digits;
+    if ((local.length === 12 || local.length === 13) && local.startsWith("55")) {
+      local = local.slice(2);
+    }
+    if (local.length > 11) local = local.slice(-11);
+
+    if (local.length === 11) {
+      return `${local.slice(0, 2)} ${local.slice(2, 7)}-${local.slice(7)}`;
+    }
+    if (local.length === 10) {
+      return `${local.slice(0, 2)} ${local.slice(2, 6)}-${local.slice(6)}`;
+    }
+  }
+
+  return raw.replace(/\*/g, "-").trim();
+}
+
+function normalizeBusinessVoice(adText, bizProfile) {
+  const companyName = normalizeProfileScalar(bizProfile?.companyName);
+  if (!companyName) return String(adText || "");
+
+  return String(adText || "")
+    .replace(/^Sou\s+/im, "Somos ")
+    .replace(/^Atendo\s+/im, "Atendemos ")
+    .replace(/^Faço\s+/im, "Fazemos ")
+    .replace(/^Ofereço\s+/im, "Oferecemos ")
+    .replace(/^Trabalho\s+/im, "Trabalhamos ")
+    .replace(/meu atendimento/gi, "nosso atendimento")
+    .replace(/meus servi[cç]os/gi, "nossos serviços")
+    .replace(/minha consultoria/gi, "nossa consultoria")
+    .replace(/meu trabalho/gi, "nosso trabalho");
 }
 
 function ensureArray(v) {
@@ -1345,10 +1401,12 @@ function sanitizeGeneratedAd(adText, bizProfile) {
   const hasCompany = !!normalizeProfileScalar(bizProfile?.companyName);
   let text = String(adText || "");
   text = removeGeneratedPlaceholders(text);
+  if (hasCompany) text = normalizeBusinessVoice(text, bizProfile);
   text = hasCompany ? normalizeCompanyCtas(text, bizProfile) : normalizeGenericCtas(text);
   text = removeGeneratedPlaceholders(text);
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
+
 
 function ensureCompanyNameBold(adText, companyName) {
   const name = normalizeProfileScalar(companyName);
@@ -1380,12 +1438,14 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   if (!bizProfile || typeof bizProfile !== "object") return adText;
 
   const refinementText = isRefinement ? String(userText || "") : "";
-  let text = normalizeCompanyCtas(adText, bizProfile);
+  let text = normalizeBusinessVoice(adText, bizProfile);
+  text = normalizeCompanyCtas(text, bizProfile);
 
   const companyName = normalizeProfileScalar(bizProfile.companyName);
-  const website = normalizeProfileScalar(bizProfile.website);
+  const website = normalizeUrlLike(normalizeProfileScalar(bizProfile.website));
+  const whatsapp = normalizeWhatsappLike(normalizeProfileScalar(bizProfile.whatsapp));
   const socials = ensureArray(bizProfile.socials)
-    .map((item) => normalizeProfileScalar(item))
+    .map((item) => normalizeUrlLike(normalizeProfileScalar(item)))
     .filter(Boolean);
 
   if (companyName && !textRequestsRemovingField(refinementText, "companyName") && !textRequestsRemovingCompanyInfo(refinementText)) {
@@ -1397,6 +1457,10 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
 
   if (website && !textRequestsRemovingField(refinementText, "website") && !hasLineWithText(lines, website)) {
     infoLinesToAdd.push(`🌐 *Site:* ${website}`);
+  }
+
+  if (whatsapp && !hasLineWithText(lines, whatsapp)) {
+    infoLinesToAdd.push(`📞 *WhatsApp:* ${whatsapp}`);
   }
 
   if (socials.length && !textRequestsRemovingField(refinementText, "socials")) {
@@ -1435,11 +1499,11 @@ function buildBizProfileContext(profile) {
   const serviceArea = normalizeProfileScalar(profile.serviceArea);
   const location = normalizeProfileScalar(profile.location);
   const hours = normalizeProfileScalar(profile.hours);
-  const whatsapp = normalizeProfileScalar(profile.whatsapp);
-  const website = normalizeProfileScalar(profile.website);
+  const whatsapp = normalizeWhatsappLike(normalizeProfileScalar(profile.whatsapp));
+  const website = normalizeUrlLike(normalizeProfileScalar(profile.website));
   const productList = normalizeProfileScalar(profile.productList || profile.productsUrl);
   const socials = ensureArray(profile.socials)
-    .map((item) => normalizeProfileScalar(item))
+    .map((item) => normalizeUrlLike(normalizeProfileScalar(item)))
     .filter(Boolean);
 
   if (companyName) parts.push(`Empresa: ${companyName}`);
@@ -1495,11 +1559,11 @@ async function msgMenuProfileView(waId) {
     };
 
     const companyName = get("companyName");
-    const whatsapp = get("whatsapp");
+    const whatsapp = normalizeWhatsappLike(get("whatsapp"));
     const address = get("address");
     const hours = get("hours");
-    const socials = get("socials");
-    const website = get("website");
+    const socials = ensureArray(biz?.socials).map((x) => normalizeUrlLike(String(x || "").trim())).filter(Boolean).join(", ");
+    const website = normalizeUrlLike(get("website"));
     const productsUrl = get("productsUrl");
 
     if (companyName) lines.push(`🏢 Nome: ${companyName}`);
@@ -1960,7 +2024,7 @@ export async function handleInboundText({ waId, text }) {
     if (status === ST.WAIT_PROFILE_ADD_WHATSAPP) {
       if (!wantsSkipCommand(inbound)) {
         const wa = cleanText(inbound);
-        if (wa.length >= 8) profile.whatsapp = wa;
+        if (wa.length >= 8) profile.whatsapp = normalizeWhatsappLike(wa);
       }
       await setPendingBizProfile(id, profile);
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_ADDRESS);
