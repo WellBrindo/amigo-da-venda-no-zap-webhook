@@ -96,6 +96,186 @@ function safeStr(v) {
   return String(v ?? "").trim();
 }
 
+const LOWERCASE_WORDS = new Set(["a", "as", "e", "o", "os", "da", "das", "de", "des", "di", "do", "dos", "du", "d", "del", "della", "delle", "la", "las", "le", "los", "na", "nas", "no", "nos"]);
+const BRAZIL_UFS = new Set(["AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"]);
+const SOCIAL_HOST_HINTS = ["instagram.com", "facebook.com", "facebook.com.br", "tiktok.com", "linkedin.com", "youtube.com", "wa.me", "whatsapp.com"];
+
+function compactInnerWhitespace(value) {
+  return safeStr(value).replace(/\s+/g, " ").trim();
+}
+
+function capitalizeToken(token) {
+  const raw = String(token || "");
+  const compact = raw.trim();
+  if (!compact) return "";
+
+  const upper = compact.toUpperCase();
+  if (BRAZIL_UFS.has(upper)) return upper;
+  if (/^[IVXLCDM]+$/i.test(compact) && compact.length <= 6) return upper;
+  if (/^[A-Z0-9&]{2,6}$/.test(compact)) return compact;
+  if (/^\d+[A-Z]?$/i.test(compact)) return compact.toUpperCase();
+  if (/^\d/.test(compact)) return compact;
+  if (/^[A-Z]{1}[a-z]+(?:[A-Z][a-z]+)+$/.test(compact)) return compact;
+
+  const lower = compact.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+function smartTitleCase(value, { keepLowercaseConnectors = true } = {}) {
+  const normalized = compactInnerWhitespace(value);
+  if (!normalized) return "";
+
+  let wordIndex = 0;
+  return normalized.replace(/[A-Za-zÀ-ÿ0-9&]+(?:'[A-Za-zÀ-ÿ0-9&]+)*/g, (token) => {
+    const lower = token.toLowerCase();
+    const shouldLower = keepLowercaseConnectors && wordIndex > 0 && LOWERCASE_WORDS.has(lower);
+    wordIndex += 1;
+    return shouldLower ? lower : capitalizeToken(token);
+  });
+}
+
+function normalizePersonName(value) {
+  return smartTitleCase(value, { keepLowercaseConnectors: true });
+}
+
+function normalizeCompanyName(value) {
+  return smartTitleCase(value, { keepLowercaseConnectors: true });
+}
+
+function normalizeAddressText(value) {
+  let text = smartTitleCase(value, { keepLowercaseConnectors: true });
+  if (!text) return "";
+  text = text
+    .replace(/\s*,\s*/g, ", ")
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/\s*-\s*/g, " - ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text;
+}
+
+function normalizeHoursText(value) {
+  let text = compactInnerWhitespace(value);
+  if (!text) return "";
+  const lower = text.toLowerCase();
+  if (text === lower) {
+    text = text.charAt(0).toUpperCase() + text.slice(1);
+  }
+  text = text
+    .replace(/\s*-\s*/g, " - ")
+    .replace(/\s*\/\s*/g, "/")
+    .replace(/\s*,\s*/g, ", ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text;
+}
+
+function normalizePhoneBR(value) {
+  const raw = compactInnerWhitespace(value);
+  if (!raw) return "";
+
+  let digits = raw.replace(/\D+/g, "");
+  if ((digits.length === 12 || digits.length === 13) && digits.startsWith("55")) {
+    digits = digits.slice(2);
+  }
+  if (digits.length > 11) digits = digits.slice(-11);
+
+  if (digits.length === 11) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
+  }
+
+  return raw;
+}
+
+function normalizeUrlStored(value, { social = false } = {}) {
+  let text = compactInnerWhitespace(value).replace(/\/g, "/");
+  if (!text) return "";
+
+  if (social && text.startsWith("@")) {
+    text = `instagram.com/${text.slice(1)}`;
+  }
+
+  text = text
+    .replace(/instagram\.ocm/gi, "instagram.com")
+    .replace(/instagram\.cmo/gi, "instagram.com")
+    .replace(/istagram\.com/gi, "instagram.com")
+    .replace(/instagran\.com/gi, "instagram.com")
+    .replace(/facebok\.com/gi, "facebook.com")
+    .replace(/faceboook\.com/gi, "facebook.com")
+    .replace(/facebook\.ocm/gi, "facebook.com")
+    .replace(/facebook\.cmo/gi, "facebook.com")
+    .replace(/tiktok\.ocm/gi, "tiktok.com")
+    .replace(/tiktok\.cmo/gi, "tiktok.com");
+
+  const lower = text.toLowerCase();
+  const looksLikeKnownHost = SOCIAL_HOST_HINTS.some((host) => lower.includes(host)) || /^[a-z0-9.-]+\.[a-z]{2,}(?:\/.*)?$/i.test(text);
+  if (!/^https?:\/\//i.test(text) && looksLikeKnownHost) {
+    text = `https://${text.replace(/^\/+/, "")}`;
+  }
+
+  return text;
+}
+
+function normalizeCityState(value) {
+  const raw = compactInnerWhitespace(value);
+  if (!raw) return "";
+
+  const slashMatch = raw.match(/^(.*?)[\s\/-]*([A-Za-z]{2})$/);
+  if (slashMatch) {
+    const cityPart = smartTitleCase(slashMatch[1], { keepLowercaseConnectors: true }).replace(/\s*,\s*$/g, "").trim();
+    const uf = String(slashMatch[2] || "").toUpperCase();
+    if (cityPart && BRAZIL_UFS.has(uf)) return `${cityPart}/${uf}`;
+  }
+
+  return smartTitleCase(raw, { keepLowercaseConnectors: true }).replace(/\s*\/\s*/g, "/").trim();
+}
+
+function normalizeFreeTextField(value) {
+  return compactInnerWhitespace(value);
+}
+
+function normalizeBizProfileData(profileObj) {
+  const src = profileObj && typeof profileObj === "object" ? profileObj : {};
+  const dst = { ...src };
+
+  if ("companyName" in dst) dst.companyName = normalizeCompanyName(dst.companyName);
+  if ("whatsapp" in dst) dst.whatsapp = normalizePhoneBR(dst.whatsapp);
+  if ("address" in dst) dst.address = normalizeAddressText(dst.address);
+  if ("location" in dst) {
+    const normalizedLocation = compactInnerWhitespace(dst.location);
+    if (/^apenas\s+atendimento\s+online$/i.test(normalizedLocation)) {
+      dst.location = "Apenas atendimento online";
+    } else if (/^apenas\s+online$/i.test(normalizedLocation)) {
+      dst.location = "Apenas online";
+    } else {
+      dst.location = normalizeAddressText(normalizedLocation);
+    }
+  }
+  if ("serviceArea" in dst) dst.serviceArea = normalizeAddressText(dst.serviceArea);
+  if ("hours" in dst) dst.hours = normalizeHoursText(dst.hours);
+  if ("website" in dst) dst.website = normalizeUrlStored(dst.website, { social: false });
+  if ("productsUrl" in dst) dst.productsUrl = normalizeUrlStored(dst.productsUrl, { social: false });
+  if ("productList" in dst) {
+    const normalized = normalizeUrlStored(dst.productList, { social: false });
+    dst.productList = normalized || normalizeFreeTextField(dst.productList);
+  }
+  if ("socials" in dst) {
+    const socials = Array.isArray(dst.socials) ? dst.socials : [];
+    dst.socials = Array.from(new Set(socials.map((item) => normalizeUrlStored(item, { social: true })).filter(Boolean)));
+  }
+
+  Object.keys(dst).forEach((key) => {
+    const value = dst[key];
+    if (typeof value === "string" && !safeStr(value)) delete dst[key];
+    if (Array.isArray(value) && value.length === 0) delete dst[key];
+  });
+
+  return dst;
+}
+
 function toInt(v, def = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
@@ -459,7 +639,11 @@ export async function getUserFullName(waId) {
 
 export async function setUserFullName(waId, fullName) {
   await indexUser(waId);
-  const n = safeStr(fullName);
+  const n = normalizePersonName(fullName);
+  if (!n) {
+    await redisDel(keyFullName(waId));
+    return "";
+  }
   await redisSet(keyFullName(waId), n);
   return n;
 }
@@ -559,7 +743,7 @@ export async function getBillingCityState(waId) {
 
 export async function setBillingCityState(waId, value) {
   await indexUser(waId);
-  const v = safeStr(value);
+  const v = normalizeCityState(value);
   if (!v) {
     await redisDel(keyBillingCityState(waId));
     return "";
@@ -580,7 +764,8 @@ export async function getBillingAddress(waId) {
 
 export async function setBillingAddress(waId, value) {
   await indexUser(waId);
-  const v = safeStr(value);
+  const raw = compactInnerWhitespace(value);
+  const v = /^apenas\s+online$/i.test(raw) ? "APENAS ONLINE" : normalizeAddressText(raw);
   if (!v) {
     await redisDel(keyBillingAddress(waId));
     return "";
@@ -685,7 +870,8 @@ export async function getBizProfile(waId) {
 
 export async function setBizProfile(waId, profileObj) {
   await indexUser(waId);
-  const s = safeJsonStringify(profileObj);
+  const normalized = normalizeBizProfileData(profileObj);
+  const s = safeJsonStringify(normalized);
   await redisSet(keyBizProfile(waId), s);
   return true;
 }
@@ -705,7 +891,8 @@ export async function getPendingBizProfile(waId) {
 
 export async function setPendingBizProfile(waId, profileObj) {
   await indexUser(waId);
-  const s = safeJsonStringify(profileObj);
+  const normalized = normalizeBizProfileData(profileObj);
+  const s = safeJsonStringify(normalized);
   await redisSet(keyPendingBizProfile(waId), s);
   return true;
 }
