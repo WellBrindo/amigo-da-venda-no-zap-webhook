@@ -78,7 +78,7 @@ import {
   clearCurrentAdSession,
 } from "./state.js";
 
-import { getMenuPlans, getPlan, getPlanByChoice } from "./Plans.js";
+import { getMenuPlans, getPlan, getPlanByChoice, renderPlansMenu } from "./Plans.js";
 import { validateDoc } from "./brDoc.js";
 
 import {
@@ -245,61 +245,6 @@ function todayISO() {
 function moneyBRFromCents(cents) {
   const v = (Number(cents) || 0) / 100;
   return v.toFixed(2);
-}
-
-function normalizePriceDisplayFromCents(cents) {
-  return String(moneyBRFromCents(cents)).replace('.', ',');
-}
-
-function formatPlanQuotaLabel(plan) {
-  const desc = cleanText(plan?.description || "");
-  if (desc) return desc;
-
-  const quota = Number(plan?.monthlyQuota || 0);
-  if (!quota) return "Plano mensal";
-  return `${quota} descrições por mês`;
-}
-
-function formatPlanMenuLine(plan, index) {
-  const n = Number(index) + 1;
-  const badge = n === 1 ? "1️⃣" : n === 2 ? "2️⃣" : n === 3 ? "3️⃣" : `${n})`;
-  const name = cleanText(plan?.name || `Plano ${n}`);
-  const price = normalizePriceDisplayFromCents(plan?.priceCents);
-  const quotaLabel = formatPlanQuotaLabel(plan);
-  return `${badge} *${name}* — R$ ${price}\n${quotaLabel}`;
-}
-
-async function buildDynamicPlansMenu({ includeTrialIntro = false } = {}) {
-  const menu = await getMenuPlans();
-  const validMenu = Array.isArray(menu) ? menu.filter(Boolean) : [];
-
-  if (!validMenu.length) {
-    const intro = includeTrialIntro ? "Seu teste grátis acabou 😄\n\n" : "";
-    return (
-      `${intro}Para continuar, escolha um plano:\n\n` +
-      `1️⃣ *De Vez em Quando* — R$ 24,90\n20 descrições por mês\n\n` +
-      `2️⃣ *Sempre por Perto* — R$ 34,90\n60 descrições por mês\n\n` +
-      `3️⃣ *Melhor Amigo* — R$ 49,90\n200 descrições por mês\n\n` +
-      `Responda com *1*, *2* ou *3*.`
-    );
-  }
-
-  const lines = [];
-  if (includeTrialIntro) {
-    lines.push("Seu teste grátis acabou 😄");
-    lines.push("");
-  }
-  lines.push("Para continuar, escolha um plano:");
-  lines.push("");
-
-  validMenu.forEach((plan, index) => {
-    lines.push(formatPlanMenuLine(plan, index));
-    if (index < validMenu.length - 1) lines.push("");
-  });
-
-  lines.push("");
-  lines.push("Responda com *1*, *2* ou *3*.");
-  return lines.join("\n");
 }
 
 function reply(text) {
@@ -888,83 +833,12 @@ function hasVoltageOrMeasureSignal(text) {
   return /\b(110V|127V|220V|VOLTS?|CM|METROS?|LARGURA|ALTURA|PROFUNDIDADE|MEDIDAS?)\b/.test(s);
 }
 
-const CATEGORY_HINTS = Object.freeze({
-  VEHICLE: [
-    "CARRO", "VEICULO", "VEÍCULO", "AUTO", "AUTOMOVEL", "AUTOMÓVEL", "MOTO", "MOTOCICLETA", "CAMINHONETE", "SUV", "SEDAN", "HATCH",
-    "PICKUP", "PICK-UP", "PICK UP", "ONIX", "HB20", "PALIO", "GOL", "UNO", "CORSA", "CELTA", "CRUZE", "CIVIC", "COROLLA", "JETTA",
-    "FOX", "SAVEIRO", "STRADA", "TORO", "RENEGADE", "COMPASS", "HR-V", "HRV", "T-CROSS", "TCROSS", "FASTBACK", "PULSE", "NIVUS",
-    "ARGO", "MOBI", "TRACKER", "CRETA", "KWID", "S10", "HILUX", "SW4", "FIAT", "CHEVROLET", "VW", "VOLKSWAGEN", "HYUNDAI", "TOYOTA", "HONDA"
-  ],
-  PROPERTY: [
-    "APARTAMENTO", "APTO", "CASA", "SOBRADO", "KITNET", "TERRENO", "LOTE", "IMOVEL", "IMÓVEL", "SALA COMERCIAL", "GALPAO", "GALPÃO",
-    "CHACARA", "CHÁCARA", "FAZENDA", "COBERTURA", "ALUGO", "ALUGUEL", "VENDO CASA", "VENDE-SE CASA", "CONDOMINIO", "CONDOMÍNIO"
-  ],
-  ELECTRONICS: [
-    "IPHONE", "SAMSUNG", "MOTOROLA", "XIAOMI", "CELULAR", "SMARTPHONE", "NOTEBOOK", "MACBOOK", "COMPUTADOR", "TV", "PLAYSTATION",
-    "PS4", "PS5", "XBOX", "NINTENDO", "IPAD", "TABLET", "AIRPODS", "SMARTWATCH", "APPLE WATCH", "MONITOR", "IMPRESSORA"
-  ],
-  SERVICE: [
-    "SERVIÇO", "SERVICO", "FAÇO", "FACO", "ATENDO", "ATENDEMOS", "MANICURE", "DIARISTA", "PEDREIRO", "PINTOR", "ELETRICISTA",
-    "ENCANADOR", "MECÂNICO", "MECANICO", "FRETE", "MASSAGEM", "DESIGNER", "AULA", "CONSULTORIA", "INSTALAÇÃO", "INSTALACAO",
-    "MANUTENÇÃO", "MANUTENCAO", "LIMPEZA", "CABELO", "BARBEIRO", "UNHAS"
-  ],
-  FOOD: [
-    "BOLO", "DOCINHO", "DOCINHOS", "DOCE", "SALGADO", "SALGADINHO", "MARMITA", "LANCHE", "LANCHES", "PIZZA", "AÇAÍ", "ACAI",
-    "HAMBÚRGUER", "HAMBURGUER", "BRIGADEIRO", "CONFEITARIA", "SOBREMESA", "COMIDA", "PORÇÃO", "PORCAO", "PRATO", "TRUFA"
-  ],
-  FASHION: [
-    "VESTIDO", "CAMISETA", "CALÇA", "CALCA", "TENIS", "TÊNIS", "SAPATO", "BOLSA", "JAQUETA", "ROUPA", "LOOK", "ACESSORIO", "ACESSÓRIO",
-    "RELÓGIO", "RELOGIO", "BONÉ", "BONE", "SHORT", "SAIA", "BLUSA", "CROPPED"
-  ],
-  HOME: [
-    "GELADEIRA", "FREEZER", "FOGÃO", "FOGAO", "MICROONDAS", "MICRO-ONDAS", "MÁQUINA", "MAQUINA", "LAVA E SECA", "SOFÁ", "SOFA",
-    "ARMÁRIO", "ARMARIO", "MESA", "CADEIRA", "GUARDA-ROUPA", "COLCHÃO", "COLCHAO", "COOKTOP", "PAINEL", "RAQUE", "LAVADORA", "SECADORA"
-  ],
-});
-
-function scoreKeywordHits(text, hints) {
-  const normalized = ` ${upper(text).replace(/[^A-Z0-9ÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ\- ]+/g, " ")} `;
-  let score = 0;
-
-  for (const hint of ensureArray(hints)) {
-    const token = cleanText(hint).toUpperCase();
-    if (!token) continue;
-    if (normalized.includes(` ${token} `)) score += token.length >= 6 ? 8 : 6;
-  }
-
-  return score;
-}
-
-function scoreCategorySchema(text, schema) {
-  if (!schema || schema.key === "GENERIC") return 0;
-
-  let score = 0;
-  if (schema.detect(text)) score += 40;
-  score += scoreKeywordHits(text, CATEGORY_HINTS[schema.key]);
-
-  const completeness = computeCategoryCompleteness({ schema, text, bizProfile: null });
-  score += Math.min(36, completeness.presentWeight);
-
-  const words = countWords(text);
-  if (schema.key === "SERVICE" && words <= 2) score -= 10;
-
-  return score;
-}
-
 function detectCategorySchema(text) {
-  const candidates = Object.values(CATEGORY_SCHEMAS).filter((schema) => schema.key !== "GENERIC");
-  let bestSchema = CATEGORY_SCHEMAS.GENERIC;
-  let bestScore = 0;
-
-  for (const schema of candidates) {
-    const score = scoreCategorySchema(text, schema);
-    if (score > bestScore) {
-      bestSchema = schema;
-      bestScore = score;
-    }
+  const values = Object.values(CATEGORY_SCHEMAS).filter((schema) => schema.key !== "GENERIC");
+  for (const schema of values) {
+    if (schema.detect(text)) return schema;
   }
-
-  return bestScore >= 40 ? bestSchema : CATEGORY_SCHEMAS.GENERIC;
+  return CATEGORY_SCHEMAS.GENERIC;
 }
 
 function profileHasUsefulValue(value) {
@@ -1187,11 +1061,37 @@ async function msgAskProduct(waId){
 }
 
 async function msgTrialOverAndPlans() {
-  return await buildDynamicPlansMenu({ includeTrialIntro: true });
+  return await renderPlansMenu();
 }
 
 async function msgPlansOnly() {
-  return await buildDynamicPlansMenu({ includeTrialIntro: false });
+  // Versão sem o "trial concluído"
+  const menu = await getMenuPlans();
+  if (!menu || menu.length === 0) {
+    return (
+      "Para continuar, escolha um plano:\n\n" +
+      "1) De Vez em Quando — R$ 24.90\n   • 20 descrições/mês\n\n" +
+      "2) Sempre por Perto — R$ 34.90\n   • 60 descrições/mês\n\n" +
+      "3) Melhor Amigo — R$ 49.90\n   • 200 descrições/mês\n\n" +
+      "Responda com *1*, *2* ou *3*."
+    );
+  }
+
+  const lines = [];
+  lines.push("Para continuar, escolha um plano:");
+  lines.push("");
+
+  menu.forEach((p, idx) => {
+    const n = idx + 1;
+    const emoji = n === 1 ? "1️⃣" : n === 2 ? "2️⃣" : n === 3 ? "3️⃣" : `${n})`;
+    const price = String(moneyBRFromCents(p.priceCents)).replace('.', ',');
+    const quotaText = p.description || `${p.monthlyQuota} descrições/mês`;
+    lines.push(`${emoji} *${p.name}* — R$ ${price} (${quotaText})`);
+  });
+  lines.push("");
+
+  lines.push("Responda com *1*, *2* ou *3*.");
+  return lines.join("\n");
 }
 
 async function msgAskPaymentMethod(waId, plan){
@@ -1315,10 +1215,58 @@ function normalizeCompanyCtas(adText, bizProfile) {
   if (!companyName) return String(adText || "");
 
   return String(adText || "")
-    .replace(/\bFale comigo\b/gi, "Fale conosco")
-    .replace(/\bEntre em contato comigo\b/gi, "Entre em contato conosco")
-    .replace(/\bMe chame\b/gi, "Nos chame")
-    .replace(/\bAgende comigo\b/gi, "Agende conosco");
+    .replace(/Fale comigo/gi, "Fale conosco")
+    .replace(/Entre em contato comigo/gi, "Entre em contato conosco")
+    .replace(/Me chame/gi, "Nos chame")
+    .replace(/Agende comigo/gi, "Agende conosco");
+}
+
+function normalizeGenericCtas(adText) {
+  return String(adText || "")
+    .replace(/Fale comigo para mais informa[cç][õo]es!?/gi, "Entre em contato para mais informações.")
+    .replace(/Fale comigo para saber mais!?/gi, "Entre em contato para mais informações.")
+    .replace(/Fale comigo/gi, "Entre em contato")
+    .replace(/Entre em contato comigo/gi, "Entre em contato")
+    .replace(/Me chame/gi, "Entre em contato")
+    .replace(/Agende comigo/gi, "Agende seu atendimento");
+}
+
+function removeGeneratedPlaceholders(adText) {
+  const placeholderPatterns = [
+    /^\s*\[Seu Nome\]\s*$/gim,
+    /^\s*\[Seu Site\]\s*$/gim,
+    /^\s*\[Suas Redes Sociais\]\s*$/gim,
+    /^\s*\[Seu WhatsApp\]\s*$/gim,
+    /^\s*\[Seu Endere[cç]o\]\s*$/gim,
+    /^\s*\[Seu Hor[aá]rio\]\s*$/gim,
+    /^\s*\[Contato\]\s*$/gim,
+  ];
+
+  let text = String(adText || "");
+  for (const rx of placeholderPatterns) {
+    text = text.replace(rx, "");
+  }
+
+  const lines = text.split("\n").map((line) => String(line || "").trimRight());
+  while (lines.length && !lines[0].trim()) lines.shift();
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+
+  const compact = [];
+  for (const line of lines) {
+    if (!line.trim() && compact.length && !compact[compact.length - 1].trim()) continue;
+    compact.push(line);
+  }
+
+  return compact.join("\n").trim();
+}
+
+function sanitizeGeneratedAd(adText, bizProfile) {
+  const hasCompany = !!normalizeProfileScalar(bizProfile?.companyName);
+  let text = String(adText || "");
+  text = removeGeneratedPlaceholders(text);
+  text = hasCompany ? normalizeCompanyCtas(text, bizProfile) : normalizeGenericCtas(text);
+  text = removeGeneratedPlaceholders(text);
+  return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function ensureCompanyNameBold(adText, companyName) {
@@ -2387,7 +2335,9 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   }
 
   let formattedAd = enforceAdFormatting(ad);
+  formattedAd = sanitizeGeneratedAd(formattedAd, bizProfile);
   formattedAd = applyPersistentBusinessInfo(formattedAd, bizProfile, userText, isRefinement);
+  formattedAd = sanitizeGeneratedAd(formattedAd, bizProfile);
   formattedAd = enforceAdFormatting(formattedAd);
 
   // Pós-anúncio:
