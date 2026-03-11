@@ -75,8 +75,8 @@ A qualquer momento, você pode digitar *MENU* para acessar as opções de config
   FLOW_ASK_TEMPLATE_CHOICE_LONG:
     "Quer manter a estrutura do anúncio como *FIXO* (Template) ou prefere *LIVRE* (formatação por pedido)?\n\n📌 *Por que isso importa?*\nA gente atualiza nossos templates com frequência para acompanhar tendências de mercado e melhorar a conversão.\n\n✅ Sua escolha atual: *{{modeLabel}}*\n\n1) *FIXO* — eu mantenho a estrutura padrão (o que costuma converter mais)\n2) *LIVRE* — você me diz como quer a estrutura em cada refinamento\n\nResponda com *1* ou *2* (ou digite *TEMPLATE* / *LIVRE* a qualquer momento).",
 
-  FLOW_TEMPLATE_SET_FIXED: "Fechado! ✅\n\nA partir de agora eu vou usar o *MODELO FIXO*.",
-  FLOW_TEMPLATE_SET_FREE: "Fechado! ✅\n\nA partir de agora eu vou usar o *MODELO LIVRE*.",
+  FLOW_TEMPLATE_SET_FIXED: "Perfeito! ✅ Vou deixar como padrão o modelo *FIXO (Template)*.\n\nQuando quiser mudar para livre, digite *LIVRE*.\nE a qualquer momento você pode digitar *MENU* para ajustar.",
+  FLOW_TEMPLATE_SET_FREE: "Perfeito! ✅ Vou deixar como padrão a formatação *LIVRE*.\n\nQuando quiser voltar para o modelo FIXO, digite *TEMPLATE*.\nE a qualquer momento você pode digitar *MENU* para ajustar.",
 
   // FLOW — Trial / Limites
   FLOW_TRIAL_BLOCKED:
@@ -163,6 +163,41 @@ Responda com *1*, *2* ou *3*.`,
   // FLOW — MENU (comando "MENU")
 FLOW_MENU_MAIN:
   "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram\n11) Dados da empresa (ver/atualizar)\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
+
+FLOW_MENU_SUBSCRIPTION:
+  "*Minha assinatura*\n\n📦 Plano: {{planName}}\n📌 Status: {{status}}\n💳 Pagamento: {{paymentMethodLabel}}\n📅 Vencimento / renovação: {{dueDate}}\n📊 Descrições utilizadas: {{used}} / {{total}}\n\n1) Alterar plano\n2) Cancelar plano\n3) Ajuda\n4) Voltar",
+FLOW_MENU_EDIT_ROOT:
+  "*Alterar dados preenchidos*\n\n1) Dados pessoais\n2) Dados da empresa\n3) Fluxo FIXO ou LIVRE\n4) Ajuda\n5) Voltar",
+FLOW_MENU_EDIT_PERSONAL:
+  "*Dados pessoais preenchidos*\n\n{{options}}\n\n5) Voltar\n\nResponda com o número do dado que você quer alterar.",
+FLOW_MENU_EDIT_COMPANY:
+  "*Dados da empresa preenchidos*\n\n{{options}}\n\n8) Voltar\n\nResponda com o número do dado que você quer alterar.",
+FLOW_MENU_EDIT_TEMPLATE:
+  "*Fluxo de anúncio*\n\nModo atual: *{{mode}}*\n\n1) Usar anúncio FIXO\n2) Usar anúncio LIVRE\n3) Voltar",
+FLOW_MENU_EDIT_FIELD_FULLNAME:
+  "Perfeito! ✅\n\nMe envie seu *nome completo* atualizado.",
+FLOW_MENU_EDIT_FIELD_DOC:
+  "Certo! ✅\n\nMe envie seu *CPF ou CNPJ* (somente números) para atualizar.",
+FLOW_MENU_EDIT_FIELD_BILLING_CITY_STATE:
+  "Perfeito! ✅\n\nMe envie a *Cidade/UF* que você quer salvar.\nEx.: Atibaia/SP",
+FLOW_MENU_EDIT_FIELD_BILLING_ADDRESS:
+  "Perfeito! ✅\n\nMe envie o *endereço* que você quer salvar.\nSe for somente online, responda *APENAS ONLINE*.",
+FLOW_MENU_EDIT_FIELD_GENERIC:
+  "Perfeito! ✅\n\nMe envie o novo valor para *{{label}}*.",
+FLOW_MENU_EDIT_SUCCESS:
+  "✅ Dado atualizado com sucesso!",
+FLOW_BILLING_UPDATED_SUCCESS:
+  "✅ Perfeito! Seus dados foram atualizados com sucesso.",
+FLOW_ASK_BILLING_CITY_STATE:
+  "✅ Pagamento confirmado! Seu plano já está ativo.\n\nAgora preciso de uma informação para completar o seu cadastro.\n\n📍 Qual é sua *Cidade/UF*? (ex: Atibaia/SP)",
+FLOW_ASK_BILLING_ADDRESS:
+  "Perfeito! ✅\n\nAgora me diga seu *endereço* (rua, número, bairro).\n\nSe for apenas atendimento online, responda: *APENAS ONLINE*",
+FLOW_ASK_PROFILE_REGISTRATION:
+  "Quer cadastrar os dados da sua empresa para eu usar automaticamente nos próximos anúncios? 🙂\n\n1) Sim, cadastrar agora\n2) Agora não\n\nAssim você não precisa repetir essas informações toda vez. ✅",
+FLOW_PAYMENT_PIX_READY:
+  "✅ Pronto! Gerei sua cobrança via *PIX*.\n\n{{paymentLinkLine}}\n\nAssim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀\n\nSe quiser mudar a forma de pagamento agora, responda *MUDAR PAGAMENTO*.",
+FLOW_PAYMENT_CARD_READY:
+  "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).\n\n{{paymentLinkLine}}\n\nAssim que confirmar, seu plano ativa automaticamente. 🚀\n\nSe quiser mudar a forma de pagamento agora, responda *MUDAR PAGAMENTO*.",
 
 // FLOW — MENU (Dados da empresa)
 FLOW_MENU_PROFILE_VIEW_TITLE: "📇 *Dados da empresa*",
@@ -388,6 +423,23 @@ export const COPY_CATALOG = Object.freeze([
 
 
   { category: "Flow", key: "FLOW_MENU_MAIN", label: "Menu principal (MENU)" },
+  { category: "Flow", key: "FLOW_MENU_SUBSCRIPTION", label: "Menu: minha assinatura" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_ROOT", label: "Menu: alterar dados (raiz)" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_PERSONAL", label: "Menu: dados pessoais" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_COMPANY", label: "Menu: dados da empresa" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_TEMPLATE", label: "Menu: fluxo FIXO/LIVRE" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_FIELD_FULLNAME", label: "Menu: editar nome" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_FIELD_DOC", label: "Menu: editar CPF/CNPJ" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_FIELD_BILLING_CITY_STATE", label: "Menu: editar cidade/UF" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_FIELD_BILLING_ADDRESS", label: "Menu: editar endereço" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_FIELD_GENERIC", label: "Menu: editar campo genérico" },
+  { category: "Flow", key: "FLOW_MENU_EDIT_SUCCESS", label: "Menu: sucesso ao atualizar dado" },
+  { category: "Flow", key: "FLOW_BILLING_UPDATED_SUCCESS", label: "Cobrança: dados atualizados com sucesso" },
+  { category: "Flow", key: "FLOW_ASK_BILLING_CITY_STATE", label: "Cobrança: pedir cidade/UF" },
+  { category: "Flow", key: "FLOW_ASK_BILLING_ADDRESS", label: "Cobrança: pedir endereço" },
+  { category: "Flow", key: "FLOW_ASK_PROFILE_REGISTRATION", label: "Pedir cadastro dos dados da empresa" },
+  { category: "Flow", key: "FLOW_PAYMENT_PIX_READY", label: "Pagamento PIX: cobrança gerada" },
+  { category: "Flow", key: "FLOW_PAYMENT_CARD_READY", label: "Pagamento Cartão: link gerado" },
   { category: "Flow", key: "FLOW_MENU_ASK_NEW_NAME", label: "Menu: pedir novo nome" },
   { category: "Flow", key: "FLOW_MENU_ASK_NEW_DOC", label: "Menu: pedir novo CPF/CNPJ" },
   { category: "Flow", key: "FLOW_MENU_URL_HELP", label: "Menu: URL Ajuda" },
