@@ -163,7 +163,7 @@ function normalizeChoice(t) {
 
 function normalizeChoiceMax(t, max = 9) {
   const s = cleanText(t);
-  const m = s.match(/^(\d{1,2})/);
+  const m = s.match(/^(\d{1,2})\b/);
   if (!m) return "";
   const n = Number(m[1]);
   if (!Number.isInteger(n) || n < 1 || n > Number(max || 9)) return "";
@@ -204,7 +204,7 @@ function wantsChangePaymentMethodCommand(t) {
 function withMenuHint(text) {
   const msg = String(text || "").trim();
   if (!msg) return "";
-  if (/MENU/i.test(msg)) return msg;
+  if (/\bMENU\b/i.test(msg)) return msg;
   return `${msg}
 
 A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.`;
@@ -301,10 +301,10 @@ function normalizeBusinessVoice(adText, bizProfile) {
     .replace(/^Faço\s+/im, "Fazemos ")
     .replace(/^Ofereço\s+/im, "Oferecemos ")
     .replace(/^Trabalho\s+/im, "Trabalhamos ")
-    .replace(/meu atendimento/gi, "nosso atendimento")
-    .replace(/meus servi[cç]os/gi, "nossos serviços")
-    .replace(/minha consultoria/gi, "nossa consultoria")
-    .replace(/meu trabalho/gi, "nosso trabalho");
+    .replace(/\bmeu atendimento\b/gi, "nosso atendimento")
+    .replace(/\bmeus servi[cç]os\b/gi, "nossos serviços")
+    .replace(/\bminha consultoria\b/gi, "nossa consultoria")
+    .replace(/\bmeu trabalho\b/gi, "nosso trabalho");
 }
 
 function ensureArray(v) {
