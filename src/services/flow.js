@@ -1900,7 +1900,14 @@ export async function handleInboundText({ waId, text }) {
 
     // se não for escolha válida, volta ao status anterior e reprocessa (pode ser um refinamento direto)
     if (c !== "1" && c !== "2") {
-      return reply(await msgAfterAdAskTemplateChoice(id, await getTemplateMode(id)));
+      const prev = await getPrevStatus(id);
+      await clearPrevStatus(id);
+      if (prev && prev !== ST.WAIT_TEMPLATE_MODE) {
+        await setUserStatus(id, prev);
+      } else {
+        await setUserStatus(id, ST.WAIT_PRODUCT);
+      }
+      return await handleInboundText({ waId: id, text: inbound });
     }
 
     const mode = c === "2" ? "FREE" : "FIXED";
