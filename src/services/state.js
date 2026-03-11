@@ -827,10 +827,6 @@ export async function resetUserAsNew(waId) {
     keyBizProfile(id),
     keyPendingBizProfile(id),
     keyCurrentAdSession(id),
-    keyLastAd(id),
-    keyRefineCount(id),
-    keyBillingCityState(id),
-    keyBillingAddress(id),
   ];
 
   // best-effort: apaga todas as chaves conhecidas
