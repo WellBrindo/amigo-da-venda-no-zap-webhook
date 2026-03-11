@@ -1715,43 +1715,33 @@ async function msgMenuAskNewDoc(waId) {
 async function msgMenuAskEditField(waId, context) {
   const field = String(context?.field || "");
   if (field === "billingCityState") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie a *Cidade/UF* que você quer salvar.", "Ex.: Atibaia/SP"].join("
-"));
+    return withMenuHint(["Perfeito! ✅", "", "Me envie a *Cidade/UF* que você quer salvar.", "Ex.: Atibaia/SP"].join("\n"));
   }
   if (field === "billingAddress") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie o *endereço* que você quer salvar.", "Se for só atendimento online, responda: *APENAS ONLINE*"].join("
-"));
+    return withMenuHint(["Perfeito! ✅", "", "Me envie o *endereço* que você quer salvar.", "Se for só atendimento online, responda: *APENAS ONLINE*"].join("\n"));
   }
   if (field === "companyName") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie o *nome da empresa* como você quer que eu salve."].join("
-"));
+    return withMenuHint(["Perfeito! ✅", "", "Me envie o *nome da empresa* como você quer que eu salve."].join("\n"));
   }
   if (field === "whatsapp") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie o *WhatsApp da empresa*."].join("
-"));
+    return withMenuHint(["Perfeito! ✅", "", "Me envie o *WhatsApp da empresa*."].join("\n"));
   }
   if (field === "location") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie o *local de atendimento* da empresa.", "Se for apenas online, responda: *APENAS ATENDIMENTO ONLINE*"].join("
-"));
+    return withMenuHint(["Perfeito! ✅", "", "Me envie o *local de atendimento* da empresa.", "Se for apenas online, responda: *APENAS ATENDIMENTO ONLINE*"].join("\n"));
   }
   if (field === "hours") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie o *horário de atendimento* da empresa."].join("
-"));
+    return withMenuHint(["Perfeito! ✅", "", "Me envie o *horário de atendimento* da empresa."].join("\n"));
   }
   if (field === "socials") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie os links das *redes sociais* separados por vírgula ou uma por linha.", "Ex.: https://instagram.com/seuusuario, https://facebook.com/suaempresa"].join("
-"));
+    return withMenuHint(["Perfeito! ✅", "", "Me envie os links das *redes sociais* separados por vírgula ou uma por linha.", "Ex.: https://instagram.com/seuusuario, https://facebook.com/suaempresa"].join("\n"));
   }
   if (field === "website") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie o link do *site* da empresa."].join("
-"));
+    return withMenuHint(["Perfeito! ✅", "", "Me envie o link do *site* da empresa."].join("\n"));
   }
   if (field === "productList") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie o link do *catálogo / lista de produtos* da empresa."].join("
-"));
+    return withMenuHint(["Perfeito! ✅", "", "Me envie o link do *catálogo / lista de produtos* da empresa."].join("\n"));
   }
-  return withMenuHint(["Perfeito! ✅", "", "Me envie o dado atualizado."].join("
-"));
+  return withMenuHint(["Perfeito! ✅", "", "Me envie o dado atualizado."].join("\n"));
 }
 
 async function msgMenuUrlHelp(waId) {
@@ -2463,8 +2453,7 @@ export async function handleInboundText({ waId, text }) {
     const addr = v.toUpperCase() === "APENAS ONLINE" ? "APENAS ONLINE" : v;
     await setBillingAddress(id, addr);
     await setUserStatus(id, ST.ACTIVE);
-    return reply(withMenuHint(["✅ Pronto! Seus dados de cobrança foram atualizados com sucesso.", "", "Agora você já pode continuar usando o Amigo normalmente. 🚀"].join("
-")));
+    return reply(withMenuHint(["✅ Pronto! Seus dados de cobrança foram atualizados com sucesso.", "", "Agora você já pode continuar usando o Amigo normalmente. 🚀"].join("\n")));
   }
 
   // 7) Pagamento pendente
