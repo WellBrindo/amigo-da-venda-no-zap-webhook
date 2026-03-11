@@ -1312,6 +1312,45 @@ function escapeRegex(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function canonicalizeUrlForCompare(value) {
+  let s = normalizeProfileScalar(value).toLowerCase();
+  if (!s) return "";
+
+  const markdownHref = s.match(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/i)?.[1];
+  if (markdownHref) s = markdownHref;
+
+  s = s.replace(/^https?:\/\//i, "");
+  s = s.replace(/^www\./i, "");
+  s = s.replace(/\/+$/g, "");
+  return s;
+}
+
+function lineContainsEquivalentUrl(line, value) {
+  const target = canonicalizeUrlForCompare(value);
+  if (!target) return false;
+
+  const source = normalizeProfileScalar(line);
+  if (!source) return false;
+
+  const direct = canonicalizeUrlForCompare(source);
+  if (direct && direct.includes(target)) return true;
+
+  const markdownUrls = [...source.matchAll(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/gi)].map((match) => canonicalizeUrlForCompare(match[1]));
+  if (markdownUrls.some((item) => item && item.includes(target))) return true;
+
+  const plainUrls = [...source.matchAll(/https?:\/\/[^\s)]+/gi)].map((match) => canonicalizeUrlForCompare(match[0]));
+  if (plainUrls.some((item) => item && item.includes(target))) return true;
+
+  return canonicalizeUrlForCompare(source.replace(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/gi, "$1")).includes(target);
+}
+
+function normalizeSocialLinksDisplay(adText) {
+  return String(adText || "").replace(
+    /(📸\s*(?:Siga-nos|Nos acompanhe|Acompanhe-nos|Redes sociais?):\s*)(.+)/gi,
+    (full, prefix, content) => `${prefix}${content.replace(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/gi, "$1")}`,
+  );
+}
+
 function textRequestsRemovingCompanyInfo(text) {
   const s = upper(text);
   return /(RETIRA|RETIRAR|REMOVE|REMOVER|SEM|TIRA|OCULTA|OCULTAR|N[ÃA]O COLOCA|NAO COLOCA|N[ÃA]O MOSTRA|NAO MOSTRA)/.test(s)
@@ -1440,6 +1479,7 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   const refinementText = isRefinement ? String(userText || "") : "";
   let text = normalizeBusinessVoice(adText, bizProfile);
   text = normalizeCompanyCtas(text, bizProfile);
+  text = normalizeSocialLinksDisplay(text);
 
   const companyName = normalizeProfileScalar(bizProfile.companyName);
   const website = normalizeUrlLike(normalizeProfileScalar(bizProfile.website));
@@ -1455,7 +1495,7 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   const lines = String(text || "").split("\n").map((line) => String(line || "").trimRight());
   const infoLinesToAdd = [];
 
-  if (website && !textRequestsRemovingField(refinementText, "website") && !hasLineWithText(lines, website)) {
+  if (website && !textRequestsRemovingField(refinementText, "website") && !hasLineWithText(lines, website) && !lines.some((line) => lineContainsEquivalentUrl(line, website))) {
     infoLinesToAdd.push(`🌐 *Site:* ${website}`);
   }
 
@@ -1464,7 +1504,7 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   }
 
   if (socials.length && !textRequestsRemovingField(refinementText, "socials")) {
-    const missingSocials = socials.filter((item) => !hasLineWithText(lines, item));
+    const missingSocials = socials.filter((item) => !hasLineWithText(lines, item) && !lines.some((line) => lineContainsEquivalentUrl(line, item)));
     if (missingSocials.length) {
       infoLinesToAdd.push(`📱 ${missingSocials.join(" | ")}`);
     }
