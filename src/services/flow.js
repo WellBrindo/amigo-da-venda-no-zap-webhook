@@ -1270,23 +1270,11 @@ async function msgInvalidDoc(waId){
 }
 
 async function msgAskBillingCityState(waId){
-  return withMenuHint([
-    "✅ Pagamento confirmado! Seu plano já está ativo.",
-    "",
-    "Agora preciso de uma informação para completar o seu cadastro.",
-    "",
-    "📍 Qual é sua *Cidade/UF*? (ex: Atibaia/SP)",
-  ].join("\n"));
+  return withMenuHint(await getCopyText("FLOW_ASK_BILLING_CITY_STATE", { waId }));
 }
 
 async function msgAskBillingAddress(waId){
-  return withMenuHint([
-    "Perfeito! ✅",
-    "",
-    "Agora me diga seu *endereço* (rua, número, bairro).",
-    "",
-    "Se for apenas atendimento online, responda: *APENAS ONLINE*",
-  ].join("\n"));
+  return withMenuHint(await getCopyText("FLOW_ASK_BILLING_ADDRESS", { waId }));
 }
 
 
@@ -1295,29 +1283,13 @@ async function msgAfterAdAskTemplateChoice(waId, currentMode){
 }
 
 async function msgTemplateSet(waId, mode){
-  if (mode === "FREE") {
-    return `Perfeito! ✅ Vou deixar como padrão a formatação *LIVRE*.
-
-Quando quiser voltar para o modelo FIXO, digite *TEMPLATE*.
-E a qualquer momento você pode digitar *MENU* para ajustar.`;
-  }
-  return `Perfeito! ✅ Vou deixar como padrão o modelo *FIXO (Template)*.
-
-Quando quiser mudar para livre, digite *LIVRE*.
-E a qualquer momento você pode digitar *MENU* para ajustar.`;
+  return await getCopyText(mode === "FREE" ? "FLOW_TEMPLATE_SET_FREE" : "FLOW_TEMPLATE_SET_FIXED", { waId });
 }
 
 
 
 async function msgAskProfileRegistration(waId) {
-  return [
-    "Quer cadastrar os dados da sua empresa para eu usar automaticamente nos próximos anúncios? 🙂",
-    "",
-    "1) Sim, cadastrar agora",
-    "2) Agora não",
-    "",
-    "Assim você não precisa repetir essas informações toda vez. ✅",
-  ].join("\n");
+  return await getCopyText("FLOW_ASK_PROFILE_REGISTRATION", { waId });
 }
 
 
@@ -1653,34 +1625,21 @@ async function msgMenuSubscription(waId) {
     }
   }
 
-  const lines = [
-    "*Minha assinatura*",
-    "",
-    `📦 Plano: ${planName}`,
-    `📌 Status: ${status || "—"}`,
-    `💳 Pagamento: ${paymentMethod === "CARD" ? "Cartão" : paymentMethod === "PIX" ? "PIX" : "—"}`,
-    `📅 Vencimento / renovação: ${formatSubscriptionDueDate({ paymentMethod, validUntil })}`,
-    `📊 Descrições utilizadas: ${used} / ${total || "—"}`,
-    "",
-    "1) Alterar plano",
-    "2) Cancelar plano",
-    "3) Ajuda",
-    "4) Voltar",
-  ];
-
-  return lines.join("\n");
+  return await getCopyText("FLOW_MENU_SUBSCRIPTION", {
+    waId,
+    vars: {
+      planName,
+      status: status || "—",
+      paymentMethodLabel: paymentMethod === "CARD" ? "Cartão" : paymentMethod === "PIX" ? "PIX" : "—",
+      dueDate: formatSubscriptionDueDate({ paymentMethod, validUntil }),
+      used,
+      total: total || "—",
+    },
+  });
 }
 
 async function msgMenuEditRoot(waId) {
-  return [
-    "*Alterar dados preenchidos*",
-    "",
-    "1) Dados pessoais",
-    "2) Dados da empresa",
-    "3) Fluxo FIXO ou LIVRE",
-    "4) Ajuda",
-    "5) Voltar",
-  ].join("\n");
+  return await getCopyText("FLOW_MENU_EDIT_ROOT", { waId });
 }
 
 async function buildPersonalMenuOptions(waId) {
@@ -1701,13 +1660,9 @@ async function buildPersonalMenuOptions(waId) {
 
 async function msgMenuEditPersonal(waId) {
   const options = await buildPersonalMenuOptions(waId);
-  const lines = ["*Dados pessoais preenchidos*", ""];
-  options.forEach((item) => lines.push(`${item.number}) ${item.label}`));
-  lines.push("");
-  lines.push("5) Voltar");
-  lines.push("");
-  lines.push("Responda com o número do dado que você quer alterar.");
-  return lines.join("\n");
+  const optionsText = options.map((item) => `${item.number}) ${item.label}`).join("
+");
+  return await getCopyText("FLOW_MENU_EDIT_PERSONAL", { waId, vars: { options: optionsText } });
 }
 
 async function buildCompanyMenuOptions(waId) {
@@ -1726,41 +1681,29 @@ async function buildCompanyMenuOptions(waId) {
 
 async function msgMenuEditCompany(waId) {
   const options = await buildCompanyMenuOptions(waId);
-  const lines = ["*Dados da empresa preenchidos*", ""];
-  options.forEach((item) => lines.push(`${item.number}) ${item.label}`));
-  lines.push("");
-  lines.push("8) Voltar");
-  lines.push("");
-  lines.push("Responda com o número do dado que você quer alterar.");
-  return lines.join("\n");
+  const optionsText = options.map((item) => `${item.number}) ${item.label}`).join("
+");
+  return await getCopyText("FLOW_MENU_EDIT_COMPANY", { waId, vars: { options: optionsText } });
 }
 
 async function msgMenuEditTemplate(waId) {
   const mode = await getTemplateMode(waId);
-  return [
-    "*Fluxo de anúncio*",
-    "",
-    `Modo atual: *${mode === "FREE" ? "LIVRE" : "FIXO"}*`,
-    "",
-    "1) Usar anúncio FIXO",
-    "2) Usar anúncio LIVRE",
-    "3) Voltar",
-  ].join("\n");
+  return await getCopyText("FLOW_MENU_EDIT_TEMPLATE", { waId, vars: { mode: mode === "FREE" ? "LIVRE" : "FIXO" } });
 }
 
 async function msgMenuAskEditField(waId, context) {
   const field = String(context?.field || "");
   if (field === "fullName") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie seu *nome completo* atualizado."].join("\n"));
+    return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_FULLNAME", { waId }));
   }
   if (field === "docMasked") {
-    return withMenuHint(["Certo! ✅", "", "Me envie seu *CPF ou CNPJ* (somente números) para atualizar."].join("\n"));
+    return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_DOC", { waId }));
   }
   if (field === "billingCityState") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie a *Cidade/UF* que você quer salvar.", "Ex.: Atibaia/SP"].join("\n"));
+    return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_BILLING_CITY_STATE", { waId }));
   }
   if (field === "billingAddress") {
-    return withMenuHint(["Perfeito! ✅", "", "Me envie o *endereço* que você quer salvar.", "Se for somente online, responda *APENAS ONLINE*."].join("\n"));
+    return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_BILLING_ADDRESS", { waId }));
   }
 
   const fieldLabels = {
@@ -1773,7 +1716,7 @@ async function msgMenuAskEditField(waId, context) {
     productList: "catálogo ou lista de produtos",
   };
   const label = fieldLabels[field] || "dado";
-  return withMenuHint(["Perfeito! ✅", "", `Me envie o novo valor para *${label}*.`].join("\n"));
+  return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_GENERIC", { waId, vars: { label } }));
 }
 
 async function msgMenuProfileView(waId) {
@@ -2490,7 +2433,7 @@ export async function handleInboundText({ waId, text }) {
     await clearPrevStatus(id);
     await setUserStatus(id, prev || ST.ACTIVE);
 
-    return reply(withMenuHint("✅ Perfeito! Seus dados foram atualizados com sucesso."));
+    return reply(withMenuHint(await getCopyText("FLOW_BILLING_UPDATED_SUCCESS", { waId: id })));
   }
 
   // 7) Pagamento pendente
