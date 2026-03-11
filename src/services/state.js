@@ -75,6 +75,7 @@ const keyAsaasSubscriptionId = (waId) => `user:${waId}:asaasSubscriptionId`;
 
 // ===================== MENU (bot) =====================
 const keyMenuPrevStatus = (waId) => `user:${waId}:menuPrevStatus`;
+const keyMenuEditContext = (waId) => `user:${waId}:menuEditContext`;
 
 // ===================== CARD (assinatura) =====================
 // Data (YYYY-MM-DD) até quando o usuário mantém acesso após cancelar recorrência.
@@ -837,6 +838,29 @@ export async function clearMenuPrevStatus(waId) {
   return true;
 }
 
+export async function setMenuEditContext(waId, context) {
+  await indexUser(waId);
+  const payload = context && typeof context === "object" ? context : {};
+  if (!Object.keys(payload).length) {
+    await redisDel(keyMenuEditContext(waId));
+    return null;
+  }
+  await redisSet(keyMenuEditContext(waId), safeJsonStringify(payload));
+  return payload;
+}
+
+export async function getMenuEditContext(waId) {
+  const raw = await redisGet(keyMenuEditContext(waId));
+  const parsed = safeJsonParse(raw);
+  return parsed && typeof parsed === "object" ? parsed : null;
+}
+
+export async function clearMenuEditContext(waId) {
+  await indexUser(waId);
+  await redisDel(keyMenuEditContext(waId));
+  return true;
+}
+
 
 // ===================== Prev Status (transitórios) =====================
 export async function setPrevStatus(waId, prevStatus) {
@@ -972,6 +996,7 @@ export async function resetUserToTrial(waId) {
     setAsaasCustomerId(waId, ""), // já faz DEL internamente
     setAsaasSubscriptionId(waId, ""), // já faz DEL internamente
     clearMenuPrevStatus(waId),
+    clearMenuEditContext(waId),
     clearPrevStatus(waId),
     clearBizProfile(waId),
     clearPendingBizProfile(waId),
@@ -1005,16 +1030,15 @@ export async function resetUserAsNew(waId) {
     keyDocLast4(id),
     keyDocLegacy(id),
     keyPaymentMethod(id),
-    keyBillingCityState(id),
-    keyBillingAddress(id),
     keyAsaasCustomerId(id),
     keyAsaasSubscriptionId(id),
     keyMenuPrevStatus(id),
+    keyMenuEditContext(id),
+    keyBillingCityState(id),
+    keyBillingAddress(id),
     keyCardValidUntil(id),
     keyCardCanceledAt(id),
     keyPrevStatus(id),
-    keyLastAd(id),
-    keyRefineCount(id),
     keyBizProfile(id),
     keyPendingBizProfile(id),
     keyCurrentAdSession(id),
