@@ -228,8 +228,7 @@ function socialPreviewList(socials) {
 
 function splitSocialInputs(value) {
   return String(value || "")
-    .split(/[
-,;]+/)
+    .split(/[\n,;]+/)
     .map((item) => normalizeUrlLike(String(item || "").trim()))
     .filter(Boolean);
 }
