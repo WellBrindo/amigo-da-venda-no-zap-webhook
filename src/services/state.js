@@ -191,7 +191,7 @@ function normalizePhoneBR(value) {
 }
 
 function normalizeUrlStored(value, { social = false } = {}) {
-  let text = compactInnerWhitespace(value).replace(/\/g, "/");
+  let text = compactInnerWhitespace(value).replace(/\\/g, "/");
   if (!text) return "";
 
   if (social && text.startsWith("@")) {
