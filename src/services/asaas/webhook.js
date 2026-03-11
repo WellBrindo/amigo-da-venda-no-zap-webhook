@@ -8,9 +8,11 @@ import {
   resetUserTrialUsed,
   getCardValidUntil,
   setCardValidUntil,
+  getBillingCityState,
+  getBillingAddress,
 } from "../state.js";
 
-
+import { sendWhatsAppText } from "../whatsapp.js";
 import { recordAsaasEvent } from "./ledger.js";
 /**
  * Webhook handler do Asaas
@@ -56,6 +58,39 @@ export async function handleAsaasWebhookEvent(body) {
 
       await resetUserQuotaUsed(waId);
       await resetUserTrialUsed(waId);
+
+      const [billingCityState, billingAddress] = await Promise.all([
+        getBillingCityState(waId),
+        getBillingAddress(waId),
+      ]);
+
+      if (!billingCityState || !billingAddress) {
+        const nextStatus = billingCityState ? "WAIT_BILLING_ADDRESS" : "WAIT_BILLING_CITY_STATE";
+        await setUserStatus(waId, nextStatus);
+
+        const followupText = billingCityState
+          ? "✅ Pagamento confirmado! Seu plano já foi liberado. 🚀\n\nAgora me diga seu *endereço* (rua, número, bairro).\n\nSe for apenas atendimento online, responda: *APENAS ONLINE*\n\nA qualquer momento, você pode digitar *MENU* para acessar as opções de configuração."
+          : "✅ Pagamento confirmado! Seu plano já foi liberado. 🚀\n\nAgora preciso só de 2 informações para finalizar seu cadastro de cobrança.\n\n📍 Qual é sua *Cidade/UF*? (ex: Atibaia/SP)\n\nA qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.";
+
+        try {
+          await sendWhatsAppText({ to: waId, text: followupText });
+        } catch (sendErr) {
+          console.error("[ASAAS_WEBHOOK] Falha ao enviar follow-up pós-pagamento:", {
+            waId,
+            error: sendErr?.message || String(sendErr),
+          });
+        }
+
+        console.log("[ASAAS_WEBHOOK] Pagamento confirmado com pendência de cadastro:", {
+          waId,
+          event,
+          plan: plan || "NONE",
+          nextStatus,
+        });
+
+        return { ok: true, statusSetTo: nextStatus };
+      }
+
       await setUserStatus(waId, "ACTIVE");
 
       console.log("[ASAAS_WEBHOOK] Usuário ativado:", {
