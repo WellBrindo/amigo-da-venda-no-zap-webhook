@@ -1660,8 +1660,7 @@ async function buildPersonalMenuOptions(waId) {
 
 async function msgMenuEditPersonal(waId) {
   const options = await buildPersonalMenuOptions(waId);
-  const optionsText = options.map((item) => `${item.number}) ${item.label}`).join("
-");
+  const optionsText = options.map((item) => `${item.number}) ${item.label}`).join("\n");
   return await getCopyText("FLOW_MENU_EDIT_PERSONAL", { waId, vars: { options: optionsText } });
 }
 
@@ -1681,8 +1680,7 @@ async function buildCompanyMenuOptions(waId) {
 
 async function msgMenuEditCompany(waId) {
   const options = await buildCompanyMenuOptions(waId);
-  const optionsText = options.map((item) => `${item.number}) ${item.label}`).join("
-");
+  const optionsText = options.map((item) => `${item.number}) ${item.label}`).join("\n");
   return await getCopyText("FLOW_MENU_EDIT_COMPANY", { waId, vars: { options: optionsText } });
 }
 
