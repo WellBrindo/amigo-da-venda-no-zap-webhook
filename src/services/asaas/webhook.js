@@ -10,6 +10,7 @@ import {
   setCardValidUntil,
   getBillingCityState,
   getBillingAddress,
+  setPrevStatus,
 } from "../state.js";
 
 import { sendWhatsAppText } from "../meta/whatsapp.js";
@@ -64,31 +65,44 @@ export async function handleAsaasWebhookEvent(body) {
         getBillingAddress(waId),
       ]);
 
-      if (!billingCityState || !billingAddress) {
-        const nextStatus = billingCityState ? "WAIT_BILLING_ADDRESS" : "WAIT_BILLING_CITY_STATE";
-        await setUserStatus(waId, nextStatus);
+      if (!billingCityState) {
+        await setPrevStatus(waId, "ACTIVE");
+        await setUserStatus(waId, "WAIT_BILLING_CITY_STATE");
+        await sendWhatsAppText({
+          to: waId,
+          text: [
+            "✅ Pagamento confirmado! Seu plano já está ativo.",
+            "",
+            "Agora preciso de uma informação para completar o seu cadastro.",
+            "",
+            "📍 Qual é sua *Cidade/UF*? (ex: Atibaia/SP)",
+            "",
+            "A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.",
+          ].join("\n"),
+        }).catch((err) => console.error("[ASAAS_WEBHOOK_SEND_CITY_ERROR]", err?.message || err));
 
-        const followupText = billingCityState
-          ? "✅ Pagamento confirmado! Seu plano já foi liberado. 🚀\n\nAgora me diga seu *endereço* (rua, número, bairro).\n\nSe for apenas atendimento online, responda: *APENAS ONLINE*\n\nA qualquer momento, você pode digitar *MENU* para acessar as opções de configuração."
-          : "✅ Pagamento confirmado! Seu plano já foi liberado. 🚀\n\nAgora preciso só de 2 informações para finalizar seu cadastro de cobrança.\n\n📍 Qual é sua *Cidade/UF*? (ex: Atibaia/SP)\n\nA qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.";
+        console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando cidade/UF:", { waId, event, plan: plan || "NONE" });
+        return { ok: true, statusSetTo: "WAIT_BILLING_CITY_STATE" };
+      }
 
-        try {
-          await sendWhatsAppText({ to: waId, text: followupText });
-        } catch (sendErr) {
-          console.error("[ASAAS_WEBHOOK] Falha ao enviar follow-up pós-pagamento:", {
-            waId,
-            error: sendErr?.message || String(sendErr),
-          });
-        }
+      if (!billingAddress) {
+        await setPrevStatus(waId, "ACTIVE");
+        await setUserStatus(waId, "WAIT_BILLING_ADDRESS");
+        await sendWhatsAppText({
+          to: waId,
+          text: [
+            "✅ Pagamento confirmado! Seu plano já está ativo.",
+            "",
+            "Agora me diga seu *endereço* (rua, número, bairro).",
+            "",
+            "Se for apenas atendimento online, responda: *APENAS ONLINE*",
+            "",
+            "A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.",
+          ].join("\n"),
+        }).catch((err) => console.error("[ASAAS_WEBHOOK_SEND_ADDRESS_ERROR]", err?.message || err));
 
-        console.log("[ASAAS_WEBHOOK] Pagamento confirmado com pendência de cadastro:", {
-          waId,
-          event,
-          plan: plan || "NONE",
-          nextStatus,
-        });
-
-        return { ok: true, statusSetTo: nextStatus };
+        console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando endereço:", { waId, event, plan: plan || "NONE" });
+        return { ok: true, statusSetTo: "WAIT_BILLING_ADDRESS" };
       }
 
       await setUserStatus(waId, "ACTIVE");
