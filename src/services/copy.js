@@ -127,7 +127,7 @@ Responda com *1*, *2* ou *3*.`,
 
   // Vars: planTxt (opcional)
   FLOW_PAYMENT_PENDING:
-    "Seu pagamento ainda está *pendente* no Asaas. {{planTxt}}\n\nAssim que confirmar, eu libero automaticamente. 🚀",
+    "Seu pagamento ainda está *pendente* no Asaas. {{planTxt}}\n\nAssim que confirmar, eu libero automaticamente. 🚀\n\nSe quiser, responda *2* para *mudar a forma de pagamento*.",
 
   FLOW_QUOTA_REACHED_PREFIX: "Você atingiu seu limite mensal 😅",
 
@@ -160,7 +160,7 @@ Responda com *1*, *2* ou *3*.`,
   // FLOW — MENU (comando "MENU")
   // FLOW — MENU (comando "MENU")
 FLOW_MENU_MAIN:
-  "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar para Anuncio Fixo\n3) Alterar para Anuncio Livre\n4) Planos\n5) Cancelar plano (cartão)\n6) Alterar nome\n7) Alterar CPF/CNPJ\n8) Ajuda\n9) Elogios/Solicitações/Reclamações\n10) Instagram\n11) Dados da empresa (ver/atualizar)\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
+  "MENU — Amigo das Vendas 📌\n\n1) Minha assinatura\n2) Alterar dados preenchidos\n3) Visualizar planos\n4) Ajuda\n\nResponda com o número.\n\nSe quiser sair do menu, é só mandar sua próxima descrição 🙂",
 
 // FLOW — MENU (Dados da empresa)
 FLOW_MENU_PROFILE_VIEW_TITLE: "📇 *Dados da empresa*",
