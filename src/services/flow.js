@@ -61,6 +61,9 @@ import {
   setMenuPrevStatus,
   getMenuPrevStatus,
   clearMenuPrevStatus,
+  setMenuEditContext,
+  getMenuEditContext,
+  clearMenuEditContext,
   setPrevStatus,
   getPrevStatus,
   clearPrevStatus,
@@ -110,6 +113,12 @@ const ST = Object.freeze({
   WAIT_BILLING_ADDRESS: "WAIT_BILLING_ADDRESS",
 
   WAIT_MENU: "WAIT_MENU",
+  WAIT_MENU_SUBSCRIPTION: "WAIT_MENU_SUBSCRIPTION",
+  WAIT_MENU_EDIT_ROOT: "WAIT_MENU_EDIT_ROOT",
+  WAIT_MENU_EDIT_PERSONAL: "WAIT_MENU_EDIT_PERSONAL",
+  WAIT_MENU_EDIT_COMPANY: "WAIT_MENU_EDIT_COMPANY",
+  WAIT_MENU_EDIT_FLOW: "WAIT_MENU_EDIT_FLOW",
+  WAIT_MENU_EDIT_FIELD: "WAIT_MENU_EDIT_FIELD",
   WAIT_MENU_NEW_NAME: "WAIT_MENU_NEW_NAME",
   WAIT_MENU_NEW_DOC: "WAIT_MENU_NEW_DOC",
   WAIT_MENU_PROFILE: "WAIT_MENU_PROFILE",
@@ -152,6 +161,15 @@ function normalizeChoice(t) {
   return "";
 }
 
+function normalizeChoiceMax(t, max = 9) {
+  const s = cleanText(t);
+  const m = s.match(/^(\d{1,2})/);
+  if (!m) return "";
+  const n = Number(m[1]);
+  if (!Number.isInteger(n) || n < 1 || n > Number(max || 9)) return "";
+  return String(n);
+}
+
 function wantsTemplateCommand(t) {
   const s = upper(t);
   return s === "TEMPLATE" || s === "FIXO" || s === "FIXED";
@@ -176,6 +194,48 @@ function wantsOkCommand(t) {
 function wantsSkipCommand(t) {
   const s = upper(t);
   return s === "PULAR" || s === "PULA" || s === "SKIP" || s === "0" || s === "-" || s === "NAO" || s === "NÃO";
+}
+
+function wantsChangePaymentMethodCommand(t) {
+  const s = upper(t);
+  return s === "2" || s.includes("MUDAR FORMA") || s.includes("TROCAR FORMA") || s.includes("ALTERAR FORMA") || s.includes("MUDAR PAGAMENTO");
+}
+
+function withMenuHint(text) {
+  const msg = String(text || "").trim();
+  if (!msg) return "";
+  if (/MENU/i.test(msg)) return msg;
+  return `${msg}
+
+A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.`;
+}
+
+function menuDisplayValue(value, fallback = "Não informado") {
+  const s = String(value ?? "").trim();
+  return s || fallback;
+}
+
+function docMenuPreview(doc) {
+  if (!doc || !doc.docType) return "CPF/CNPJ (não informado)";
+  return `${doc.docType} (cadastrado)`;
+}
+
+function socialPreviewList(socials) {
+  return ensureArray(socials)
+    .map((item) => normalizeUrlLike(String(item || "").trim()))
+    .filter(Boolean);
+}
+
+function splitSocialInputs(value) {
+  return String(value || "")
+    .split(/[
+,;]+/)
+    .map((item) => normalizeUrlLike(String(item || "").trim()))
+    .filter(Boolean);
+}
+
+function formatPaymentMethodLabel(method) {
+  return method === "CARD" ? "Cartão" : method === "PIX" ? "PIX" : "Não definido";
 }
 
 function wantsFinishCommand(t) {
@@ -1185,13 +1245,13 @@ ${userText}`);
 
 // -------------------- Copy / Mensagens --------------------
 async function msgAskName(waId){
-  return await getCopyText("FLOW_ASK_NAME", { waId });
+  return withMenuHint(await getCopyText("FLOW_ASK_NAME", { waId }));
 }
 
 async function msgAskProduct(waId){
   const fullName = await getUserFullName(waId);
   const firstName = firstNameFromFullName(fullName);
-  return await getCopyText("FLOW_ASK_PRODUCT", { waId, vars: { firstName } });
+  return withMenuHint(await getCopyText("FLOW_ASK_PRODUCT", { waId, vars: { firstName } }));
 }
 
 async function msgTrialOverAndPlans() {
@@ -1229,17 +1289,17 @@ async function msgPlansOnly() {
 }
 
 async function msgAskPaymentMethod(waId, plan){
-  return await getCopyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", {
+  return withMenuHint(await getCopyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", {
     waId,
     vars: {
       planName: plan?.name || "",
       planPrice: plan?.priceCents ? moneyBRFromCents(plan.priceCents) : "",
     },
-  });
+  }));
 }
 
 async function msgAskDoc(waId){
-  return await getCopyText("FLOW_ASK_DOC", { waId });
+  return withMenuHint(await getCopyText("FLOW_ASK_DOC", { waId }));
 }
 
 async function msgInvalidDoc(waId){
@@ -1247,11 +1307,11 @@ async function msgInvalidDoc(waId){
 }
 
 async function msgAskBillingCityState(waId){
-  return "Perfeito! ✅ Agora preciso só de mais 2 informações para emitir sua cobrança.\n\n📍 Qual é sua *Cidade/UF*? (ex: Atibaia/SP)";
+  return withMenuHint("Perfeito! ✅ Agora preciso só de mais 2 informações para finalizar seu cadastro de cobrança.\n\n📍 Qual é sua *Cidade/UF*? (ex: Atibaia/SP)");
 }
 
 async function msgAskBillingAddress(waId){
-  return "Ótimo! ✅ Agora me diga seu *endereço* (rua, número, bairro).\n\nSe for apenas atendimento online, responda: *APENAS ONLINE*";
+  return withMenuHint("Ótimo! ✅ Agora me diga seu *endereço* (rua, número, bairro).\n\nSe for apenas atendimento online, responda: *APENAS ONLINE*");
 }
 
 
@@ -1275,14 +1335,14 @@ E a qualquer momento você pode digitar *MENU* para ajustar.`;
 
 
 async function msgAskProfileRegistration(waId) {
-  return [
+  return withMenuHint([
     "Quer cadastrar os dados da sua empresa para eu usar automaticamente nos próximos anúncios? 🙂",
     "",
     "1) Sim, cadastrar agora",
     "2) Agora não",
     "",
     "Assim você não precisa repetir essas informações toda vez. ✅",
-  ].join("\n");
+  ].join("\n"));
 }
 
 
@@ -1310,45 +1370,6 @@ function normalizeProfileScalar(value) {
 
 function escapeRegex(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function canonicalizeUrlForCompare(value) {
-  let s = normalizeProfileScalar(value).toLowerCase();
-  if (!s) return "";
-
-  const markdownHref = s.match(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/i)?.[1];
-  if (markdownHref) s = markdownHref;
-
-  s = s.replace(/^https?:\/\//i, "");
-  s = s.replace(/^www\./i, "");
-  s = s.replace(/\/+$/g, "");
-  return s;
-}
-
-function lineContainsEquivalentUrl(line, value) {
-  const target = canonicalizeUrlForCompare(value);
-  if (!target) return false;
-
-  const source = normalizeProfileScalar(line);
-  if (!source) return false;
-
-  const direct = canonicalizeUrlForCompare(source);
-  if (direct && direct.includes(target)) return true;
-
-  const markdownUrls = [...source.matchAll(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/gi)].map((match) => canonicalizeUrlForCompare(match[1]));
-  if (markdownUrls.some((item) => item && item.includes(target))) return true;
-
-  const plainUrls = [...source.matchAll(/https?:\/\/[^\s)]+/gi)].map((match) => canonicalizeUrlForCompare(match[0]));
-  if (plainUrls.some((item) => item && item.includes(target))) return true;
-
-  return canonicalizeUrlForCompare(source.replace(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/gi, "$1")).includes(target);
-}
-
-function normalizeSocialLinksDisplay(adText) {
-  return String(adText || "").replace(
-    /(📸\s*(?:Siga-nos|Nos acompanhe|Acompanhe-nos|Redes sociais?):\s*)(.+)/gi,
-    (full, prefix, content) => `${prefix}${content.replace(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/gi, "$1")}`,
-  );
 }
 
 function textRequestsRemovingCompanyInfo(text) {
@@ -1479,7 +1500,6 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   const refinementText = isRefinement ? String(userText || "") : "";
   let text = normalizeBusinessVoice(adText, bizProfile);
   text = normalizeCompanyCtas(text, bizProfile);
-  text = normalizeSocialLinksDisplay(text);
 
   const companyName = normalizeProfileScalar(bizProfile.companyName);
   const website = normalizeUrlLike(normalizeProfileScalar(bizProfile.website));
@@ -1495,7 +1515,7 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   const lines = String(text || "").split("\n").map((line) => String(line || "").trimRight());
   const infoLinesToAdd = [];
 
-  if (website && !textRequestsRemovingField(refinementText, "website") && !hasLineWithText(lines, website) && !lines.some((line) => lineContainsEquivalentUrl(line, website))) {
+  if (website && !textRequestsRemovingField(refinementText, "website") && !hasLineWithText(lines, website)) {
     infoLinesToAdd.push(`🌐 *Site:* ${website}`);
   }
 
@@ -1504,7 +1524,7 @@ function applyPersistentBusinessInfo(adText, bizProfile, userText, isRefinement)
   }
 
   if (socials.length && !textRequestsRemovingField(refinementText, "socials")) {
-    const missingSocials = socials.filter((item) => !hasLineWithText(lines, item) && !lines.some((line) => lineContainsEquivalentUrl(line, item)));
+    const missingSocials = socials.filter((item) => !hasLineWithText(lines, item));
     if (missingSocials.length) {
       infoLinesToAdd.push(`📱 ${missingSocials.join(" | ")}`);
     }
@@ -1581,68 +1601,176 @@ async function msgMenuMain(waId) {
   return await getCopyText("FLOW_MENU_MAIN", { waId });
 }
 
-async function msgMenuProfileView(waId) {
-  const biz = await getBizProfile(waId);
-  const lines = [];
-  lines.push(await getCopyText("FLOW_MENU_PROFILE_VIEW_TITLE", { waId }));
-  lines.push("");
+async function msgMenuSubscriptionMenu(waId) {
+  const status = await getUserStatus(waId);
+  const planCode = await getUserPlan(waId);
+  const paymentMethod = await getPaymentMethod(waId);
+  const doc = await getUserDocMasked(waId);
+  const validUntil = await getCardValidUntil(waId);
+  const usedTrial = await getUserTrialUsed(waId);
+  const usedQuota = await getUserQuotaUsed(waId);
 
-  if (!biz || typeof biz !== "object" || Object.keys(biz).length === 0) {
-    lines.push(await getCopyText("FLOW_MENU_PROFILE_EMPTY", { waId }));
-  } else {
-    // Mostra o que está salvo (visualização)
-    const get = (k) => {
-      const v = biz?.[k];
-      if (v === undefined || v === null) return "";
-      if (Array.isArray(v)) return v.filter(Boolean).join(", ");
-      return String(v || "").trim();
-    };
-
-    const companyName = get("companyName");
-    const whatsapp = normalizeWhatsappLike(get("whatsapp"));
-    const address = get("address");
-    const hours = get("hours");
-    const socials = ensureArray(biz?.socials).map((x) => normalizeUrlLike(String(x || "").trim())).filter(Boolean).join(", ");
-    const website = normalizeUrlLike(get("website"));
-    const productsUrl = get("productsUrl");
-
-    if (companyName) lines.push(`🏢 Nome: ${companyName}`);
-    if (whatsapp) lines.push(`📲 WhatsApp: ${whatsapp}`);
-    if (address) lines.push(`📍 Endereço: ${address}`);
-    if (hours) lines.push(`🕒 Horário: ${hours}`);
-    if (socials) lines.push(`📱 Redes: ${socials}`);
-    if (website) lines.push(`🌐 Site: ${website}`);
-    if (productsUrl) lines.push(`🛍️ Catálogo: ${productsUrl}`);
-
-    if (lines.length === 2) {
-      // só título e linha em branco
-      lines.push(await getCopyText("FLOW_MENU_PROFILE_EMPTY", { waId }));
-    }
+  let planName = "Trial";
+  let total = TRIAL_LIMIT;
+  if (planCode) {
+    const plans = await getMenuPlans();
+    const plan = (plans || []).find((p) => p.code === planCode) || null;
+    planName = plan?.name || planCode;
+    total = Number(plan?.monthlyQuota || 0) || 0;
   }
 
-  lines.push("");
-  lines.push(await getCopyText("FLOW_MENU_PROFILE_ACTIONS", { waId }));
+  const used = planCode ? usedQuota : usedTrial;
+  const renewalBr = formatDateBR(validUntil) || "Não disponível";
+  const lines = [
+    "*Minha assinatura*",
+    "",
+    `📦 Plano: ${planName}`,
+    `📈 Descrições utilizadas: ${used} / ${total || "—"}`,
+    `💳 Forma de pagamento: ${formatPaymentMethodLabel(paymentMethod)}`,
+    `🗓️ Data de vencimento/renovação: ${renewalBr}`,
+    `🪪 Documento: ${docMenuPreview(doc)}`,
+    status === ST.PAYMENT_PENDING ? "⏳ Status: pagamento pendente" : status === ST.ACTIVE ? "✅ Status: ativo" : `ℹ️ Status: ${status}`,
+    "",
+    "1) Alterar plano",
+    "2) Cancelar plano",
+    "3) Ajuda",
+    "4) Voltar",
+  ];
   return lines.join("\n");
 }
 
+async function msgMenuEditRoot() {
+  return [
+    "*Alterar dados preenchidos*",
+    "",
+    "1) Dados pessoais",
+    "2) Dados da empresa",
+    "3) Fluxo FIXO ou LIVRE",
+    "4) Ajuda",
+    "5) Voltar",
+  ].join("\n");
+}
+
+async function msgMenuEditPersonal(waId) {
+  const [fullName, doc, billingCityState, billingAddress] = await Promise.all([
+    getUserFullName(waId),
+    getUserDocMasked(waId),
+    getBillingCityState(waId),
+    getBillingAddress(waId),
+  ]);
+
+  return [
+    "*Dados pessoais preenchidos*",
+    "",
+    `1) ${menuDisplayValue(fullName)}`,
+    `2) ${docMenuPreview(doc)} — não exibimos o número por segurança`,
+    `3) ${menuDisplayValue(billingCityState)}`,
+    `4) ${menuDisplayValue(billingAddress)}`,
+    "5) Voltar",
+    "",
+    "Responda com o número do dado que você quer alterar.",
+  ].join("\n");
+}
+
+async function msgMenuEditCompany(waId) {
+  const biz = (await getBizProfile(waId)) || {};
+  const socials = socialPreviewList(biz.socials).join(", ");
+  return [
+    "*Dados da empresa preenchidos*",
+    "",
+    `1) Nome da empresa: ${menuDisplayValue(biz.companyName)}`,
+    `2) WhatsApp da empresa: ${menuDisplayValue(normalizeWhatsappLike(String(biz.whatsapp || "")))}`,
+    `3) Local de atendimento: ${menuDisplayValue(biz.location || biz.address || biz.serviceArea)}`,
+    `4) Horário de atendimento: ${menuDisplayValue(biz.hours)}`,
+    `5) Redes sociais: ${menuDisplayValue(socials)}`,
+    `6) Site: ${menuDisplayValue(normalizeUrlLike(String(biz.website || "")))}`,
+    `7) Catálogo / lista de produtos: ${menuDisplayValue(normalizeUrlLike(String(biz.productList || biz.productsUrl || "")) || String(biz.productList || biz.productsUrl || ""))}`,
+    "8) Voltar",
+    "",
+    "Responda com o número do dado que você quer alterar.",
+  ].join("\n");
+}
+
+async function msgMenuEditFlow(waId) {
+  const mode = await getTemplateMode(waId);
+  const current = mode === "FREE" ? "LIVRE" : "FIXO";
+  return [
+    "*Fluxo de anúncio*",
+    "",
+    `Atual: ${current}`,
+    "",
+    "1) Usar anúncio FIXO",
+    "2) Usar anúncio LIVRE",
+    "3) Voltar",
+  ].join("\n");
+}
+
 async function msgMenuAskNewName(waId) {
-  return await getCopyText("FLOW_MENU_ASK_NEW_NAME", { waId });
+  return withMenuHint(await getCopyText("FLOW_MENU_ASK_NEW_NAME", { waId }));
 }
 
 async function msgMenuAskNewDoc(waId) {
-  return await getCopyText("FLOW_MENU_ASK_NEW_DOC", { waId });
+  return withMenuHint(await getCopyText("FLOW_MENU_ASK_NEW_DOC", { waId }));
+}
+
+async function msgMenuAskEditField(waId, context) {
+  const field = String(context?.field || "");
+  if (field === "billingCityState") {
+    return withMenuHint("Perfeito! ✅
+
+Me envie a *Cidade/UF* que você quer salvar.
+Ex.: Atibaia/SP");
+  }
+  if (field === "billingAddress") {
+    return withMenuHint("Perfeito! ✅
+
+Me envie o *endereço* que você quer salvar.
+Se for só atendimento online, responda: *APENAS ONLINE*");
+  }
+  if (field === "companyName") {
+    return withMenuHint("Perfeito! ✅
+
+Me envie o *nome da empresa* como você quer que eu salve.");
+  }
+  if (field === "whatsapp") {
+    return withMenuHint("Perfeito! ✅
+
+Me envie o *WhatsApp da empresa*.");
+  }
+  if (field === "location") {
+    return withMenuHint("Perfeito! ✅
+
+Me envie o *local de atendimento* da empresa.
+Se for apenas online, responda: *APENAS ATENDIMENTO ONLINE*");
+  }
+  if (field === "hours") {
+    return withMenuHint("Perfeito! ✅
+
+Me envie o *horário de atendimento* da empresa.");
+  }
+  if (field === "socials") {
+    return withMenuHint("Perfeito! ✅
+
+Me envie os links das *redes sociais* separados por vírgula ou uma por linha.
+Ex.: https://instagram.com/seuusuario, https://facebook.com/suaempresa");
+  }
+  if (field === "website") {
+    return withMenuHint("Perfeito! ✅
+
+Me envie o link do *site* da empresa.");
+  }
+  if (field === "productList") {
+    return withMenuHint("Perfeito! ✅
+
+Me envie o link do *catálogo / lista de produtos* da empresa.");
+  }
+  return withMenuHint("Perfeito! ✅
+
+Me envie o dado atualizado.");
 }
 
 async function msgMenuUrlHelp(waId) {
   return await getCopyText("FLOW_MENU_URL_HELP", { waId });
-}
-
-async function msgMenuUrlFeedback(waId) {
-  return await getCopyText("FLOW_MENU_URL_FEEDBACK", { waId });
-}
-
-async function msgMenuUrlInstagram(waId) {
-  return await getCopyText("FLOW_MENU_URL_INSTAGRAM", { waId });
 }
 
 async function msgMenuCancelNotFound(waId) {
@@ -1656,68 +1784,53 @@ async function msgMenuCancelOk(waId, { renewalBr = "", daysLeft = "" } = {}) {
   });
 }
 
-async function msgMenuMySubscription(waId) {
-  const status = await getUserStatus(waId);
-
-  // TRIAL: mostra como plano Trial (5 grátis) mesmo sem user:plan
-  const planCodeForTrialCheck = await getUserPlan(waId);
-  if (
-    status === ST.TRIAL ||
-    status === ST.WAIT_NAME ||
-    status === ST.WAIT_PRODUCT ||
-    status === ST.WAIT_MENU ||
-    status === ST.WAIT_TEMPLATE_MODE ||
-    status === ST.WAIT_SAVE_PROFILE
-  ) {
-    // Se ainda não há plano pago associado, tratamos como Trial para a tela de assinatura
-    if (!planCodeForTrialCheck) {
-      const usedTrial = await getUserTrialUsed(waId);
-      const base = [
-        "*Minha assinatura*",
-        "",
-        "📦 Plano: Trial",
-        `📊 Uso no mês: ${usedTrial} / ${TRIAL_LIMIT}`,
-        "📅 Renovação (Cartão): — — faltam — dia(s)",
-        "",
-        "Instagram: https://www.instagram.com/amigo.das.vendas/",
-      ].join("\n");
-      return base;
-    }
-    // Se houver plano pago associado mesmo em estados iniciais, seguimos com o fluxo de plano pago abaixo.
-  }
-
-  const planCode = await getUserPlan(waId);
-
-  // ✅ ACTIVE sem plano: instruir usuário a regularizar
-  if (status === ST.ACTIVE && !planCode) {
-    return await getCopyText("FLOW_ACTIVE_NO_PLAN_ERROR", { waId });
-  }
-
-  const plans = await getMenuPlans();
-  const plan = (plans || []).find((p) => p.code === planCode) || null;
-
-  const planName = plan?.name || (planCode ? String(planCode) : "Sem plano");
-  const quotaTotal = Number(plan?.monthlyQuota || 0) || 0;
-  const used = await getUserQuotaUsed(waId);
-
-  // renovação do cartão (quando existir)
-  const validUntil = await getCardValidUntil(waId);
-  const renewalBr = formatDateBR(validUntil) || "—";
-  const days = daysUntilISO(validUntil);
-  const daysLeft = typeof days === "number" ? String(days) : "—";
-
-  const base = [
-    "*Minha assinatura*",
+async function msgPaymentReady({ waId, method, url }) {
+  const isCard = method === "CARD";
+  const line1 = isCard
+    ? "✅ Pronto! Agora é só concluir no *Cartão* (assinatura)."
+    : "✅ Pronto! Gerei sua cobrança via *PIX*.";
+  const line2 = isCard
+    ? (url ? `Finalize por aqui: ${url}` : "Finalize pelo link no Asaas.")
+    : (url ? `Pague por aqui: ${url}` : "Pague pelo link dentro do Asaas.");
+  return [
+    line1,
     "",
-    `📦 Plano: ${planName}`,
-    `📊 Uso no mês: ${used} / ${quotaTotal || "—"}`,
-    `📅 Renovação (Cartão): ${renewalBr} — faltam ${daysLeft} dia(s)`,
+    line2,
     "",
-    "Instagram: https://www.instagram.com/amigo.das.vendas/",
+    "Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀",
+    "",
+    "1) Já vou finalizar",
+    "2) Mudar forma de pagamento",
   ].join("\n");
-
-  return base;
 }
+
+async function createPendingChargeMessage({ waId, method, customerId, plan }) {
+  if (method === "PIX") {
+    const pay = await createPixPayment({
+      customerId,
+      value: (Number(plan.priceCents) || 0) / 100,
+      description: `Amigo das Vendas - Plano ${plan.code} (PIX mensal)`,
+      externalReference: waId,
+      dueDate: todayISO(),
+    });
+    const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
+    await setUserStatus(waId, ST.PAYMENT_PENDING);
+    return await msgPaymentReady({ waId, method, url });
+  }
+
+  const link = await createRecurringCardPaymentLink({
+    name: `Assinatura ${plan.name}`,
+    description: `Amigo das Vendas - Plano ${plan.code} (Cartão recorrente)`,
+    value: (Number(plan.priceCents) || 0) / 100,
+    externalReference: waId,
+    subscriptionCycle: "MONTHLY",
+  });
+
+  const url = link?.url || link?.paymentLink || link?.link || "";
+  await setUserStatus(waId, ST.PAYMENT_PENDING);
+  return await msgPaymentReady({ waId, method, url });
+}
+
 // -------------------- Core --------------------
 export async function handleInboundText({ waId, text }) {
   const id = cleanText(waId);
@@ -1780,113 +1893,181 @@ export async function handleInboundText({ waId, text }) {
 
   // 0) MENU (estado dedicado)
   if (status === ST.WAIT_MENU) {
-    const choice = normalizeMenuChoice(inbound);
+    const choice = normalizeChoiceMax(inbound, 4);
 
-    // Se não for número válido, sai do menu e trata como "próxima descrição"
     if (!choice) {
       const prev = await getMenuPrevStatus(id);
       await clearMenuPrevStatus(id);
       if (prev && prev !== ST.WAIT_MENU) {
         await setUserStatus(id, prev);
       } else {
-        // fallback seguro
         await setUserStatus(id, ST.WAIT_PRODUCT);
       }
-      // Reprocessa a mesma mensagem com o status restaurado
       return await handleInboundText({ waId: id, text: inbound });
     }
 
-    // opção 1: Minha assinatura
     if (choice === "1") {
-      return reply(await msgMenuMySubscription(id));
+      await setUserStatus(id, ST.WAIT_MENU_SUBSCRIPTION);
+      return reply(await msgMenuSubscriptionMenu(id));
     }
 
-    // opção 2: Alterar para anúncio FIXO
     if (choice === "2") {
-      await setTemplateMode(id, "FIXED");
-      return reply(await msgTemplateSet(id, "FIXED"));
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_ROOT);
+      return reply(await msgMenuEditRoot());
     }
 
-    // opção 3: Alterar para anúncio LIVRE
     if (choice === "3") {
-      await setTemplateMode(id, "FREE");
-      return reply(await msgTemplateSet(id, "FREE"));
-    }
-
-    // opção 4: Planos
-    if (choice === "4") {
+      await setUserStatus(id, ST.WAIT_PLAN);
       return reply(await msgPlansOnly());
     }
 
-    // opção 5: Cancelar plano (cartão)
-    if (choice === "5") {
-      const subId = await getAsaasSubscriptionId(id);
-      if (!subId) return reply(await msgMenuCancelNotFound(id));
+    return reply(`${await msgMenuUrlHelp(id)}\n\n${await msgMenuMain(id)}`);
+  }
 
-      // tenta capturar próxima renovação antes de cancelar
+  if (status === ST.WAIT_MENU_SUBSCRIPTION) {
+    const choice = normalizeChoiceMax(inbound, 4);
+    if (!choice) return reply(await msgMenuSubscriptionMenu(id));
+
+    if (choice === "1") {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
+    }
+
+    if (choice === "2") {
+      const subId = await getAsaasSubscriptionId(id);
+      if (!subId) return reply(`${await msgMenuCancelNotFound(id)}\n\n${await msgMenuSubscriptionMenu(id)}`);
+
       let nextDue = "";
       try {
         const sub = await getSubscription({ subscriptionId: subId });
         nextDue = String(sub?.nextDueDate || sub?.nextPaymentDate || "").trim();
-        if (nextDue) {
-          await setCardValidUntil(id, nextDue);
-        }
-      } catch (_) {
-        // best-effort; não quebra produção
-      }
+        if (nextDue) await setCardValidUntil(id, nextDue);
+      } catch (_) {}
 
-      // cancela recorrência
       await cancelSubscription({ subscriptionId: subId });
-
       await setCardCanceledAt(id, new Date().toISOString());
 
       const renewalBr = formatDateBR(nextDue) || formatDateBR(await getCardValidUntil(id)) || "—";
       const days = daysUntilISO(nextDue || (await getCardValidUntil(id)));
       const daysLeft = typeof days === "number" ? String(days) : "—";
 
-      return reply(await msgMenuCancelOk(id, { renewalBr, daysLeft }));
+      await setUserStatus(id, ST.WAIT_MENU_SUBSCRIPTION);
+      return reply(`${await msgMenuCancelOk(id, { renewalBr, daysLeft })}\n\n${await msgMenuSubscriptionMenu(id)}`);
     }
 
-    // opção 6: Alterar nome
-    if (choice === "6") {
+    if (choice === "3") {
+      return reply(`${await msgMenuUrlHelp(id)}\n\n${await msgMenuSubscriptionMenu(id)}`);
+    }
+
+    await setUserStatus(id, ST.WAIT_MENU);
+    return reply(await msgMenuMain(id));
+  }
+
+  if (status === ST.WAIT_MENU_EDIT_ROOT) {
+    const choice = normalizeChoiceMax(inbound, 5);
+    if (!choice) return reply(await msgMenuEditRoot());
+
+    if (choice === "1") {
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_PERSONAL);
+      return reply(await msgMenuEditPersonal(id));
+    }
+    if (choice === "2") {
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_COMPANY);
+      return reply(await msgMenuEditCompany(id));
+    }
+    if (choice === "3") {
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_FLOW);
+      return reply(await msgMenuEditFlow(id));
+    }
+    if (choice === "4") {
+      return reply(`${await msgMenuUrlHelp(id)}\n\n${await msgMenuEditRoot()}`);
+    }
+
+    await setUserStatus(id, ST.WAIT_MENU);
+    return reply(await msgMenuMain(id));
+  }
+
+  if (status === ST.WAIT_MENU_EDIT_PERSONAL) {
+    const choice = normalizeChoiceMax(inbound, 5);
+    if (!choice) return reply(await msgMenuEditPersonal(id));
+
+    if (choice === "1") {
+      await clearMenuEditContext(id);
       await setUserStatus(id, ST.WAIT_MENU_NEW_NAME);
       return reply(await msgMenuAskNewName(id));
     }
-
-    // opção 7: Alterar CPF/CNPJ
-    if (choice === "7") {
+    if (choice === "2") {
+      await clearMenuEditContext(id);
       await setUserStatus(id, ST.WAIT_MENU_NEW_DOC);
       return reply(await msgMenuAskNewDoc(id));
     }
-
-    // opção 8: Ajuda
-    if (choice === "8") return reply(await msgMenuUrlHelp(id));
-
-    // opção 9: Formulário
-    if (choice === "9") return reply(await msgMenuUrlFeedback(id));
-
-    // opção 10: Instagram
-    if (choice === "10") return reply(await msgMenuUrlInstagram(id));
-
-    // opção 11: Dados da empresa (ver/atualizar)
-    if (choice === "11") {
-      await setUserStatus(id, ST.WAIT_MENU_PROFILE);
-      return reply(await msgMenuProfileView(id));
+    if (choice === "3") {
+      await setMenuEditContext(id, { scope: "PERSONAL", field: "billingCityState" });
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_FIELD);
+      return reply(await msgMenuAskEditField(id, { field: "billingCityState" }));
+    }
+    if (choice === "4") {
+      await setMenuEditContext(id, { scope: "PERSONAL", field: "billingAddress" });
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_FIELD);
+      return reply(await msgMenuAskEditField(id, { field: "billingAddress" }));
     }
 
-    // fallback (não deve acontecer)
-    return reply(await msgMenuMain(id));
+    await setUserStatus(id, ST.WAIT_MENU_EDIT_ROOT);
+    return reply(await msgMenuEditRoot());
+  }
+
+  if (status === ST.WAIT_MENU_EDIT_COMPANY) {
+    const choice = normalizeChoiceMax(inbound, 8);
+    if (!choice) return reply(await msgMenuEditCompany(id));
+
+    const mapping = {
+      "1": "companyName",
+      "2": "whatsapp",
+      "3": "location",
+      "4": "hours",
+      "5": "socials",
+      "6": "website",
+      "7": "productList",
+    };
+
+    if (choice === "8") {
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_ROOT);
+      return reply(await msgMenuEditRoot());
+    }
+
+    const field = mapping[choice];
+    if (!field) return reply(await msgMenuEditCompany(id));
+
+    await setMenuEditContext(id, { scope: "COMPANY", field });
+    await setUserStatus(id, ST.WAIT_MENU_EDIT_FIELD);
+    return reply(await msgMenuAskEditField(id, { field }));
+  }
+
+  if (status === ST.WAIT_MENU_EDIT_FLOW) {
+    const choice = normalizeChoiceMax(inbound, 3);
+    if (!choice) return reply(await msgMenuEditFlow(id));
+
+    if (choice === "1") {
+      await setTemplateMode(id, "FIXED");
+      return reply(`${await msgTemplateSet(id, "FIXED")}\n\n${await msgMenuEditFlow(id)}`);
+    }
+    if (choice === "2") {
+      await setTemplateMode(id, "FREE");
+      return reply(`${await msgTemplateSet(id, "FREE")}\n\n${await msgMenuEditFlow(id)}`);
+    }
+
+    await setUserStatus(id, ST.WAIT_MENU_EDIT_ROOT);
+    return reply(await msgMenuEditRoot());
   }
 
   // 0.1) MENU — alteração de nome
   if (status === ST.WAIT_MENU_NEW_NAME) {
-    const name = cleanText(inbound);
+    const name = inbound;
     if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
     await setUserFullName(id, name);
-
-    // volta ao menu
-    await setUserStatus(id, ST.WAIT_MENU);
-    return reply(`${await getCopyText("FLOW_MENU_NAME_UPDATED", { waId: id })}\n\n${await msgMenuMain(id)}`);
+    await clearMenuEditContext(id);
+    await setUserStatus(id, ST.WAIT_MENU_EDIT_PERSONAL);
+    return reply(`${await getCopyText("FLOW_MENU_NAME_UPDATED", { waId: id })}\n\n${await msgMenuEditPersonal(id)}`);
   }
 
   // 0.2) MENU — alteração de CPF/CNPJ
@@ -1895,15 +2076,69 @@ export async function handleInboundText({ waId, text }) {
     if (!v.ok) return reply(await msgInvalidDoc(id));
 
     await setUserDocMasked(id, v.type, v.last4);
-
-    // volta ao menu
-    await setUserStatus(id, ST.WAIT_MENU);
-    return reply(`${await getCopyText("FLOW_MENU_DOC_UPDATED", { waId: id })}\n\n${await msgMenuMain(id)}`);
+    await clearMenuEditContext(id);
+    await setUserStatus(id, ST.WAIT_MENU_EDIT_PERSONAL);
+    return reply(`${await getCopyText("FLOW_MENU_DOC_UPDATED", { waId: id })}\n\n${await msgMenuEditPersonal(id)}`);
   }
 
+  if (status === ST.WAIT_MENU_EDIT_FIELD) {
+    const ctx = await getMenuEditContext(id);
+    if (!ctx?.field) {
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_ROOT);
+      return reply(await msgMenuEditRoot());
+    }
 
-  
-  
+    if (wantsSkipCommand(inbound)) {
+      await clearMenuEditContext(id);
+      const backTo = ctx.scope === "COMPANY" ? ST.WAIT_MENU_EDIT_COMPANY : ST.WAIT_MENU_EDIT_PERSONAL;
+      await setUserStatus(id, backTo);
+      return reply(ctx.scope === "COMPANY" ? await msgMenuEditCompany(id) : await msgMenuEditPersonal(id));
+    }
+
+    if (ctx.scope === "PERSONAL") {
+      if (ctx.field === "billingCityState") {
+        const v = String(inbound || "").trim();
+        if (!v) return reply(await msgMenuAskEditField(id, ctx));
+        await setBillingCityState(id, v);
+      } else if (ctx.field === "billingAddress") {
+        const v = String(inbound || "").trim();
+        if (!v) return reply(await msgMenuAskEditField(id, ctx));
+        await setBillingAddress(id, v.toUpperCase() === "APENAS ONLINE" ? "APENAS ONLINE" : v);
+      }
+      await clearMenuEditContext(id);
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_PERSONAL);
+      return reply(`✅ Dado atualizado!\n\n${await msgMenuEditPersonal(id)}`);
+    }
+
+    const profile = (await getBizProfile(id)) || {};
+    if (ctx.field === "companyName") {
+      profile.companyName = inbound;
+    } else if (ctx.field === "whatsapp") {
+      profile.whatsapp = normalizeWhatsappLike(inbound);
+    } else if (ctx.field === "location") {
+      profile.location = upper(inbound) === "APENAS ATENDIMENTO ONLINE" ? "Apenas atendimento online" : inbound;
+    } else if (ctx.field === "hours") {
+      profile.hours = inbound;
+    } else if (ctx.field === "socials") {
+      const socials = splitSocialInputs(inbound);
+      if (!socials.length) return reply(await msgMenuAskEditField(id, ctx));
+      profile.socials = Array.from(new Set(socials));
+    } else if (ctx.field === "website") {
+      const url = normalizeUrlLike(inbound) || String(inbound || "").trim();
+      if (!url) return reply(await msgMenuAskEditField(id, ctx));
+      profile.website = url;
+    } else if (ctx.field === "productList") {
+      const url = normalizeUrlLike(inbound) || String(inbound || "").trim();
+      if (!url) return reply(await msgMenuAskEditField(id, ctx));
+      profile.productList = url;
+    }
+
+    await setBizProfile(id, profile);
+    await clearMenuEditContext(id);
+    await setUserStatus(id, ST.WAIT_MENU_EDIT_COMPANY);
+    return reply(`✅ Dado atualizado!\n\n${await msgMenuEditCompany(id)}`);
+  }
+
   // 0.25) MENU — Dados da empresa (visualizar/atualizar)
   if (status === ST.WAIT_MENU_PROFILE) {
     const c = normalizeChoice(inbound);
@@ -1912,26 +2147,22 @@ export async function handleInboundText({ waId, text }) {
       return reply(await getCopyText("FLOW_MENU_PROFILE_INVALID_CHOICE", { waId: id }));
     }
 
-    // 1) Atualizar/Completar (abre wizard)
     if (c === "1") {
       const current = await getBizProfile(id);
-      // Wizard trabalha em cima de um "pending" para só salvar no fim
       await setPendingBizProfile(id, (current && typeof current === "object") ? current : {});
       await setUserStatus(id, ST.WAIT_PROFILE_ADD_COMPANY);
-      return reply(await getCopyText("FLOW_PROFILE_WIZARD_INTRO", { waId: id }));
+      return reply(withMenuHint(await getCopyText("FLOW_PROFILE_WIZARD_INTRO", { waId: id })));
     }
 
-    // 2) Limpar dados
     if (c === "2") {
       await clearBizProfile(id);
       await clearPendingBizProfile(id);
-      await setUserStatus(id, ST.WAIT_MENU);
-      return reply(`${await getCopyText("FLOW_MENU_PROFILE_CLEARED", { waId: id })}\n\n${await msgMenuMain(id)}`);
+      await setUserStatus(id, ST.WAIT_MENU_EDIT_COMPANY);
+      return reply(`✅ Dados da empresa removidos.\n\n${await msgMenuEditCompany(id)}`);
     }
 
-    // 3) Voltar
-    await setUserStatus(id, ST.WAIT_MENU);
-    return reply(await msgMenuMain(id));
+    await setUserStatus(id, ST.WAIT_MENU_EDIT_COMPANY);
+    return reply(await msgMenuEditCompany(id));
   }
 
 // 0.3) Pós-anúncio — escolha de template (1/2)
@@ -2162,7 +2393,7 @@ export async function handleInboundText({ waId, text }) {
 
   // 1) Onboarding: nome
   if (status === ST.WAIT_NAME) {
-    const name = cleanText(inbound);
+    const name = inbound;
     if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
     await setUserFullName(id, name);
     await setUserStatus(id, ST.WAIT_PRODUCT);
@@ -2205,12 +2436,11 @@ export async function handleInboundText({ waId, text }) {
     return reply(await msgAskDoc(id));
   }
 
-  // 6) Documento (CPF/CNPJ) + prepara cobrança (coleta dados fiscais antes de emitir)
+  // 6) Documento (CPF/CNPJ) + prepara cobrança
   if (status === ST.WAIT_DOC) {
     const v = validateDoc(inbound);
     if (!v.ok) return reply(await msgInvalidDoc(id));
 
-    // Guarda somente mascarado
     await setUserDocMasked(id, v.type, v.last4);
 
     const planCode = await getUserPlan(id);
@@ -2226,15 +2456,11 @@ export async function handleInboundText({ waId, text }) {
       return reply(await msgAskPaymentMethod(id, plan));
     }
 
-    // customer (CPF/CNPJ só é usado aqui; nunca persistimos o número completo)
-    await ensureAsaasCustomer({ waId: id, fullName: await getUserFullName(id), cpfCnpj: v.digits });
-
-    // Coletar Cidade/UF e Endereço antes de emitir cobrança/assinatura
-    await setUserStatus(id, ST.WAIT_BILLING_CITY_STATE);
-    return reply(await msgAskBillingCityState(id));
+    const customerId = await ensureAsaasCustomer({ waId: id, fullName: await getUserFullName(id), cpfCnpj: v.digits });
+    return reply(await createPendingChargeMessage({ waId: id, method: pm, customerId, plan }));
   }
 
-  // 6.1) Cidade/UF (para emissão da cobrança)
+  // 6.1) Cidade/UF (solicitada após pagamento confirmado)
   if (status === ST.WAIT_BILLING_CITY_STATE) {
     const v = String(inbound || "").trim();
     if (!v) return reply(await msgAskBillingCityState(id));
@@ -2244,73 +2470,32 @@ export async function handleInboundText({ waId, text }) {
     return reply(await msgAskBillingAddress(id));
   }
 
-  // 6.2) Endereço (para emissão da cobrança) + cria cobrança/assinatura
+  // 6.2) Endereço (solicitado após pagamento confirmado)
   if (status === ST.WAIT_BILLING_ADDRESS) {
     const v = String(inbound || "").trim();
     if (!v) return reply(await msgAskBillingAddress(id));
 
     const addr = v.toUpperCase() === "APENAS ONLINE" ? "APENAS ONLINE" : v;
     await setBillingAddress(id, addr);
+    await setUserStatus(id, ST.ACTIVE);
+    return reply(withMenuHint("✅ Pronto! Seus dados de cobrança foram atualizados com sucesso.
 
-    const planCode = await getUserPlan(id);
-    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
-    if (!plan) {
-      await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
-    }
-
-    const pm = await getPaymentMethod(id);
-    if (!pm) {
-      await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
-      return reply(await msgAskPaymentMethod(id, plan));
-    }
-
-    const customerId = await getAsaasCustomerId(id);
-    if (!customerId) {
-      // estado inconsistente: força reentrada no fluxo de documento (único ponto onde temos CPF/CNPJ)
-      await setUserStatus(id, ST.WAIT_DOC);
-      return reply(await msgAskDoc(id));
-    }
-
-    // PIX mensal avulso
-    if (pm === "PIX") {
-      const pay = await createPixPayment({
-        customerId,
-        value: (Number(plan.priceCents) || 0) / 100,
-        description: `Amigo das Vendas - Plano ${plan.code} (PIX mensal)`,
-        externalReference: id,
-        dueDate: todayISO(),
-      });
-
-      await setUserStatus(id, ST.PAYMENT_PENDING);
-
-      const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
-      const line1 = "✅ Pronto! Gerei sua cobrança via *PIX*.\n\n";
-      const line2 = url ? `Pague por aqui: ${url}\n\n` : "Pague pelo link dentro do Asaas.\n\n";
-      const line3 = "Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀";
-      return reply(line1 + line2 + line3);
-    }
-
-    // Cartão recorrente: Payment Link
-    const link = await createRecurringCardPaymentLink({
-      name: `Assinatura ${plan.name}`,
-      description: `Amigo das Vendas - Plano ${plan.code} (Cartão recorrente)`,
-      value: (Number(plan.priceCents) || 0) / 100,
-      externalReference: id,
-      subscriptionCycle: "MONTHLY",
-    });
-
-    await setUserStatus(id, ST.PAYMENT_PENDING);
-
-    const url = link?.url || link?.paymentLink || link?.link || "";
-    const line1 = "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).\n\n";
-    const line2 = url ? `Finalize por aqui: ${url}\n\n` : "Finalize pelo link no Asaas.\n\n";
-    const line3 = "Assim que confirmar, seu plano ativa automaticamente. 🚀";
-    return reply(line1 + line2 + line3);
+Agora você já pode continuar usando o Amigo normalmente. 🚀"));
   }
 
   // 7) Pagamento pendente
   if (status === ST.PAYMENT_PENDING) {
+    if (wantsChangePaymentMethodCommand(inbound)) {
+      const planCode = await getUserPlan(id);
+      const plan = (await getMenuPlans()).find((p) => p.code === planCode);
+      if (!plan) {
+        await setUserStatus(id, ST.WAIT_PLAN);
+        return reply(await msgPlansOnly());
+      }
+      await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
+      return reply(withMenuHint(`Perfeito! ✅ Vamos mudar a forma de pagamento.\n\n${await getCopyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", { waId: id, vars: { planName: plan?.name || "", planPrice: plan?.priceCents ? moneyBRFromCents(plan.priceCents) : "" } })}`));
+    }
+
     const planCode = await getUserPlan(id);
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     const planTxt = plan ? `Plano: *${plan.name}*.` : "";
