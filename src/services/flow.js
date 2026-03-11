@@ -1880,7 +1880,7 @@ export async function handleInboundText({ waId, text }) {
 
   // 0.1) MENU — alteração de nome
   if (status === ST.WAIT_MENU_NEW_NAME) {
-    const name = inbound;
+    const name = cleanText(inbound);
     if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
     await setUserFullName(id, name);
 
@@ -2162,7 +2162,7 @@ export async function handleInboundText({ waId, text }) {
 
   // 1) Onboarding: nome
   if (status === ST.WAIT_NAME) {
-    const name = inbound;
+    const name = cleanText(inbound);
     if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
     await setUserFullName(id, name);
     await setUserStatus(id, ST.WAIT_PRODUCT);
