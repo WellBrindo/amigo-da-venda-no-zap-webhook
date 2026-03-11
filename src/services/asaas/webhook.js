@@ -12,7 +12,7 @@ import {
   getBillingAddress,
 } from "../state.js";
 
-import { sendWhatsAppText } from "../whatsapp.js";
+import { sendWhatsAppText } from "../meta/whatsapp.js";
 import { recordAsaasEvent } from "./ledger.js";
 /**
  * Webhook handler do Asaas
