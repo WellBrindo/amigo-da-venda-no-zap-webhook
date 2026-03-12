@@ -91,6 +91,10 @@ const keyPendingBizProfile = (waId) => `user:${waId}:pendingBizProfile`;
 const keyCurrentAdSession = (waId) => `user:${waId}:currentAdSession`;
 // Status anterior (para estados transitórios como escolha de template / salvar perfil)
 const keyPrevStatus = (waId) => `user:${waId}:prevStatus`;
+// Metadados operacionais leves (inatividade / flood)
+const keyActivityMeta = (waId) => `user:${waId}:activityMeta`;
+// Metadados de engajamento/recorrência (progresso / feedback / indicação / anúncio do dia)
+const keyGrowthMeta = (waId) => `user:${waId}:growthMeta`;
 
 
 function safeStr(v) {
@@ -323,6 +327,101 @@ function safeJsonStringify(obj) {
   } catch (_) {
     return "{}";
   }
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeIsoTimestamp(value) {
+  const raw = safeStr(value);
+  if (!raw) return "";
+  const dt = new Date(raw);
+  return Number.isFinite(dt.getTime()) ? dt.toISOString() : "";
+}
+
+function normalizeIsoDate(value) {
+  const raw = safeStr(value);
+  if (!raw) return "";
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1];
+  const dt = new Date(raw);
+  return Number.isFinite(dt.getTime()) ? dt.toISOString().slice(0, 10) : "";
+}
+
+function normalizeActivityMeta(metaObj) {
+  const src = isPlainObject(metaObj) ? metaObj : {};
+  const dst = {};
+
+  const lastInboundAt = normalizeIsoTimestamp(src.lastInboundAt);
+  if (lastInboundAt) dst.lastInboundAt = lastInboundAt;
+
+  const idleReminderSentAt = normalizeIsoTimestamp(src.idleReminderSentAt);
+  if (idleReminderSentAt) dst.idleReminderSentAt = idleReminderSentAt;
+
+  const flood = isPlainObject(src.flood) ? src.flood : null;
+  if (flood) {
+    const normalizedFlood = {};
+    const windowStartAt = normalizeIsoTimestamp(flood.windowStartAt);
+    const lastMessageAt = normalizeIsoTimestamp(flood.lastMessageAt);
+    const warnedAt = normalizeIsoTimestamp(flood.warnedAt);
+    const count = toInt(flood.count, 0);
+
+    if (windowStartAt) normalizedFlood.windowStartAt = windowStartAt;
+    if (lastMessageAt) normalizedFlood.lastMessageAt = lastMessageAt;
+    if (warnedAt) normalizedFlood.warnedAt = warnedAt;
+    if (count > 0) normalizedFlood.count = count;
+
+    if (Object.keys(normalizedFlood).length) dst.flood = normalizedFlood;
+  }
+
+  return dst;
+}
+
+function normalizeGrowthMeta(metaObj) {
+  const src = isPlainObject(metaObj) ? metaObj : {};
+  const dst = {};
+
+  const adsCreatedTotal = toInt(src.adsCreatedTotal, 0);
+  if (adsCreatedTotal > 0) dst.adsCreatedTotal = adsCreatedTotal;
+
+  const lastAdCreatedAt = normalizeIsoTimestamp(src.lastAdCreatedAt);
+  if (lastAdCreatedAt) dst.lastAdCreatedAt = lastAdCreatedAt;
+
+  const lastAdCreatedDate = normalizeIsoDate(src.lastAdCreatedDate || lastAdCreatedAt);
+  if (lastAdCreatedDate) dst.lastAdCreatedDate = lastAdCreatedDate;
+
+  const habitPromptedAt = normalizeIsoTimestamp(src.habitPromptedAt);
+  if (habitPromptedAt) dst.habitPromptedAt = habitPromptedAt;
+
+  const feedbackAskedAt = normalizeIsoTimestamp(src.feedbackAskedAt);
+  if (feedbackAskedAt) dst.feedbackAskedAt = feedbackAskedAt;
+
+  const feedbackAnsweredAt = normalizeIsoTimestamp(src.feedbackAnsweredAt);
+  if (feedbackAnsweredAt) dst.feedbackAnsweredAt = feedbackAnsweredAt;
+
+  const feedbackResponse = safeStr(src.feedbackResponse);
+  if (feedbackResponse) dst.feedbackResponse = feedbackResponse;
+
+  const testimonialAskedAt = normalizeIsoTimestamp(src.testimonialAskedAt);
+  if (testimonialAskedAt) dst.testimonialAskedAt = testimonialAskedAt;
+
+  const testimonialReceivedAt = normalizeIsoTimestamp(src.testimonialReceivedAt);
+  if (testimonialReceivedAt) dst.testimonialReceivedAt = testimonialReceivedAt;
+
+  const referralAskedAt = normalizeIsoTimestamp(src.referralAskedAt);
+  if (referralAskedAt) dst.referralAskedAt = referralAskedAt;
+
+  const referralRewardGrantedAt = normalizeIsoTimestamp(src.referralRewardGrantedAt);
+  if (referralRewardGrantedAt) dst.referralRewardGrantedAt = referralRewardGrantedAt;
+
+  const adOfDaySentAt = normalizeIsoTimestamp(src.adOfDaySentAt);
+  if (adOfDaySentAt) dst.adOfDaySentAt = adOfDaySentAt;
+
+  const adOfDaySentDate = normalizeIsoDate(src.adOfDaySentDate || adOfDaySentAt);
+  if (adOfDaySentDate) dst.adOfDaySentDate = adOfDaySentDate;
+
+  return dst;
 }
 
 function maskDocFromParts(docType, docLast4) {
@@ -981,6 +1080,146 @@ export async function getCardCanceledAt(waId) {
   return safeStr(v);
 }
 
+// ===================== Activity / Growth Meta =====================
+export async function getActivityMeta(waId) {
+  const parsed = safeJsonParse(await redisGet(keyActivityMeta(waId)));
+  return normalizeActivityMeta(parsed);
+}
+
+export async function setActivityMeta(waId, metaObj) {
+  await indexUser(waId);
+  const normalized = normalizeActivityMeta(metaObj);
+  if (!Object.keys(normalized).length) {
+    await redisDel(keyActivityMeta(waId));
+    return {};
+  }
+  await redisSet(keyActivityMeta(waId), safeJsonStringify(normalized));
+  return normalized;
+}
+
+export async function clearActivityMeta(waId) {
+  await indexUser(waId);
+  await redisDel(keyActivityMeta(waId));
+  return true;
+}
+
+export async function getLastInboundAt(waId) {
+  const meta = await getActivityMeta(waId);
+  return safeStr(meta.lastInboundAt);
+}
+
+export async function setLastInboundAt(waId, isoTs) {
+  const meta = await getActivityMeta(waId);
+  meta.lastInboundAt = normalizeIsoTimestamp(isoTs || new Date().toISOString());
+  return setActivityMeta(waId, meta);
+}
+
+export async function getFloodMeta(waId) {
+  const meta = await getActivityMeta(waId);
+  return isPlainObject(meta.flood) ? meta.flood : {};
+}
+
+export async function setFloodMeta(waId, floodMeta) {
+  const meta = await getActivityMeta(waId);
+  const normalizedFlood = normalizeActivityMeta({ flood: floodMeta }).flood;
+  if (normalizedFlood) meta.flood = normalizedFlood;
+  else delete meta.flood;
+  return setActivityMeta(waId, meta);
+}
+
+export async function clearFloodMeta(waId) {
+  const meta = await getActivityMeta(waId);
+  delete meta.flood;
+  return setActivityMeta(waId, meta);
+}
+
+export async function getGrowthMeta(waId) {
+  const parsed = safeJsonParse(await redisGet(keyGrowthMeta(waId)));
+  return normalizeGrowthMeta(parsed);
+}
+
+export async function setGrowthMeta(waId, metaObj) {
+  await indexUser(waId);
+  const normalized = normalizeGrowthMeta(metaObj);
+  if (!Object.keys(normalized).length) {
+    await redisDel(keyGrowthMeta(waId));
+    return {};
+  }
+  await redisSet(keyGrowthMeta(waId), safeJsonStringify(normalized));
+  return normalized;
+}
+
+export async function clearGrowthMeta(waId) {
+  await indexUser(waId);
+  await redisDel(keyGrowthMeta(waId));
+  return true;
+}
+
+export async function getUserAdsCreatedTotal(waId) {
+  const meta = await getGrowthMeta(waId);
+  return toInt(meta.adsCreatedTotal, 0);
+}
+
+export async function setUserAdsCreatedTotal(waId, value) {
+  const meta = await getGrowthMeta(waId);
+  meta.adsCreatedTotal = Math.max(0, toInt(value, 0));
+  return setGrowthMeta(waId, meta);
+}
+
+export async function incUserAdsCreatedTotal(waId, by = 1) {
+  const meta = await getGrowthMeta(waId);
+  meta.adsCreatedTotal = Math.max(0, toInt(meta.adsCreatedTotal, 0) + toInt(by, 1));
+  await setGrowthMeta(waId, meta);
+  return toInt(meta.adsCreatedTotal, 0);
+}
+
+export async function markUserAdCreated(waId, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  const normalizedTs = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  meta.adsCreatedTotal = Math.max(0, toInt(meta.adsCreatedTotal, 0) + 1);
+  meta.lastAdCreatedAt = normalizedTs;
+  meta.lastAdCreatedDate = normalizeIsoDate(normalizedTs);
+  await setGrowthMeta(waId, meta);
+  return {
+    adsCreatedTotal: toInt(meta.adsCreatedTotal, 0),
+    lastAdCreatedAt: meta.lastAdCreatedAt,
+    lastAdCreatedDate: meta.lastAdCreatedDate,
+  };
+}
+
+export async function markFeedbackAsked(waId, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  meta.feedbackAskedAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setGrowthMeta(waId, meta);
+}
+
+export async function markFeedbackAnswered(waId, response, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  meta.feedbackAnsweredAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  meta.feedbackResponse = safeStr(response);
+  return setGrowthMeta(waId, meta);
+}
+
+export async function markTestimonialAsked(waId, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  meta.testimonialAskedAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setGrowthMeta(waId, meta);
+}
+
+export async function markReferralAsked(waId, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  meta.referralAskedAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setGrowthMeta(waId, meta);
+}
+
+export async function markAdOfDaySent(waId, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  const normalizedTs = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  meta.adOfDaySentAt = normalizedTs;
+  meta.adOfDaySentDate = normalizeIsoDate(normalizedTs);
+  return setGrowthMeta(waId, meta);
+}
+
 // ===================== Reset helpers =====================
 export async function resetUserToTrial(waId) {
   await ensureUserExists(waId);
@@ -1001,6 +1240,12 @@ export async function resetUserToTrial(waId) {
     clearBizProfile(waId),
     clearPendingBizProfile(waId),
     clearCurrentAdSession(waId),
+    clearLastAd(waId),
+    clearRefineCount(waId),
+    clearBillingCityState(waId),
+    clearBillingAddress(waId),
+    clearActivityMeta(waId),
+    clearGrowthMeta(waId),
     setCardValidUntil(waId, ""),
     setCardCanceledAt(waId, ""),
   ]);
@@ -1023,6 +1268,8 @@ export async function resetUserAsNew(waId) {
     keyQuotaUsed(id),
     keyTrialUsed(id),
     keyLastPrompt(id),
+    keyLastAd(id),
+    keyRefineCount(id),
     keyTemplateMode(id),
     keyTemplatePrompted(id),
     keyFullName(id),
@@ -1042,6 +1289,8 @@ export async function resetUserAsNew(waId) {
     keyBizProfile(id),
     keyPendingBizProfile(id),
     keyCurrentAdSession(id),
+    keyActivityMeta(id),
+    keyGrowthMeta(id),
   ];
 
   // best-effort: apaga todas as chaves conhecidas
@@ -1068,6 +1317,8 @@ export async function getUserSnapshot(waId) {
     quotaUsed,
     trialUsed,
     lastPrompt,
+    lastAd,
+    refineCount,
     templateMode,
     fullName,
     docMasked,
@@ -1077,6 +1328,8 @@ export async function getUserSnapshot(waId) {
     bizProfile,
     pendingBizProfile,
     currentAdSession,
+    activityMeta,
+    growthMeta,
     asaasCustomerId,
     asaasSubscriptionId,
     cardValidUntil,
@@ -1087,6 +1340,8 @@ export async function getUserSnapshot(waId) {
     getUserQuotaUsed(waId),
     getUserTrialUsed(waId),
     getLastPrompt(waId),
+    getLastAd(waId),
+    getRefineCount(waId),
     getTemplateMode(waId),
     getUserFullName(waId),
     getUserDocMasked(waId),
@@ -1096,6 +1351,8 @@ export async function getUserSnapshot(waId) {
     getBizProfile(waId),
     getPendingBizProfile(waId),
     getCurrentAdSession(waId),
+    getActivityMeta(waId),
+    getGrowthMeta(waId),
     getAsaasCustomerId(waId),
     getAsaasSubscriptionId(waId),
     getCardValidUntil(waId),
@@ -1109,6 +1366,8 @@ export async function getUserSnapshot(waId) {
     quotaUsed,
     trialUsed,
     lastPrompt,
+    lastAd: lastAd || "",
+    refineCount,
     templateMode,
     fullName: fullName || "",
     doc: docMasked, // {docType, docLast4}
@@ -1118,6 +1377,8 @@ export async function getUserSnapshot(waId) {
     bizProfile: bizProfile || null,
     pendingBizProfile: pendingBizProfile || null,
     currentAdSession: currentAdSession || null,
+    activityMeta: activityMeta || {},
+    growthMeta: growthMeta || {},
     asaasCustomerId: asaasCustomerId || "",
     asaasSubscriptionId: asaasSubscriptionId || "",
     cardValidUntil: cardValidUntil || "",
