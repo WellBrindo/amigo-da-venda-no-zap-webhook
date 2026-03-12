@@ -409,6 +409,36 @@ function normalizeGrowthMeta(metaObj) {
   const testimonialReceivedAt = normalizeIsoTimestamp(src.testimonialReceivedAt);
   if (testimonialReceivedAt) dst.testimonialReceivedAt = testimonialReceivedAt;
 
+  const feedbackComment = safeStr(src.feedbackComment);
+  if (feedbackComment) dst.feedbackComment = feedbackComment;
+
+  const feedbackCommentAt = normalizeIsoTimestamp(src.feedbackCommentAt);
+  if (feedbackCommentAt) dst.feedbackCommentAt = feedbackCommentAt;
+
+  const testimonialText = safeStr(src.testimonialText);
+  if (testimonialText) dst.testimonialText = testimonialText;
+
+  const testimonialTextAt = normalizeIsoTimestamp(src.testimonialTextAt || src.testimonialReceivedAt);
+  if (testimonialTextAt) dst.testimonialTextAt = testimonialTextAt;
+
+  const testimonialConsent = safeStr(src.testimonialConsent).toUpperCase();
+  if (["YES", "NO"].includes(testimonialConsent)) dst.testimonialConsent = testimonialConsent;
+
+  const testimonialConsentAt = normalizeIsoTimestamp(src.testimonialConsentAt);
+  if (testimonialConsentAt) dst.testimonialConsentAt = testimonialConsentAt;
+
+  const testimonialDisplayMode = safeStr(src.testimonialDisplayMode).toUpperCase();
+  if (["FIRST_NAME", "COMPANY", "ANONYMOUS"].includes(testimonialDisplayMode)) dst.testimonialDisplayMode = testimonialDisplayMode;
+
+  const testimonialDisplayName = safeStr(src.testimonialDisplayName);
+  if (testimonialDisplayName) dst.testimonialDisplayName = testimonialDisplayName;
+
+  const testimonialStatus = safeStr(src.testimonialStatus).toUpperCase();
+  if (["PENDING_REVIEW", "APPROVED", "REJECTED", "PUBLISHED", "INTERNAL_ONLY"].includes(testimonialStatus)) dst.testimonialStatus = testimonialStatus;
+
+  const testimonialStatusUpdatedAt = normalizeIsoTimestamp(src.testimonialStatusUpdatedAt);
+  if (testimonialStatusUpdatedAt) dst.testimonialStatusUpdatedAt = testimonialStatusUpdatedAt;
+
   const referralAskedAt = normalizeIsoTimestamp(src.referralAskedAt);
   if (referralAskedAt) dst.referralAskedAt = referralAskedAt;
 
@@ -1203,6 +1233,98 @@ export async function markFeedbackAnswered(waId, response, isoTs = new Date().to
 export async function markTestimonialAsked(waId, isoTs = new Date().toISOString()) {
   const meta = await getGrowthMeta(waId);
   meta.testimonialAskedAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setGrowthMeta(waId, meta);
+}
+
+export async function saveFeedbackComment(waId, comment, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  const normalizedComment = normalizeFreeTextField(comment);
+  if (!normalizedComment) {
+    delete meta.feedbackComment;
+    delete meta.feedbackCommentAt;
+  } else {
+    meta.feedbackComment = normalizedComment;
+    meta.feedbackCommentAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  }
+  return setGrowthMeta(waId, meta);
+}
+
+export async function saveTestimonialText(waId, testimonialText, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  const normalizedText = normalizeFreeTextField(testimonialText);
+  if (!normalizedText) {
+    delete meta.testimonialText;
+    delete meta.testimonialTextAt;
+    delete meta.testimonialReceivedAt;
+  } else {
+    const nowIso = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+    meta.testimonialText = normalizedText;
+    meta.testimonialTextAt = nowIso;
+    meta.testimonialReceivedAt = nowIso;
+  }
+  return setGrowthMeta(waId, meta);
+}
+
+export async function setTestimonialConsent(waId, consent, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  const normalizedConsent = safeStr(consent).toUpperCase() === "YES" ? "YES" : "NO";
+  meta.testimonialConsent = normalizedConsent;
+  meta.testimonialConsentAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  if (normalizedConsent === "YES") {
+    if (!safeStr(meta.testimonialStatus)) meta.testimonialStatus = "PENDING_REVIEW";
+  } else {
+    meta.testimonialStatus = "INTERNAL_ONLY";
+    delete meta.testimonialDisplayMode;
+    delete meta.testimonialDisplayName;
+  }
+  meta.testimonialStatusUpdatedAt = meta.testimonialConsentAt;
+  return setGrowthMeta(waId, meta);
+}
+
+function resolveTestimonialDisplayName(mode, fullName, companyName) {
+  const normalizedMode = safeStr(mode).toUpperCase();
+  const safeFullName = safeStr(fullName);
+  const safeCompanyName = safeStr(companyName);
+  const firstName = safeFullName ? safeFullName.split(/\s+/).filter(Boolean)[0] || safeFullName : "";
+
+  if (normalizedMode === "COMPANY") {
+    if (safeCompanyName) return { mode: "COMPANY", name: safeCompanyName };
+    if (firstName) return { mode: "FIRST_NAME", name: firstName };
+    return { mode: "ANONYMOUS", name: "Cliente do Amigo das Vendas" };
+  }
+
+  if (normalizedMode === "ANONYMOUS") {
+    return { mode: "ANONYMOUS", name: "Cliente do Amigo das Vendas" };
+  }
+
+  if (firstName) return { mode: "FIRST_NAME", name: firstName };
+  if (safeCompanyName) return { mode: "COMPANY", name: safeCompanyName };
+  return { mode: "ANONYMOUS", name: "Cliente do Amigo das Vendas" };
+}
+
+export async function setTestimonialDisplayPreference(waId, mode, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  const profile = await getBizProfile(waId);
+  const fullName = await getUserFullName(waId);
+  const companyName = normalizeCompanyName(profile?.companyName || "");
+  const resolved = resolveTestimonialDisplayName(mode, fullName, companyName);
+  const nowIso = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+
+  meta.testimonialDisplayMode = resolved.mode;
+  meta.testimonialDisplayName = resolved.name;
+  meta.testimonialStatus = meta.testimonialConsent === "YES" ? "PENDING_REVIEW" : "INTERNAL_ONLY";
+  meta.testimonialStatusUpdatedAt = nowIso;
+  return setGrowthMeta(waId, meta);
+}
+
+export async function setTestimonialReviewStatus(waId, status, isoTs = new Date().toISOString()) {
+  const meta = await getGrowthMeta(waId);
+  const normalizedStatus = safeStr(status).toUpperCase();
+  if (!["PENDING_REVIEW", "APPROVED", "REJECTED", "PUBLISHED", "INTERNAL_ONLY"].includes(normalizedStatus)) {
+    throw new Error("invalid testimonial status");
+  }
+  meta.testimonialStatus = normalizedStatus;
+  meta.testimonialStatusUpdatedAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
   return setGrowthMeta(waId, meta);
 }
 
