@@ -739,7 +739,72 @@ function firstNameFromFullName(fullName) {
   return parts.length ? parts[0] : "";
 }
 
+function normalizeCategoryDetectionText(text) {
+  return ` ${upper(text)
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim()} `;
+}
 
+function hasCategoryTerms(text, terms) {
+  const normalized = normalizeCategoryDetectionText(text);
+  return ensureArray(terms).some((term) => {
+    const token = cleanText(term)
+      .toUpperCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^A-Z0-9]+/g, " ")
+      .trim();
+
+    if (!token) return false;
+    return normalized.includes(` ${token} `);
+  });
+}
+
+const CATEGORY_TERMS = Object.freeze({
+  VEHICLE: [
+    "CARRO", "CARROS", "VEICULO", "VEICULOS", "VEÍCULO", "VEÍCULOS", "AUTO", "AUTOS", "AUTOMOVEL", "AUTOMOVEIS", "AUTOMÓVEL", "AUTOMÓVEIS",
+    "MOTO", "MOTOS", "MOTOCICLETA", "MOTOCICLETAS", "CAMINHONETE", "CAMINHONETES", "CAMIONETE", "CAMIONETES", "PICAPE", "PICAPES",
+    "PICKUP", "PICKUPS", "PICK UP", "PICK UPS", "SUV", "SUVS", "SEDAN", "SEDANS", "HATCH", "HATCHS", "HATCHBACK", "UTILITARIO", "UTILITARIOS",
+    "VAN", "VANS", "CAMINHAO", "CAMINHÃO", "ONIX", "HB20", "PALIO", "GOL", "UNO", "CORSA", "CELTA", "CRUZE", "CIVIC", "COROLLA", "JETTA",
+    "FOX", "SAVEIRO", "STRADA", "TORO", "RENEGADE", "COMPASS", "HR-V", "HRV", "T-CROSS", "TCROSS", "FASTBACK", "PULSE", "NIVUS",
+    "ARGO", "MOBI", "TRACKER", "CRETA", "KWID", "S10", "HILUX", "SW4", "RANGER", "AMAROK", "FIAT", "CHEVROLET", "VW", "VOLKSWAGEN", "HYUNDAI", "TOYOTA", "HONDA", "JEEP"
+  ],
+  PROPERTY: [
+    "APARTAMENTO", "APARTAMENTOS", "APTO", "APTOS", "CASA", "CASAS", "SOBRADO", "SOBRADOS", "KITNET", "KITNETS", "STUDIO", "STUDIOS", "FLAT", "FLATS",
+    "TERRENO", "TERRENOS", "LOTE", "LOTES", "LOTEAMENTO", "IMOVEL", "IMOVEIS", "IMÓVEL", "IMÓVEIS", "SALA COMERCIAL", "SALA COMERCIAL", "SALAS COMERCIAIS",
+    "PONTO COMERCIAL", "PONTOS COMERCIAIS", "GALPAO", "GALPOES", "GALPÃO", "GALPÕES", "CHACARA", "CHACARAS", "CHÁCARA", "CHÁCARAS", "FAZENDA", "FAZENDAS",
+    "COBERTURA", "COBERTURAS", "CONDOMINIO", "CONDOMINIOS", "CONDOMÍNIO", "CONDOMÍNIOS", "ALUGO", "ALUGAR", "ALUGUEL", "LOCAÇÃO", "LOCACAO", "LOCAR", "VENDA DE IMOVEIS", "VENDA DE IMÓVEIS"
+  ],
+  ELECTRONICS: [
+    "IPHONE", "IPHONES", "SAMSUNG", "MOTOROLA", "XIAOMI", "CELULAR", "CELULARES", "SMARTPHONE", "SMARTPHONES", "NOTEBOOK", "NOTEBOOKS", "MACBOOK", "MACBOOKS",
+    "COMPUTADOR", "COMPUTADORES", "PC", "PCS", "TV", "TVS", "SMART TV", "SMART TVs", "PLAYSTATION", "PS4", "PS5", "XBOX", "NINTENDO", "VIDEOGAME", "VIDEO GAME",
+    "IPAD", "IPADS", "TABLET", "TABLETS", "AIRPODS", "SMARTWATCH", "SMARTWATCHES", "APPLE WATCH", "MONITOR", "MONITORES", "IMPRESSORA", "IMPRESSORAS", "FONE BLUETOOTH", "HEADSET"
+  ],
+  SERVICE: [
+    "SERVICO", "SERVICOS", "SERVIÇO", "SERVIÇOS", "FAÇO", "FACO", "FAZEMOS", "PRESTO", "PRESTAMOS", "OFEREÇO", "OFERECO", "OFERECEMOS",
+    "REALIZO", "REALIZAMOS", "TRABALHO COM", "ATENDO", "ATENDEMOS", "CONSULTORIA", "ASSESSORIA", "ADVOGADO", "ADVOGADA", "ADVOCACIA",
+    "JURIDICO", "JURÍDICO", "CONDOMINIAL", "MANICURE", "DIARISTA", "PEDREIRO", "PINTOR", "ELETRICISTA", "ENCANADOR", "MECANICO", "MECÂNICO",
+    "FRETE", "MASSAGEM", "DESIGNER", "AULA", "AULAS", "INSTALACAO", "INSTALAÇÃO", "MANUTENCAO", "MANUTENÇÃO", "LIMPEZA", "CABELO", "BARBEIRO", "CABELEIREIRA", "UNHAS", "DEPILACAO", "DEPILAÇÃO", "CONSERTO", "REPARO"
+  ],
+  FOOD: [
+    "BOLO", "BOLOS", "DOCINHO", "DOCINHOS", "DOCE", "DOCES", "SALGADO", "SALGADOS", "SALGADINHO", "SALGADINHOS", "MARMITA", "MARMITAS", "LANCHE", "LANCHES",
+    "PIZZA", "PIZZAS", "AÇAI", "AÇAÍ", "ACAI", "HAMBURGUER", "HAMBÚRGUER", "HAMBURGUERES", "HAMBÚRGUERES", "BRIGADEIRO", "BRIGADEIROS", "CONFEITARIA", "SOBREMESA", "SOBREMESAS",
+    "COMIDA", "COMIDA CASEIRA", "PORCAO", "PORÇÃO", "PORCOES", "PORÇÕES", "PRATO", "PRATOS", "TRUFA", "TRUFAS", "DELIVERY", "ALMOCO", "ALMOÇO", "JANTAR", "PÃO DE MEL", "COXINHA"
+  ],
+  FASHION: [
+    "ROUPA", "ROUPAS", "VESTIDO", "VESTIDOS", "CAMISETA", "CAMISETAS", "CAMISA", "CAMISAS", "CALCA", "CALÇA", "CALCAS", "CALÇAS", "TENIS", "TÊNIS",
+    "SAPATO", "SAPATOS", "BOLSA", "BOLSAS", "JAQUETA", "JAQUETAS", "LOOK", "LOOKS", "ACESSORIO", "ACESSÓRIO", "ACESSORIOS", "ACESSÓRIOS", "RELOGIO", "RELÓGIO",
+    "RELOGIOS", "RELÓGIOS", "BONE", "BONÉ", "BONES", "BONÉS", "SHORT", "SHORTS", "SAIA", "SAIAS", "BLUSA", "BLUSAS", "CROPPED", "CROPPEDS", "MOLETOM", "BIQUINI", "BIQUÍNI"
+  ],
+  HOME: [
+    "GELADEIRA", "GELADEIRAS", "FREEZER", "FREEZERS", "FOGAO", "FOGÃO", "FOGOES", "FOGÕES", "MICROONDAS", "MICRO ONDAS", "MICRO-ONDAS", "MAQUINA", "MÁQUINA",
+    "MAQUINA DE LAVAR", "LAVA E SECA", "SOFA", "SOFÁ", "SOFAS", "SOFÁS", "ARMARIO", "ARMÁRIO", "ARMARIOS", "ARMÁRIOS", "MESA", "MESAS", "CADEIRA", "CADEIRAS",
+    "GUARDA ROUPA", "GUARDA-ROUPA", "COLCHAO", "COLCHÃO", "COLCHOES", "COLCHÕES", "COOKTOP", "PAINEL", "RACK", "RAQUE", "LAVADORA", "LAVADORAS", "SECADORA", "SECADORAS",
+    "CAMA", "CAMAS", "POLTRONA", "POLTRONAS", "ESTANTE", "ESTANTES", "COMODA", "CÔMODA", "ESCRIVANINHA", "APARADOR"
+  ],
+});
 
 const CATEGORY_SCHEMAS = Object.freeze({
   VEHICLE: {
@@ -747,8 +812,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
     label: "veículo",
     minAskScore: 75,
     detect(text) {
-      const s = upper(text);
-      return /\b(CARRO|VE[IÍ]CULO|VEICULO|MOTO|MOTOCICLETA|CAMINHONETE|SUV|SEDAN|HATCH|PICK[- ]?UP|ONIX|HB20|PALIO|GOL|UNO|CORSA|CELTA|CRUZE|CIVIC|COROLLA|JETTA|FOX|SAVEIRO|STRADA|TORO|RENEGADE|COMPASS|HR-V|T-CROSS|FASTBACK|PULSE|NIVUS|ARGO|MOBI|TRACKER|CRETA)\b/.test(s);
+      return hasCategoryTerms(text, CATEGORY_TERMS.VEHICLE);
     },
     fields: [
       { key: "price", label: "Preço", weight: 20, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
@@ -767,8 +831,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
     label: "imóvel",
     minAskScore: 70,
     detect(text) {
-      const s = upper(text);
-      return /\b(APARTAMENTO|APTO|CASA|SOBRADO|KITNET|TERRENO|LOTE|IM[ÓO]VEL|SALA COMERCIAL|GALP[ÃA]O|CH[ÁA]CARA|FAZENDA|COBERTURA|ALUGO|ALUGUEL)\b/.test(s);
+      return hasCategoryTerms(text, CATEGORY_TERMS.PROPERTY);
     },
     fields: [
       { key: "price", label: "Preço / aluguel / condomínio", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
@@ -784,8 +847,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
     label: "produto eletrônico",
     minAskScore: 68,
     detect(text) {
-      const s = upper(text);
-      return /\b(IPHONE|SAMSUNG|MOTOROLA|XIAOMI|CELULAR|SMARTPHONE|NOTEBOOK|MACBOOK|COMPUTADOR|TV|PLAYSTATION|PS4|PS5|XBOX|NINTENDO|IPAD|TABLET|AIRPODS|SMARTWATCH|APPLE WATCH)\b/.test(s);
+      return hasCategoryTerms(text, CATEGORY_TERMS.ELECTRONICS);
     },
     fields: [
       { key: "price", label: "Preço", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
@@ -801,8 +863,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
     label: "serviço",
     minAskScore: 68,
     detect(text) {
-      const s = upper(text);
-      return /\b(SERVI[CÇ]O|FA[ÇC]O|ATENDO|ATENDEMOS|MANICURE|DIARISTA|PEDREIRO|PINTOR|ELETRICISTA|ENCANADOR|MEC[ÂA]NICO|FRETE|MASSAGEM|DESIGNER|AULA|CONSULTORIA|INSTALA[CÇ][ÃA]O|MANUTEN[CÇ][ÃA]O|ADVOGADO|ADVOGADA|ADVOCACIA|JUR[IÍ]DIC[OA]|JURIDIC[OA]|CONDOMINIAL)\b/.test(s);
+      return hasCategoryTerms(text, CATEGORY_TERMS.SERVICE);
     },
     fields: [
       { key: "what", label: "O que você faz exatamente", weight: 30, importance: "critical", allowProfileSupport: false, detect: hasServiceDefinitionSignal },
@@ -817,8 +878,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
     label: "produto de alimentação",
     minAskScore: 68,
     detect(text) {
-      const s = upper(text);
-      return /\b(BOLO|DOCINHO|DOCINHOS|DOCE|SALGADO|SALGADINHO|MARMITA|LANCHE|LANCHES|PIZZA|A[ÇC][AÁ]I|HAMB[ÚU]RGUER|BRIGADEIRO|CONFEITARIA|SOBREMESA|COMIDA|POR[CÇ][ÃA]O|PRATO)\b/.test(s);
+      return hasCategoryTerms(text, CATEGORY_TERMS.FOOD);
     },
     fields: [
       { key: "items", label: "Sabores / produtos principais", weight: 24, importance: "critical", allowProfileSupport: true, detect: hasFoodItemsSignal },
@@ -834,8 +894,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
     label: "roupa ou acessório",
     minAskScore: 65,
     detect(text) {
-      const s = upper(text);
-      return /\b(VESTIDO|CAMISETA|CAL[CÇ]A|TENIS|T[ÊE]NIS|SAPATO|BOLSA|JAQUETA|ROUPA|LOOK|ACESS[ÓO]RIO|REL[ÓO]GIO|BON[ÉE]|SHORT|SAIA)\b/.test(s);
+      return hasCategoryTerms(text, CATEGORY_TERMS.FASHION);
     },
     fields: [
       { key: "price", label: "Preço", weight: 26, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
@@ -850,8 +909,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
     label: "móvel ou eletrodoméstico",
     minAskScore: 68,
     detect(text) {
-      const s = upper(text);
-      return /\b(GELADEIRA|FREEZER|FOG[ÃA]O|MICRO-?ONDAS|M[ÁA]QUINA|LAVA E SECA|SOF[ÁA]|ARM[ÁA]RIO|MESA|CADEIRA|GUARDA-ROUPA|COLCH[ÃA]O|COOKTOP|PAINEL|RAQUE|LAVADORA|SECADORA)\b/.test(s);
+      return hasCategoryTerms(text, CATEGORY_TERMS.HOME);
     },
     fields: [
       { key: "price", label: "Preço", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
@@ -1015,45 +1073,27 @@ function hasVoltageOrMeasureSignal(text) {
 }
 
 const CATEGORY_HINTS = Object.freeze({
-  VEHICLE: [
-    "CARRO", "VEICULO", "VEÍCULO", "AUTO", "AUTOMOVEL", "AUTOMÓVEL", "MOTO", "MOTOCICLETA", "CAMINHONETE", "SUV", "SEDAN", "HATCH",
-    "PICKUP", "PICK-UP", "PICK UP", "ONIX", "HB20", "PALIO", "GOL", "UNO", "CORSA", "CELTA", "CRUZE", "CIVIC", "COROLLA", "JETTA",
-    "FOX", "SAVEIRO", "STRADA", "TORO", "RENEGADE", "COMPASS", "HR-V", "HRV", "T-CROSS", "TCROSS", "FASTBACK", "PULSE", "NIVUS",
-    "ARGO", "MOBI", "TRACKER", "CRETA", "KWID", "S10", "HILUX", "SW4", "FIAT", "CHEVROLET", "VW", "VOLKSWAGEN", "HYUNDAI", "TOYOTA", "HONDA"
-  ],
-  PROPERTY: [
-    "APARTAMENTO", "APTO", "CASA", "SOBRADO", "KITNET", "TERRENO", "LOTE", "IMOVEL", "IMÓVEL", "SALA COMERCIAL", "GALPAO", "GALPÃO",
-    "CHACARA", "CHÁCARA", "FAZENDA", "COBERTURA", "ALUGO", "ALUGUEL", "CONDOMINIO", "CONDOMÍNIO"
-  ],
-  ELECTRONICS: [
-    "IPHONE", "SAMSUNG", "MOTOROLA", "XIAOMI", "CELULAR", "SMARTPHONE", "NOTEBOOK", "MACBOOK", "COMPUTADOR", "TV", "PLAYSTATION",
-    "PS4", "PS5", "XBOX", "NINTENDO", "IPAD", "TABLET", "AIRPODS", "SMARTWATCH", "APPLE WATCH", "MONITOR", "IMPRESSORA"
-  ],
-  SERVICE: [
-    "SERVIÇO", "SERVICO", "FAÇO", "FACO", "ATENDO", "ATENDEMOS", "CONSULTORIA", "ASSESSORIA", "ADVOGADO", "ADVOGADA", "ADVOCACIA",
-    "JURÍDICO", "JURIDICO", "CONDOMINIAL", "MANICURE", "DIARISTA", "PEDREIRO", "PINTOR", "ELETRICISTA", "ENCANADOR", "MECÂNICO", "MECANICO",
-    "FRETE", "MASSAGEM", "DESIGNER", "AULA", "INSTALAÇÃO", "INSTALACAO", "MANUTENÇÃO", "MANUTENCAO", "LIMPEZA", "CABELO", "BARBEIRO", "UNHAS"
-  ],
-  FOOD: [
-    "BOLO", "DOCINHO", "DOCINHOS", "DOCE", "SALGADO", "SALGADINHO", "MARMITA", "LANCHE", "LANCHES", "PIZZA", "AÇAÍ", "ACAI",
-    "HAMBÚRGUER", "HAMBURGUER", "BRIGADEIRO", "CONFEITARIA", "SOBREMESA", "COMIDA", "PORÇÃO", "PORCAO", "PRATO", "TRUFA"
-  ],
-  FASHION: [
-    "VESTIDO", "CAMISETA", "CALÇA", "CALCA", "TENIS", "TÊNIS", "SAPATO", "BOLSA", "JAQUETA", "ROUPA", "LOOK", "ACESSORIO", "ACESSÓRIO",
-    "RELÓGIO", "RELOGIO", "BONÉ", "BONE", "SHORT", "SAIA", "BLUSA", "CROPPED"
-  ],
-  HOME: [
-    "GELADEIRA", "FREEZER", "FOGÃO", "FOGAO", "MICROONDAS", "MICRO-ONDAS", "MÁQUINA", "MAQUINA", "LAVA E SECA", "SOFÁ", "SOFA",
-    "ARMÁRIO", "ARMARIO", "MESA", "CADEIRA", "GUARDA-ROUPA", "COLCHÃO", "COLCHAO", "COOKTOP", "PAINEL", "RAQUE", "LAVADORA", "SECADORA"
-  ],
+  VEHICLE: [...CATEGORY_TERMS.VEHICLE, "0KM", "KM", "AUTOMATICO", "AUTOMÁTICO", "MANUAL", "FLEX", "DIESEL"],
+  PROPERTY: [...CATEGORY_TERMS.PROPERTY, "ALTO PADRAO", "ALTO PADRÃO", "METRAGEM", "SUITE", "SUÍTE", "QUARTOS", "VAGAS"],
+  ELECTRONICS: [...CATEGORY_TERMS.ELECTRONICS, "GB", "SSD", "RAM", "POLEGADAS", "BATERIA"],
+  SERVICE: [...CATEGORY_TERMS.SERVICE, "ORCAMENTO", "ORÇAMENTO", "ATENDIMENTO", "DISPONIBILIDADE", "AGENDAMENTO"],
+  FOOD: [...CATEGORY_TERMS.FOOD, "CARDAPIO", "CARDÁPIO", "ENCOMENDA", "PRONTA ENTREGA", "SABORES"],
+  FASHION: [...CATEGORY_TERMS.FASHION, "NUMERACAO", "NUMERAÇÃO", "TAMANHO", "MARCA", "COR"],
+  HOME: [...CATEGORY_TERMS.HOME, "VOLTAGEM", "CAPACIDADE", "MEDIDAS", "LITROS"],
 });
 
 function scoreKeywordHits(text, hints) {
-  const normalized = ` ${upper(text).replace(/[^A-Z0-9ÁÀÂÃÉÈÊÍÌÎÓÒÔÕÚÙÛÇ\- ]+/g, " ")} `;
+  const normalized = normalizeCategoryDetectionText(text);
   let score = 0;
 
   for (const hint of ensureArray(hints)) {
-    const token = cleanText(hint).toUpperCase();
+    const token = cleanText(hint)
+      .toUpperCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^A-Z0-9]+/g, " ")
+      .trim();
+
     if (!token) continue;
     if (normalized.includes(` ${token} `)) score += token.length >= 6 ? 8 : 6;
   }
