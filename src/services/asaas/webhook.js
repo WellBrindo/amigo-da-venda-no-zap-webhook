@@ -13,12 +13,20 @@ import {
   setPrevStatus,
 } from "../state.js";
 
+import { getCopyText } from "../copy.js";
 import { sendWhatsAppText } from "../meta/whatsapp.js";
 import { recordAsaasEvent } from "./ledger.js";
 /**
  * Webhook handler do Asaas
  * externalReference = waId
  */
+
+async function sendCopyText(waId, key, vars = {}, errorTag = "ASAAS_WEBHOOK_SEND_ERROR") {
+  const text = await getCopyText(key, { waId, ...vars });
+  await sendWhatsAppText({ to: waId, text }).catch((err) => {
+    console.error(`[${errorTag}]`, err?.message || err);
+  });
+}
 
 export async function handleAsaasWebhookEvent(body) {
   try {
@@ -68,18 +76,12 @@ export async function handleAsaasWebhookEvent(body) {
       if (!billingCityState) {
         await setPrevStatus(waId, "ACTIVE");
         await setUserStatus(waId, "WAIT_BILLING_CITY_STATE");
-        await sendWhatsAppText({
-          to: waId,
-          text: [
-            "✅ Pagamento confirmado! Seu plano já está ativo.",
-            "",
-            "Agora preciso de uma informação para completar o seu cadastro.",
-            "",
-            "📍 Qual é sua *Cidade/UF*? (ex: Atibaia/SP)",
-            "",
-            "A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.",
-          ].join("\n"),
-        }).catch((err) => console.error("[ASAAS_WEBHOOK_SEND_CITY_ERROR]", err?.message || err));
+        await sendCopyText(
+          waId,
+          "FLOW_ASK_BILLING_CITY_STATE",
+          {},
+          "ASAAS_WEBHOOK_SEND_CITY_ERROR"
+        );
 
         console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando cidade/UF:", { waId, event, plan: plan || "NONE" });
         return { ok: true, statusSetTo: "WAIT_BILLING_CITY_STATE" };
@@ -88,24 +90,24 @@ export async function handleAsaasWebhookEvent(body) {
       if (!billingAddress) {
         await setPrevStatus(waId, "ACTIVE");
         await setUserStatus(waId, "WAIT_BILLING_ADDRESS");
-        await sendWhatsAppText({
-          to: waId,
-          text: [
-            "✅ Pagamento confirmado! Seu plano já está ativo.",
-            "",
-            "Agora me diga seu *endereço* (rua, número, bairro).",
-            "",
-            "Se for apenas atendimento online, responda: *APENAS ONLINE*",
-            "",
-            "A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.",
-          ].join("\n"),
-        }).catch((err) => console.error("[ASAAS_WEBHOOK_SEND_ADDRESS_ERROR]", err?.message || err));
+        await sendCopyText(
+          waId,
+          "FLOW_ASK_BILLING_ADDRESS",
+          {},
+          "ASAAS_WEBHOOK_SEND_ADDRESS_ERROR"
+        );
 
         console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando endereço:", { waId, event, plan: plan || "NONE" });
         return { ok: true, statusSetTo: "WAIT_BILLING_ADDRESS" };
       }
 
       await setUserStatus(waId, "ACTIVE");
+      await sendCopyText(
+        waId,
+        "FLOW_PLAN_ACTIVATED_WELCOME",
+        {},
+        "ASAAS_WEBHOOK_SEND_ACTIVE_WELCOME_ERROR"
+      );
 
       console.log("[ASAAS_WEBHOOK] Usuário ativado:", {
         waId,
@@ -114,6 +116,29 @@ export async function handleAsaasWebhookEvent(body) {
       });
 
       return { ok: true, statusSetTo: "ACTIVE" };
+    }
+
+    // ==============================
+    // FALHA NO CARTÃO / RECUPERAÇÃO DE PAGAMENTO
+    // ==============================
+    if (
+      event === "PAYMENT_CREDIT_CARD_CAPTURE_REFUSED" ||
+      event === "PAYMENT_REPROVED_BY_RISK_ANALYSIS"
+    ) {
+      await setUserStatus(waId, "WAIT_PAYMENT_RECOVERY");
+      await sendCopyText(
+        waId,
+        "FLOW_PAYMENT_RECOVERY",
+        {},
+        "ASAAS_WEBHOOK_SEND_PAYMENT_RECOVERY_ERROR"
+      );
+
+      console.log("[ASAAS_WEBHOOK] Falha no cartão / recuperação iniciada:", {
+        waId,
+        event,
+      });
+
+      return { ok: true, statusSetTo: "WAIT_PAYMENT_RECOVERY" };
     }
 
     // ==============================
