@@ -79,6 +79,16 @@ import {
   getCurrentAdSession,
   setCurrentAdSession,
   clearCurrentAdSession,
+  getActivityMeta,
+  setLastInboundAt,
+  setFloodMeta,
+  getGrowthMeta,
+  setGrowthMeta,
+  markUserAdCreated,
+  markFeedbackAsked,
+  markFeedbackAnswered,
+  markTestimonialAsked,
+  markReferralAsked,
 } from "./state.js";
 
 import { getMenuPlans, getPlan, getPlanByChoice, renderPlansMenu } from "./Plans.js";
@@ -107,7 +117,9 @@ const ST = Object.freeze({
   WAIT_PRODUCT: "WAIT_PRODUCT",
 
   WAIT_PLAN: "WAIT_PLAN",
+  WAIT_UPGRADE_CHOICE: "WAIT_UPGRADE_CHOICE",
   WAIT_PAYMENT_METHOD: "WAIT_PAYMENT_METHOD",
+  WAIT_PAYMENT_RECOVERY: "WAIT_PAYMENT_RECOVERY",
   WAIT_DOC: "WAIT_DOC",
   WAIT_BILLING_CITY_STATE: "WAIT_BILLING_CITY_STATE",
   WAIT_BILLING_ADDRESS: "WAIT_BILLING_ADDRESS",
@@ -127,6 +139,8 @@ const ST = Object.freeze({
   // Pós-anúncio
   WAIT_TEMPLATE_MODE: "WAIT_TEMPLATE_MODE",
   WAIT_SAVE_PROFILE: "WAIT_SAVE_PROFILE",
+  WAIT_FIRST_RESULT_PROMPT: "WAIT_FIRST_RESULT_PROMPT",
+  WAIT_FEEDBACK_RESPONSE: "WAIT_FEEDBACK_RESPONSE",
   WAIT_CATEGORY_DETAILS: "WAIT_CATEGORY_DETAILS",
 
   // Wizard: adicionar/ajustar dados da empresa (manual)
@@ -287,13 +301,15 @@ function formatDateBR(iso) {
   return `${m[3]}/${m[2]}`;
 }
 
-function withMenuHint(text) {
+async function withMenuHint(waId, text) {
   const base = String(text || "").trim();
-  if (!base) return "A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.";
+  const hint = String(await getCopyText("FLOW_MENU_HINT", { waId })).trim();
+  if (!base) return hint;
+  if (!hint) return base;
   if (/digitar\s+\*?menu\*?/i.test(base)) return base;
   return `${base}
 
-A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.`;
+${hint}`;
 }
 
 function daysUntilISO(iso) {
@@ -321,6 +337,75 @@ function todayISO() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function diffMsSafe(fromIso, toIso = nowIso()) {
+  const from = new Date(String(fromIso || ""));
+  const to = new Date(String(toIso || ""));
+  const fromMs = from.getTime();
+  const toMs = to.getTime();
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return null;
+  return toMs - fromMs;
+}
+
+function isTransientFlowStatus(status) {
+  return new Set([
+    ST.WAIT_NAME,
+    ST.WAIT_PLAN,
+    ST.WAIT_UPGRADE_CHOICE,
+    ST.WAIT_PAYMENT_METHOD,
+    ST.WAIT_PAYMENT_RECOVERY,
+    ST.WAIT_DOC,
+    ST.WAIT_BILLING_CITY_STATE,
+    ST.WAIT_BILLING_ADDRESS,
+    ST.WAIT_TEMPLATE_MODE,
+    ST.WAIT_SAVE_PROFILE,
+    ST.WAIT_FIRST_RESULT_PROMPT,
+    ST.WAIT_FEEDBACK_RESPONSE,
+    ST.WAIT_CATEGORY_DETAILS,
+    ST.WAIT_PROFILE_ADD_COMPANY,
+    ST.WAIT_PROFILE_ADD_WHATSAPP,
+    ST.WAIT_PROFILE_ADD_ADDRESS,
+    ST.WAIT_PROFILE_ADD_HOURS,
+    ST.WAIT_PROFILE_ADD_SOCIAL,
+    ST.WAIT_PROFILE_ADD_WEBSITE,
+    ST.WAIT_PROFILE_ADD_PRODUCTS,
+    ST.WAIT_MENU,
+    ST.WAIT_MENU_SUBSCRIPTION,
+    ST.WAIT_MENU_EDIT_ROOT,
+    ST.WAIT_MENU_EDIT_PERSONAL,
+    ST.WAIT_MENU_EDIT_COMPANY,
+    ST.WAIT_MENU_EDIT_TEMPLATE,
+    ST.WAIT_MENU_EDIT_VALUE,
+    ST.WAIT_MENU_NEW_NAME,
+    ST.WAIT_MENU_NEW_DOC,
+    ST.PAYMENT_PENDING,
+  ]).has(status);
+}
+
+function shouldWarnFlood(meta, now = nowIso()) {
+  const flood = meta?.flood || {};
+  const count = Number(flood.count || 0);
+  if (count < 4) return false;
+
+  const warnedAgo = diffMsSafe(flood.warnedAt, now);
+  if (warnedAgo !== null && warnedAgo < 30_000) return false;
+  return true;
+}
+
+function nextHigherPlan(menu, currentPlanCode) {
+  const plans = Array.isArray(menu) ? menu.filter(Boolean) : [];
+  const currentIndex = plans.findIndex((item) => item?.code === currentPlanCode);
+  if (currentIndex < 0) return null;
+  return plans[currentIndex + 1] || null;
+}
+
+function shouldShowProgressMilestone(count) {
+  return count === 3 || count === 5 || count === 8;
+}
+
 function moneyBRFromCents(cents) {
   const v = (Number(cents) || 0) / 100;
   return v.toFixed(2);
@@ -338,6 +423,23 @@ function replyMulti(texts) {
   const arr = Array.isArray(texts) ? texts : [texts];
   const replies = arr.map((t) => String(t || "").trim()).filter(Boolean);
   return { shouldReply: true, replies, replyText: replies[0] || "" };
+}
+
+function prependReplies(result, prefixTexts) {
+  if (!result?.shouldReply) return result;
+
+  const prefixes = (Array.isArray(prefixTexts) ? prefixTexts : [prefixTexts])
+    .map((t) => String(t || "").trim())
+    .filter(Boolean);
+
+  if (!prefixes.length) return result;
+
+  const existing = Array.isArray(result.replies)
+    ? result.replies
+    : [String(result.replyText || "").trim()].filter(Boolean);
+
+  const replies = [...prefixes, ...existing].filter(Boolean);
+  return { ...result, replies, replyText: replies[0] || "" };
 }
 
 function normalizeNewlines(s) {
@@ -1208,13 +1310,13 @@ ${userText}`);
 
 // -------------------- Copy / Mensagens --------------------
 async function msgAskName(waId){
-  return withMenuHint(await getCopyText("FLOW_ASK_NAME", { waId }));
+  return withMenuHint(waId, await getCopyText("FLOW_ASK_NAME", { waId }));
 }
 
 async function msgAskProduct(waId){
   const fullName = await getUserFullName(waId);
   const firstName = firstNameFromFullName(fullName);
-  return withMenuHint(await getCopyText("FLOW_ASK_PRODUCT", { waId, vars: { firstName } }));
+  return withMenuHint(waId, await getCopyText("FLOW_ASK_PRODUCT", { waId, vars: { firstName } }));
 }
 
 async function msgTrialOverAndPlans() {
@@ -1252,7 +1354,7 @@ async function msgPlansOnly() {
 }
 
 async function msgAskPaymentMethod(waId, plan){
-  return withMenuHint(await getCopyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", {
+  return withMenuHint(waId, await getCopyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", {
     waId,
     vars: {
       planName: plan?.name || "",
@@ -1262,7 +1364,7 @@ async function msgAskPaymentMethod(waId, plan){
 }
 
 async function msgAskDoc(waId){
-  return withMenuHint(await getCopyText("FLOW_ASK_DOC", { waId }));
+  return withMenuHint(waId, await getCopyText("FLOW_ASK_DOC", { waId }));
 }
 
 async function msgInvalidDoc(waId){
@@ -1270,11 +1372,11 @@ async function msgInvalidDoc(waId){
 }
 
 async function msgAskBillingCityState(waId){
-  return withMenuHint(await getCopyText("FLOW_ASK_BILLING_CITY_STATE", { waId }));
+  return withMenuHint(waId, await getCopyText("FLOW_ASK_BILLING_CITY_STATE", { waId }));
 }
 
 async function msgAskBillingAddress(waId){
-  return withMenuHint(await getCopyText("FLOW_ASK_BILLING_ADDRESS", { waId }));
+  return withMenuHint(waId, await getCopyText("FLOW_ASK_BILLING_ADDRESS", { waId }));
 }
 
 
@@ -1290,6 +1392,65 @@ async function msgTemplateSet(waId, mode){
 
 async function msgAskProfileRegistration(waId) {
   return await getCopyText("FLOW_ASK_PROFILE_REGISTRATION", { waId });
+}
+
+async function msgUpgradeOffer(waId) {
+  const menu = await getMenuPlans();
+  const currentPlanCode = await getUserPlan(waId);
+  const currentPlan = menu.find((item) => item?.code === currentPlanCode) || (await getPlan(currentPlanCode)) || null;
+  const suggestedUpgrade = nextHigherPlan(menu, currentPlanCode);
+
+  return await getCopyText("FLOW_UPGRADE_OFFER", {
+    waId,
+    vars: {
+      currentPlanName: currentPlan?.name || currentPlanCode || "Seu plano",
+      currentPlanQuotaLine: currentPlan?.monthlyQuota ? `\n${currentPlan.monthlyQuota} descrições/mês` : "",
+      upgradePlanLine: suggestedUpgrade ? `\n• ${suggestedUpgrade.name} — ${suggestedUpgrade.monthlyQuota} descrições/mês` : "",
+    },
+  });
+}
+
+async function msgFirstResultPrompt(waId) {
+  return await getCopyText("FLOW_FIRST_RESULT_PROMPT", { waId });
+}
+
+async function msgFeedbackAsk(waId) {
+  return await getCopyText("FLOW_FEEDBACK_ASK", { waId });
+}
+
+async function msgReferralInvite(waId) {
+  return await getCopyText("FLOW_REFERRAL_INVITE", {
+    waId,
+    vars: { referralLink: "https://wa.me/5511978257959" },
+  });
+}
+
+async function msgPostAdBenefit(waId) {
+  return await getCopyText("FLOW_POST_AD_BENEFIT", { waId });
+}
+
+async function msgPostAdGroupsTip(waId) {
+  return await getCopyText("FLOW_POST_AD_GROUPS_TIP", { waId });
+}
+
+async function msgRewardAfterAd(waId) {
+  return await getCopyText("FLOW_REWARD_AFTER_AD", { waId });
+}
+
+async function msgHabitNudge(waId, count) {
+  return await getCopyText("FLOW_HABIT_NUDGE", { waId, vars: { count } });
+}
+
+async function msgProgressMilestone(waId, count) {
+  return await getCopyText("FLOW_PROGRESS_MILESTONE", { waId, vars: { count } });
+}
+
+async function msgDailyPostingHabit(waId) {
+  return await getCopyText("FLOW_DAILY_POSTING_HABIT", { waId });
+}
+
+async function msgRetentionSignoff(waId) {
+  return await getCopyText("FLOW_RETENTION_SIGNOFF", { waId });
 }
 
 
@@ -1692,16 +1853,16 @@ async function msgMenuEditTemplate(waId) {
 async function msgMenuAskEditField(waId, context) {
   const field = String(context?.field || "");
   if (field === "fullName") {
-    return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_FULLNAME", { waId }));
+    return withMenuHint(waId, await getCopyText("FLOW_MENU_EDIT_FIELD_FULLNAME", { waId }));
   }
   if (field === "docMasked") {
-    return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_DOC", { waId }));
+    return withMenuHint(waId, await getCopyText("FLOW_MENU_EDIT_FIELD_DOC", { waId }));
   }
   if (field === "billingCityState") {
-    return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_BILLING_CITY_STATE", { waId }));
+    return withMenuHint(waId, await getCopyText("FLOW_MENU_EDIT_FIELD_BILLING_CITY_STATE", { waId }));
   }
   if (field === "billingAddress") {
-    return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_BILLING_ADDRESS", { waId }));
+    return withMenuHint(waId, await getCopyText("FLOW_MENU_EDIT_FIELD_BILLING_ADDRESS", { waId }));
   }
 
   const fieldLabels = {
@@ -1714,7 +1875,7 @@ async function msgMenuAskEditField(waId, context) {
     productList: "catálogo ou lista de produtos",
   };
   const label = fieldLabels[field] || "dado";
-  return withMenuHint(await getCopyText("FLOW_MENU_EDIT_FIELD_GENERIC", { waId, vars: { label } }));
+  return withMenuHint(waId, await getCopyText("FLOW_MENU_EDIT_FIELD_GENERIC", { waId, vars: { label } }));
 }
 
 async function msgMenuProfileView(waId) {
@@ -1788,6 +1949,8 @@ async function createCurrentPlanPayment(waId) {
 
     const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
     const lines = [
+      await getCopyText("FLOW_PLAN_VALUE_REINFORCEMENT", { waId }),
+      "",
       "✅ Pronto! Gerei sua cobrança via *PIX*.",
       "",
       url ? `Pague por aqui: ${url}` : "Pague pelo link dentro do Asaas.",
@@ -1811,6 +1974,8 @@ async function createCurrentPlanPayment(waId) {
 
   const url = link?.url || link?.paymentLink || link?.link || "";
   const lines = [
+    await getCopyText("FLOW_PLAN_VALUE_REINFORCEMENT", { waId }),
+    "",
     "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).",
     "",
     url ? `Finalize por aqui: ${url}` : "Finalize pelo link no Asaas.",
@@ -1823,7 +1988,74 @@ async function createCurrentPlanPayment(waId) {
 }
 
 // -------------------- Core --------------------
+async function trackInboundActivity({ waId, status }) {
+  const currentMeta = (await getActivityMeta(waId)) || {};
+  const now = nowIso();
+  const flood = currentMeta?.flood || {};
+  const lastMessageAt = flood?.lastMessageAt || currentMeta?.lastInboundAt || "";
+  const deltaMs = diffMsSafe(lastMessageAt, now);
+
+  let nextFlood;
+  if (deltaMs !== null && deltaMs >= 0 && deltaMs <= 8_000) {
+    nextFlood = {
+      windowStartAt: flood?.windowStartAt || lastMessageAt || now,
+      count: Number(flood?.count || 0) + 1,
+      lastMessageAt: now,
+      warnedAt: flood?.warnedAt || "",
+    };
+  } else {
+    nextFlood = {
+      windowStartAt: now,
+      count: 1,
+      lastMessageAt: now,
+      warnedAt: flood?.warnedAt || "",
+    };
+  }
+
+  const shouldWarn = shouldWarnFlood({ flood: nextFlood }, now);
+  if (shouldWarn) nextFlood.warnedAt = now;
+
+  await Promise.all([
+    setLastInboundAt(waId, now),
+    setFloodMeta(waId, nextFlood),
+  ]);
+
+  const wasIdleLongEnough = (() => {
+    if (!isTransientFlowStatus(status)) return false;
+    const diff = diffMsSafe(currentMeta?.lastInboundAt, now);
+    return diff !== null && diff >= 5 * 60 * 1000;
+  })();
+
+  return {
+    shouldWarnFlood: shouldWarn,
+    shouldPrefixIdleNudge: wasIdleLongEnough,
+  };
+}
+
 export async function handleInboundText({ waId, text }) {
+  const id = cleanText(waId);
+  const inbound = cleanText(text);
+
+  if (!id || !inbound) return noReply();
+
+  await ensureUserExists(id);
+
+  const currentStatus = await getUserStatus(id);
+  const activity = await trackInboundActivity({ waId: id, status: currentStatus });
+  const outcome = await handleInboundTextCore({ waId: id, text: inbound });
+
+  const prefixes = [];
+  if (activity.shouldWarnFlood) {
+    prefixes.push(await getCopyText("FLOW_FLOOD_NOTICE", { waId: id }));
+  }
+  if (activity.shouldPrefixIdleNudge) {
+    prefixes.push(await getCopyText("FLOW_IDLE_NUDGE", { waId: id }));
+  }
+
+  return prependReplies(outcome, prefixes);
+}
+
+async function handleInboundTextCore({ waId, text }) {
   const id = cleanText(waId);
   const inbound = cleanText(text);
 
@@ -1895,7 +2127,7 @@ export async function handleInboundText({ waId, text }) {
       } else {
         await setUserStatus(id, ST.WAIT_PRODUCT);
       }
-      return await handleInboundText({ waId: id, text: inbound });
+      return await handleInboundTextCore({ waId: id, text: inbound });
     }
 
     if (choice === "1") {
@@ -2122,7 +2354,7 @@ export async function handleInboundText({ waId, text }) {
       } else {
         await setUserStatus(id, ST.WAIT_PRODUCT);
       }
-      return await handleInboundText({ waId: id, text: inbound });
+      return await handleInboundTextCore({ waId: id, text: inbound });
     }
 
     const mode = c === "2" ? "FREE" : "FIXED";
@@ -2166,10 +2398,68 @@ export async function handleInboundText({ waId, text }) {
 
       const isTrialNow = prev !== ST.ACTIVE;
       const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
-      return replyMulti([await msgAfterSaveProfile(id, false, maxRef)]);
+      return replyMulti(await buildPostProfilePrompt({ waId: id, saved: false, maxRefinements: maxRef }));
     }
 
     return reply(await msgAskProfileRegistration(id));
+  }
+
+  // 0.41) Pós-primeiro resultado — próximo passo
+  if (status === ST.WAIT_FIRST_RESULT_PROMPT) {
+    const c = normalizeChoice(inbound);
+    const prev = await getPrevStatus(id);
+    await clearPrevStatus(id);
+
+    if (c === "1" || c === "2") {
+      await clearLastAd(id);
+      await clearRefineCount(id);
+      await clearLastPrompt(id);
+      await setUserStatus(id, prev || ST.WAIT_PRODUCT);
+      return reply(await msgAskProduct(id));
+    }
+
+    if (c === "3") {
+      await clearLastAd(id);
+      await clearRefineCount(id);
+      await clearLastPrompt(id);
+      await setUserStatus(id, prev || ST.WAIT_PRODUCT);
+      return replyMulti([
+        await msgPostAdBenefit(id),
+        await msgPostAdGroupsTip(id),
+        await getCopyText("FLOW_MENU_URL_HELP", { waId: id }),
+        await msgAskProduct(id),
+      ]);
+    }
+
+    return reply(await msgFirstResultPrompt(id));
+  }
+
+  // 0.42) Feedback pós-uso
+  if (status === ST.WAIT_FEEDBACK_RESPONSE) {
+    const c = normalizeChoice(inbound);
+    if (!["1", "2", "3"].includes(c)) {
+      return reply(await msgFeedbackAsk(id));
+    }
+
+    await markFeedbackAnswered(id, c);
+
+    const prev = await getPrevStatus(id);
+    await clearPrevStatus(id);
+    await setUserStatus(id, prev || ST.ACTIVE);
+
+    if (c === "1") {
+      await markTestimonialAsked(id);
+      return replyMulti([
+        await getCopyText("FLOW_TESTIMONIAL_ASK", { waId: id }),
+        await getCopyText("FLOW_MENU_URL_FEEDBACK", { waId: id }),
+        await msgRetentionSignoff(id),
+      ]);
+    }
+
+    return replyMulti([
+      await msgPostAdBenefit(id),
+      await msgRetentionSignoff(id),
+    ]);
   }
 
 
@@ -2322,7 +2612,7 @@ export async function handleInboundText({ waId, text }) {
 
       const isTrialNow = prev !== ST.ACTIVE;
       const maxRef = await resolveMaxRefinementsForUser(id, isTrialNow);
-      return replyMulti([await msgAfterSaveProfile(id, true, maxRef)]);
+      return replyMulti(await buildPostProfilePrompt({ waId: id, saved: true, maxRefinements: maxRef }));
     }
   }
 
@@ -2366,6 +2656,32 @@ export async function handleInboundText({ waId, text }) {
     await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
 
     return reply(await msgAskPaymentMethod(id, plan));
+  }
+
+  // 4.1) Upgrade automático ao atingir limite
+  if (status === ST.WAIT_UPGRADE_CHOICE) {
+    const c = normalizeChoice(inbound);
+
+    if (c === "1") {
+      const menu = await getMenuPlans();
+      const currentPlanCode = await getUserPlan(id);
+      const suggestedUpgrade = nextHigherPlan(menu, currentPlanCode);
+      if (!suggestedUpgrade) {
+        await setUserStatus(id, ST.WAIT_PLAN);
+        return reply(await msgPlansOnly());
+      }
+
+      await setUserPlan(id, suggestedUpgrade.code);
+      await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
+      return reply(await msgAskPaymentMethod(id, suggestedUpgrade));
+    }
+
+    if (c === "2") {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
+    }
+
+    return reply(await msgUpgradeOffer(id));
   }
 
   // 5) Forma de pagamento
@@ -2431,7 +2747,26 @@ export async function handleInboundText({ waId, text }) {
     await clearPrevStatus(id);
     await setUserStatus(id, prev || ST.ACTIVE);
 
-    return reply(withMenuHint(await getCopyText("FLOW_BILLING_UPDATED_SUCCESS", { waId: id })));
+    return reply(await withMenuHint(id, await getCopyText("FLOW_BILLING_UPDATED_SUCCESS", { waId: id })));
+  }
+
+  // 6.5) Recuperação de pagamento
+  if (status === ST.WAIT_PAYMENT_RECOVERY) {
+    const c = normalizeChoice(inbound);
+    if (c === "1" || c === "2") {
+      await setPaymentMethod(id, c === "1" ? "CARD" : "PIX");
+      return reply(await createCurrentPlanPayment(id));
+    }
+
+    if (c === "3") {
+      await setUserStatus(id, ST.PAYMENT_PENDING);
+      return replyMulti([
+        await getCopyText("FLOW_MENU_URL_FEEDBACK", { waId: id }),
+        await getCopyText("FLOW_PAYMENT_PENDING", { waId: id, vars: { planTxt: "" } }),
+      ]);
+    }
+
+    return reply(await getCopyText("FLOW_PAYMENT_RECOVERY", { waId: id }));
   }
 
   // 7) Pagamento pendente
@@ -2509,6 +2844,49 @@ async function resolveMaxRefinementsForUser(waId, isTrial) {
   return policy.maxRefinements;
 }
 
+async function buildPostProfilePrompt({ waId, saved, maxRefinements }) {
+  const growthMeta = await getGrowthMeta(waId);
+  const adsCreatedTotal = Number(growthMeta?.adsCreatedTotal || 0);
+
+  const messages = [await msgAfterSaveProfile(waId, saved, maxRefinements)];
+  if (adsCreatedTotal === 1) {
+    const prev = await getPrevStatus(waId);
+    await setPrevStatus(waId, prev && prev !== ST.WAIT_SAVE_PROFILE ? prev : ST.WAIT_PRODUCT);
+    await setUserStatus(waId, ST.WAIT_FIRST_RESULT_PROMPT);
+    messages.push(await msgFirstResultPrompt(waId));
+  }
+  return messages;
+}
+
+async function buildPostAdGrowthMessages({ waId, adsCreatedTotal }) {
+  const count = Number(adsCreatedTotal || 0);
+  if (count <= 0) return [];
+
+  const growthMeta = await getGrowthMeta(waId);
+  const messages = [];
+
+  if (count <= 2) {
+    messages.push(await msgPostAdGroupsTip(waId));
+  }
+
+  if (shouldShowProgressMilestone(count)) {
+    messages.push(await msgProgressMilestone(waId, count));
+  }
+
+  if (count >= 3 && !growthMeta?.habitPromptedAt) {
+    messages.push(await msgHabitNudge(waId, count));
+    messages.push(await msgDailyPostingHabit(waId));
+    await setGrowthMeta(waId, { ...growthMeta, habitPromptedAt: nowIso() });
+  }
+
+  if (count >= 10 && !growthMeta?.referralAskedAt) {
+    messages.push(await msgReferralInvite(waId));
+    await markReferralAsked(waId);
+  }
+
+  return messages;
+}
+
 async function handlePostAdDecisionCommand({ waId, inboundText }) {
   const lastAd = await getLastAd(waId);
   if (!lastAd) return null;
@@ -2574,7 +2952,10 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     const used = await getUserTrialUsed(id);
     if (creditsNeeded > 0 && used >= TRIAL_LIMIT) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgTrialOverAndPlans());
+      return replyMulti([
+        await getCopyText("FLOW_PLAN_VALUE_REINFORCEMENT", { waId: id }),
+        await msgTrialOverAndPlans(),
+      ]);
     }
   } else {
     // ACTIVE: checa validade do cartão (quando recorrência foi cancelada)
@@ -2597,8 +2978,21 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
     const used = await getUserQuotaUsed(id);
     if (used >= Number(plan.monthlyQuota || 0)) {
+      const menu = await getMenuPlans();
+      const suggestedUpgrade = nextHigherPlan(menu, planCode);
+      if (suggestedUpgrade) {
+        await setUserStatus(id, ST.WAIT_UPGRADE_CHOICE);
+        return replyMulti([
+          await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id }),
+          await msgUpgradeOffer(id),
+        ]);
+      }
+
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(`${await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id })}\n\n${await msgPlansOnly()}`);
+      return replyMulti([
+        await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id }),
+        await msgPlansOnly(),
+      ]);
     }
   }
 
@@ -2655,6 +3049,9 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     }
   }
 
+  const growthMeta = await markUserAdCreated(id);
+  const adsCreatedTotal = Number(growthMeta?.adsCreatedTotal || 0);
+
   let formattedAd = enforceAdFormatting(ad);
   formattedAd = sanitizeGeneratedAd(formattedAd, bizProfile);
   formattedAd = applyPersistentBusinessInfo(formattedAd, bizProfile, userText, isRefinement);
@@ -2674,7 +3071,21 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   // Mantém o status atual e apenas orienta refinamentos
   const refineMsg = await msgRefinementPrompt(id, maxRefinements);
-  return replyMulti([formattedAd, refineMsg]);
+  const followups = [await msgRewardAfterAd(id), await msgPostAdBenefit(id), refineMsg];
+  const growthMessages = await buildPostAdGrowthMessages({ waId: id, adsCreatedTotal });
+
+  const currentGrowthMeta = await getGrowthMeta(id);
+  const shouldAskFeedback = adsCreatedTotal >= 8 && !currentGrowthMeta?.feedbackAskedAt && !currentGrowthMeta?.feedbackAnsweredAt;
+  if (shouldAskFeedback) {
+    await markFeedbackAsked(id);
+    await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
+    await setUserStatus(id, ST.WAIT_FEEDBACK_RESPONSE);
+    growthMessages.push(await msgFeedbackAsk(id));
+  } else {
+    growthMessages.push(await msgRetentionSignoff(id));
+  }
+
+  return replyMulti([formattedAd, ...followups, ...growthMessages]);
 }
 
 // -------------------- Asaas helpers --------------------
