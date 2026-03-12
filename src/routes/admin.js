@@ -8,6 +8,7 @@ import {
   setUserTrialUsed,
   getUserSnapshot,
   listUsers,
+  setTestimonialReviewStatus,
   clearLastPrompt, // ✅ V16.4.6: limpar via DEL (não SET "")
   setLastPrompt, // ✅ TESTE CONTROLADO: forçar setLastPrompt("")
   resetUserAsNew, // 🧹 reset total (número de teste)
@@ -33,6 +34,9 @@ import {
   getUserLastNMonths,
   getUserDaysRange,
   resetUserDescriptionMetrics,
+  getFeedbackMetricsOverview,
+  getMetricEventLastNDays,
+  incMetricEvent,
 } from "../services/metrics.js";
 
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
@@ -241,7 +245,7 @@ function layoutBase({ title, activePath = "/admin", content = "", headExtra = ""
 
 function renderSidebar(activePath){
   const ap = String(activePath||"");
-  const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm") || ap.startsWith("/admin/bulk");
+  const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm") || ap.startsWith("/admin/bulk") || ap.startsWith("/admin/feedback");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
   const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings") || ap.startsWith("/admin/admin-users");
   const reportsOpen = ap.startsWith("/admin/reports");
@@ -282,6 +286,7 @@ function renderSidebar(activePath){
         <summary>👥 Usuários <span>▾</span></summary>
         ${item("/admin/crm-ui", "CRM de usuários", "🧭")}
         ${item("/admin/bulk-ui", "Ações em massa", "🧰")}
+        ${item("/admin/feedback-ui", "Avaliações e depoimentos", "💚")}
         ${item("/admin/users-list-ui", "Lista de usuários", "📋")}
         ${item("/admin/users-ui", "Ações / Consulta", "👤")}
         ${item("/admin/window24h-ui", "Janela 24h", "🕒")}
@@ -518,7 +523,7 @@ function getAdminRequiredPermission(pathname) {
   const path = String(pathname || "").trim();
   if (!path || path === "/" || path.startsWith("/dashboard") || path.startsWith("/executive")) return "dashboard.view";
   if (path.startsWith("/reports") || path.startsWith("/export")) return "reports.view";
-  if (path.startsWith("/users") || path.startsWith("/crm") || path.startsWith("/bulk") || path.startsWith("/window24h")) return "users.manage";
+  if (path.startsWith("/users") || path.startsWith("/crm") || path.startsWith("/bulk") || path.startsWith("/window24h") || path.startsWith("/feedback")) return "users.manage";
   if (path.startsWith("/plans") || path.startsWith("/health-plans")) return "plans.manage";
   if (path.startsWith("/finance") || path.startsWith("/api/finance") || path.startsWith("/asaas-test") || path.startsWith("/api/asaas")) return "finance.view";
   if (path.startsWith("/broadcast") || path.startsWith("/campaigns")) return "marketing.manage";
@@ -1679,6 +1684,135 @@ export function adminRouter() {
       plans,
       cities,
       inconsistencies: inconsistencyData,
+    };
+  }
+
+  function feedbackResponseLabel(value) {
+    const v = String(value || "").trim();
+    if (v === "1") return "Muito";
+    if (v === "2") return "Mais ou menos";
+    if (v === "3") return "Não";
+    return "";
+  }
+
+  async function buildFeedbackCenterData() {
+    const users = await listUsers();
+    const snapshots = await mapLimitDashboard(users, 25, async (waId) => {
+      const snap = await getUserSnapshot(waId);
+      return snap;
+    });
+
+    const items = [];
+    const summary = {
+      usersScanned: users.length,
+      feedbackAsked: 0,
+      feedbackAnswered: 0,
+      positive: 0,
+      neutral: 0,
+      negative: 0,
+      comments: 0,
+      testimonials: 0,
+      consented: 0,
+      pendingReview: 0,
+      approved: 0,
+      rejected: 0,
+      published: 0,
+      internalOnly: 0,
+    };
+
+    for (const snap of snapshots) {
+      if (!snap || snap.__error) continue;
+      const meta = snap.growthMeta && typeof snap.growthMeta === 'object' ? snap.growthMeta : {};
+      const feedbackResponse = String(meta.feedbackResponse || '').trim();
+      const feedbackComment = String(meta.feedbackComment || '').trim();
+      const testimonialText = String(meta.testimonialText || '').trim();
+      const testimonialConsent = String(meta.testimonialConsent || '').trim().toUpperCase();
+      const testimonialStatus = String(meta.testimonialStatus || '').trim().toUpperCase();
+      const hasAny = Boolean(
+        meta.feedbackAskedAt ||
+        meta.feedbackAnsweredAt ||
+        feedbackResponse ||
+        feedbackComment ||
+        meta.testimonialAskedAt ||
+        testimonialText ||
+        testimonialConsent
+      );
+      if (!hasAny) continue;
+
+      if (meta.feedbackAskedAt) summary.feedbackAsked += 1;
+      if (meta.feedbackAnsweredAt || feedbackResponse) summary.feedbackAnswered += 1;
+      if (feedbackResponse === '1') summary.positive += 1;
+      if (feedbackResponse === '2') summary.neutral += 1;
+      if (feedbackResponse === '3') summary.negative += 1;
+      if (feedbackComment) summary.comments += 1;
+      if (testimonialText) summary.testimonials += 1;
+      if (testimonialConsent === 'YES') summary.consented += 1;
+      if (testimonialStatus === 'PENDING_REVIEW') summary.pendingReview += 1;
+      if (testimonialStatus === 'APPROVED') summary.approved += 1;
+      if (testimonialStatus === 'REJECTED') summary.rejected += 1;
+      if (testimonialStatus === 'PUBLISHED') summary.published += 1;
+      if (testimonialStatus === 'INTERNAL_ONLY') summary.internalOnly += 1;
+
+      const latestAt = [
+        meta.testimonialStatusUpdatedAt,
+        meta.testimonialConsentAt,
+        meta.testimonialTextAt,
+        meta.feedbackCommentAt,
+        meta.feedbackAnsweredAt,
+        meta.feedbackAskedAt,
+      ].map((value) => String(value || '').trim()).filter(Boolean).sort().slice(-1)[0] || '';
+
+      items.push({
+        waId: String(snap.waId || ''),
+        fullName: String(snap.fullName || ''),
+        companyName: String(snap?.bizProfile?.companyName || ''),
+        feedbackResponse,
+        feedbackResponseLabel: feedbackResponseLabel(feedbackResponse),
+        feedbackAnsweredAt: String(meta.feedbackAnsweredAt || ''),
+        feedbackComment,
+        feedbackCommentAt: String(meta.feedbackCommentAt || ''),
+        testimonialText,
+        testimonialTextAt: String(meta.testimonialTextAt || meta.testimonialReceivedAt || ''),
+        testimonialConsent,
+        testimonialConsentAt: String(meta.testimonialConsentAt || ''),
+        testimonialDisplayMode: String(meta.testimonialDisplayMode || ''),
+        testimonialDisplayName: String(meta.testimonialDisplayName || ''),
+        testimonialStatus,
+        testimonialStatusUpdatedAt: String(meta.testimonialStatusUpdatedAt || ''),
+        latestAt,
+      });
+    }
+
+    items.sort((a, b) => String(b.latestAt || '').localeCompare(String(a.latestAt || '')));
+
+    const answeredBase = summary.feedbackAnswered || 0;
+    const pct = (count) => answeredBase > 0 ? Number(((Number(count || 0) / answeredBase) * 100).toFixed(1)) : 0;
+
+    let metrics = { ok: false };
+    let metricsTimeline = { ok: false };
+    try {
+      const [overview, answeredTimeline] = await Promise.all([
+        getFeedbackMetricsOverview(),
+        getMetricEventLastNDays('feedback_answered', 30),
+      ]);
+      metrics = overview;
+      metricsTimeline = answeredTimeline;
+    } catch (_) {
+      // best-effort: o centro continua funcionando mesmo sem telemetria dedicada
+    }
+
+    return {
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      summary: {
+        ...summary,
+        positivePct: pct(summary.positive),
+        neutralPct: pct(summary.neutral),
+        negativePct: pct(summary.negative),
+      },
+      metrics,
+      metricsTimeline,
+      items,
     };
   }
 
@@ -5709,6 +5843,228 @@ async function toggle(code, active){
     const html = layoutBase({
       title: "Relatórios e Exportação",
       activePath: "/admin/reports-ui",
+      content: inner,
+      scriptExtra,
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  router.get("/feedback/data", async (req, res) => {
+    try {
+      const data = await buildFeedbackCenterData();
+      return res.json(data);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/feedback/review-status", async (req, res) => {
+    try {
+      const waId = String(req.body?.waId || "").trim();
+      const status = String(req.body?.status || "").trim().toUpperCase();
+      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+      if (!["PENDING_REVIEW", "APPROVED", "REJECTED", "PUBLISHED", "INTERNAL_ONLY"].includes(status)) {
+        return res.status(400).json({ ok: false, error: "invalid status" });
+      }
+      const beforeUser = await getUserSnapshot(waId);
+      const beforeStatus = String(beforeUser?.growthMeta?.testimonialStatus || "").trim().toUpperCase();
+      await setTestimonialReviewStatus(waId, status);
+      if (status !== beforeStatus) {
+        if (status === 'APPROVED') await incMetricEvent('testimonial_review_approved', { waId });
+        if (status === 'REJECTED') await incMetricEvent('testimonial_review_rejected', { waId });
+        if (status === 'PUBLISHED') await incMetricEvent('testimonial_review_published', { waId });
+      }
+      const user = await getUserSnapshot(waId);
+      await safeRecordAdminAudit(req, {
+        module: "feedback",
+        action: "SET_TESTIMONIAL_STATUS",
+        waId,
+        targetId: waId,
+        summary: `Atualizou o status do depoimento de ${waId} para ${status}.`,
+        before: buildAuditUserSnapshot(beforeUser),
+        after: buildAuditUserSnapshot(user),
+        meta: { status },
+      });
+      return res.json({ ok: true, waId, status, user });
+    } catch (err) {
+      return res.status(err.statusCode || 500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/feedback-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad" style="margin-bottom:14px;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">💚 Avaliações e depoimentos</h3>
+            <div class="muted">Acompanhe a satisfação dos usuários, comentários livres e depoimentos coletados pelo WhatsApp.</div>
+          </div>
+          <button class="primary" id="feedbackReloadBtn">Atualizar</button>
+        </div>
+      </div>
+
+      <div class="grid cols-4" style="margin-bottom:14px;">
+        <div class="card pad"><div class="t">Feedbacks respondidos</div><div class="v" id="fbAnswered">—</div><div class="muted" id="fbAsked">—</div></div>
+        <div class="card pad"><div class="t">Satisfação positiva</div><div class="v" id="fbPositivePct">—</div><div class="muted" id="fbPositiveRaw">—</div></div>
+        <div class="card pad"><div class="t">Depoimentos recebidos</div><div class="v" id="fbTestimonials">—</div><div class="muted" id="fbConsented">—</div></div>
+        <div class="card pad"><div class="t">Fila de revisão</div><div class="v" id="fbPending">—</div><div class="muted" id="fbPublished">—</div></div>
+      </div>
+
+      <div class="card pad" style="margin-bottom:14px;">
+        <div class="row" style="gap:8px; flex-wrap:wrap; margin-bottom:10px;">
+          <span class="pill">🙂 Positivos: <b id="fbPositiveCount">—</b></span>
+          <span class="pill">😐 Neutros: <b id="fbNeutralCount">—</b></span>
+          <span class="pill">🙁 Negativos: <b id="fbNegativeCount">—</b></span>
+          <span class="pill">💬 Comentários: <b id="fbComments">—</b></span>
+          <span class="pill">✅ Autorizados: <b id="fbAuthorized">—</b></span>
+        </div>
+        <div class="muted">Os depoimentos autorizados entram como <b>PENDENTE_REVIEW</b> até alguém aprovar no Admin.</div>
+        <div class="muted" id="fbMetricsNote" style="margin-top:8px;">Telemetria dedicada de feedback: carregando…</div>
+      </div>
+
+      <div class="card pad">
+        <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:10px;">
+          <h4 style="margin:0;">Registros coletados</h4>
+          <input id="feedbackFilter" type="text" placeholder="Filtrar por nome, empresa, número ou trecho do comentário" style="min-width:280px;" />
+        </div>
+        <div style="overflow:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Quando</th>
+                <th>Usuário</th>
+                <th>Avaliação</th>
+                <th>Comentário</th>
+                <th>Depoimento</th>
+                <th>Uso público</th>
+                <th>Status</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody id="feedbackRows"><tr><td colspan="8" class="muted">Carregando…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    const scriptExtra = `
+      <script>
+        (function(){
+          function esc(v){
+            return String(v == null ? '' : v)
+              .replaceAll('&','&amp;')
+              .replaceAll('<','&lt;')
+              .replaceAll('>','&gt;')
+              .replaceAll('"','&quot;')
+              .replaceAll("'", '&#39;');
+          }
+          function fmtTs(v){
+            const s = String(v || '');
+            if (!s) return '—';
+            const d = new Date(s);
+            if (Number.isNaN(d.getTime())) return esc(s);
+            return d.toLocaleString('pt-BR');
+          }
+          function setText(id, value){
+            const el = document.getElementById(id);
+            if (el) el.textContent = String(value == null ? '' : value);
+          }
+          function reviewButtons(item){
+            if (!(item && item.testimonialText && item.testimonialConsent === 'YES')) return '—';
+            const actions = [
+              ['APPROVED', '✅ Aprovar'],
+              ['REJECTED', '⛔ Rejeitar'],
+              ['PUBLISHED', '🚀 Publicado']
+            ];
+            return actions.map(function(entry){
+              const disabled = item.testimonialStatus === entry[0] ? 'disabled' : '';
+              return '<button class="pill" data-waid="' + esc(item.waId) + '" data-status="' + esc(entry[0]) + '" ' + disabled + '>' + esc(entry[1]) + '</button>';
+            }).join(' ');
+          }
+          let allItems = [];
+          async function load(){
+            const r = await fetch('/admin/feedback/data');
+            const j = await r.json();
+            const summary = j.summary || {};
+            allItems = Array.isArray(j.items) ? j.items : [];
+            setText('fbAnswered', summary.feedbackAnswered || 0);
+            setText('fbAsked', 'Perguntados: ' + String(summary.feedbackAsked || 0));
+            setText('fbPositivePct', String(summary.positivePct || 0).replace('.', ',') + '%');
+            setText('fbPositiveRaw', String(summary.positive || 0) + ' positivos');
+            setText('fbTestimonials', summary.testimonials || 0);
+            setText('fbConsented', 'Autorizados: ' + String(summary.consented || 0));
+            setText('fbPending', summary.pendingReview || 0);
+            setText('fbPublished', 'Publicados: ' + String(summary.published || 0));
+            setText('fbPositiveCount', summary.positive || 0);
+            setText('fbNeutralCount', summary.neutral || 0);
+            setText('fbNegativeCount', summary.negative || 0);
+            setText('fbComments', summary.comments || 0);
+            setText('fbAuthorized', summary.consented || 0);
+            const metrics = j.metrics && j.metrics.ok ? j.metrics : null;
+            const events = metrics && metrics.events ? metrics.events : {};
+            const answeredDay = Number(((events.feedback_answered || {}).dayCount) || 0);
+            const answeredMonth = Number(((events.feedback_answered || {}).monthCount) || 0);
+            const createdMonth = Number(((events.testimonial_created || {}).monthCount) || 0);
+            const consentMonth = Number(((events.testimonial_consent_yes || {}).monthCount) || 0);
+            setText('fbMetricsNote', metrics ? ('Telemetria dedicada: ' + answeredDay + ' respostas hoje • ' + answeredMonth + ' respostas no mês • ' + createdMonth + ' depoimentos no mês • ' + consentMonth + ' autorizações no mês') : 'Telemetria dedicada indisponível no momento.');
+            renderRows();
+          }
+          function renderRows(){
+            const q = String((document.getElementById('feedbackFilter') || {}).value || '').trim().toLowerCase();
+            const rows = allItems.filter(function(item){
+              if (!q) return true;
+              const hay = [item.waId, item.fullName, item.companyName, item.feedbackComment, item.testimonialText, item.testimonialDisplayName, item.feedbackResponseLabel, item.testimonialStatus].join(' ').toLowerCase();
+              return hay.includes(q);
+            }).map(function(item){
+              const who = item.fullName || item.companyName || item.waId || '—';
+              const company = item.companyName ? '<div class="muted">' + esc(item.companyName) + '</div>' : '';
+              const comment = item.feedbackComment ? '<div style="white-space:pre-wrap; max-width:320px;">' + esc(item.feedbackComment) + '</div>' : '<span class="muted">—</span>';
+              const testimonial = item.testimonialText ? '<div style="white-space:pre-wrap; max-width:320px;">' + esc(item.testimonialText) + '</div>' + (item.testimonialDisplayName ? '<div class="muted">Exibição: ' + esc(item.testimonialDisplayName) + '</div>' : '') : '<span class="muted">—</span>';
+              const usage = item.testimonialConsent === 'YES' ? 'Sim' : item.testimonialConsent === 'NO' ? 'Não' : '—';
+              const status = item.testimonialStatus || '—';
+              return '<tr>' +
+                '<td><code>' + fmtTs(item.latestAt) + '</code></td>' +
+                '<td><div><b>' + esc(who) + '</b></div>' + company + '<div class="muted"><code>' + esc(item.waId || '—') + '</code></div></td>' +
+                '<td>' + esc(item.feedbackResponseLabel || '—') + '</td>' +
+                '<td>' + comment + '</td>' +
+                '<td>' + testimonial + '</td>' +
+                '<td>' + esc(usage) + '</td>' +
+                '<td><span class="pill">' + esc(status) + '</span></td>' +
+                '<td>' + reviewButtons(item) + '</td>' +
+              '</tr>';
+            }).join('');
+            document.getElementById('feedbackRows').innerHTML = rows || '<tr><td colspan="8" class="muted">Nenhum feedback encontrado.</td></tr>';
+            Array.from(document.querySelectorAll('#feedbackRows button[data-waid]')).forEach(function(btn){
+              btn.addEventListener('click', async function(){
+                const waId = this.getAttribute('data-waid');
+                const status = this.getAttribute('data-status');
+                this.disabled = true;
+                try {
+                  const r = await fetch('/admin/feedback/review-status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ waId: waId, status: status }) });
+                  const j = await r.json();
+                  if (!j.ok) throw new Error(j.error || 'Falha ao atualizar');
+                  await load();
+                } catch (err) {
+                  alert(String(err && err.message ? err.message : err));
+                  this.disabled = false;
+                }
+              });
+            });
+          }
+          const reloadBtn = document.getElementById('feedbackReloadBtn');
+          if (reloadBtn) reloadBtn.addEventListener('click', load);
+          const filter = document.getElementById('feedbackFilter');
+          if (filter) filter.addEventListener('input', renderRows);
+          load();
+        })();
+      </script>
+    `;
+
+    const html = layoutBase({
+      title: "Avaliações e depoimentos",
+      activePath: "/admin/feedback-ui",
       content: inner,
       scriptExtra,
     });
