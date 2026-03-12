@@ -54,6 +54,7 @@ async function resolveVars({ waId = null, vars = null } = {}) {
 export const DEFAULT_COPY = Object.freeze({
   // FLOW — Identidade / Onboarding
   FLOW_WELCOME: "Oi! 👋😊\n\nEu sou o *Amigo das Vendas*.",
+  FLOW_MENU_HINT: "A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.",
   FLOW_ASK_NAME: `Oi! 👋😊
 
 Eu sou o Amigo das Vendas — pode me chamar de Amigo.
@@ -254,6 +255,74 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
   // Vars: renewalBr, daysLeft
   FLOW_MENU_CANCEL_OK:
     "✅ Pronto! A recorrência do *Cartão* foi cancelada.\n\nVocê continua com acesso até *{{renewalBr}}* (faltam {{daysLeft}} dia(s)).\n\nQuando chegar a data, é só escolher um plano novamente pelo *MENU* 😉",
+
+
+  // FLOW — Reengajamento / Crescimento / Retenção (preparação para próximas fases)
+  FLOW_IDLE_NUDGE:
+    "Oi 🙂 ainda quer criar seu anúncio?\n\nMe diga o que você vende ou digite *MENU*.",
+
+  FLOW_UPGRADE_OFFER:
+    "Você atingiu o limite do seu plano.\n\nPlano atual:\n*{{currentPlanName}}*{{currentPlanQuotaLine}}\n\nQuer subir para um plano maior?\n\n1) *Sim*{{upgradePlanLine}}\n2) *Ver outros planos*",
+
+  FLOW_PAYMENT_RECOVERY:
+    "Não conseguimos processar seu pagamento.\n\nVocê pode:\n\n1) *Atualizar cartão*\n2) *Pagar por PIX*\n3) *Falar com suporte*",
+
+  FLOW_FLOOD_NOTICE:
+    "Recebi várias mensagens 🙂\n\nVou considerar apenas a última.",
+
+  FLOW_FEEDBACK_ASK:
+    "Posso te perguntar uma coisa?\n\nO Amigo está ajudando nas suas vendas?\n\n1) *Muito*\n2) *Mais ou menos*\n3) *Não*",
+
+  FLOW_TESTIMONIAL_ASK:
+    "Que bom ouvir isso 🙂\n\nVocê topa me mandar um depoimento para que possamos compartilhar nas nossas mídias sociais?",
+
+  FLOW_REFERRAL_INVITE:
+    "Se o Amigo te ajuda nas vendas, indique para um amigo 🙂\n\nEnvie este link:\n{{referralLink}}\n\nQuanto mais gente vender, melhor!",
+
+  FLOW_REFERRAL_BONUS_UNLOCKED:
+    "🎁 Bônus liberado!\n\nSeu amigo começou a usar o Amigo das Vendas.\n\nVocê ganhou *{{bonusAmount}}* descriç{{bonusPlural}} neste mês.",
+
+  FLOW_FIRST_RESULT_PROMPT:
+    "Quer que eu crie mais anúncios para você?\n\n1) *Sim*\n2) *Quero testar outro*\n3) *Como funciona*",
+
+  FLOW_HABIT_NUDGE:
+    "Você já criou *{{count}} anúncios* comigo 🙂\n\nMuita gente usa o Amigo para postar todos os dias nos grupos.\n\nAssim vende muito mais.\n\nQuer continuar criando anúncios?",
+
+  FLOW_PLAN_VALUE_REINFORCEMENT:
+    "Muita gente recupera o valor do plano com apenas *1 venda* 🙂",
+
+  FLOW_PLAN_ACTIVATED_WELCOME:
+    "🎉 Seu plano está ativo!\n\nAgora você pode criar anúncios sempre que quiser.\n\nDica: poste em vários grupos diferentes.\n\nQuer criar um agora?",
+
+  FLOW_POST_AD_BENEFIT:
+    "Isso ajuda você a vender mais.\n\nSe quiser, você pode copiar e enviar direto nos grupos 🙂\n\nOu posso gerar outra versão do anúncio.",
+
+  FLOW_POST_AD_GROUPS_TIP:
+    "💡 Dica:\n\nPoste em vários grupos da sua cidade.\nAssim mais pessoas veem seu anúncio.",
+
+  FLOW_PROGRESS_MILESTONE:
+    "Você já criou *{{count}} anúncios* com o Amigo 🙂\n\nMuitos usuários conseguem clientes apenas com posts em grupos.",
+
+  FLOW_DAILY_POSTING_HABIT:
+    "💡 Dica do Amigo\n\nQuem posta anúncios todos os dias costuma vender mais.\n\nQuer criar um anúncio rápido para hoje?",
+
+  FLOW_REWARD_AFTER_AD:
+    "✨ Anúncio pronto!\n\nAgora é só postar nos grupos da sua cidade.\n\nMuitos usuários conseguem clientes assim 🙂",
+
+  FLOW_RETENTION_SIGNOFF:
+    "Boa sorte nas vendas hoje! 🙂\n\nSe quiser criar outro anúncio mais tarde, é só me chamar.",
+
+  FLOW_DAILY_AD_NUDGE:
+    "Bom dia! ☀️\n\nQuer criar um anúncio para postar hoje nos grupos?\n\nLeva menos de 10 segundos 🙂",
+
+  FLOW_DAILY_AD_NUDGE_SHORT:
+    "Quer criar um anúncio rápido para hoje? 🙂",
+
+  FLOW_DAILY_AD_ALREADY_CREATED_TODAY:
+    "Vi que você já criou um anúncio hoje 🙂\n\nQuando quiser fazer outro, é só me chamar.",
+
+  FLOW_PROGRESS_SIGNATURE_SUMMARY:
+    "Plano: *{{planName}}*\n\nDescrições usadas: *{{used}} / {{total}}*\n\nVocê já criou *{{used}} anúncios* este mês 🙂",
 
 
   // OPENAI — Prompts
@@ -458,6 +527,29 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_PROFILE_WIZARD_STEP7_PRODUCTS", label: "Wizard perfil: 7/7 catálogo" },
   { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_ADDED", label: "Wizard perfil: rede social adicionada" },
   { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_INVALID", label: "Wizard perfil: rede social inválida" },
+
+  { category: "Flow", key: "FLOW_IDLE_NUDGE", label: "Reengajamento: usuário parado" },
+  { category: "Flow", key: "FLOW_UPGRADE_OFFER", label: "Upgrade automático ao atingir limite" },
+  { category: "Flow", key: "FLOW_PAYMENT_RECOVERY", label: "Pagamento: recuperação por falha" },
+  { category: "Flow", key: "FLOW_FLOOD_NOTICE", label: "Proteção: flood / spam" },
+  { category: "Flow", key: "FLOW_FEEDBACK_ASK", label: "Feedback: pedir opinião" },
+  { category: "Flow", key: "FLOW_TESTIMONIAL_ASK", label: "Feedback: pedir depoimento" },
+  { category: "Flow", key: "FLOW_REFERRAL_INVITE", label: "Crescimento: pedir indicação" },
+  { category: "Flow", key: "FLOW_REFERRAL_BONUS_UNLOCKED", label: "Crescimento: bônus por indicação" },
+  { category: "Flow", key: "FLOW_FIRST_RESULT_PROMPT", label: "Pós-primeiro anúncio: próximo passo" },
+  { category: "Flow", key: "FLOW_HABIT_NUDGE", label: "Hábito: incentivo após alguns anúncios" },
+  { category: "Flow", key: "FLOW_PLAN_VALUE_REINFORCEMENT", label: "Planos: reforço de valor" },
+  { category: "Flow", key: "FLOW_PLAN_ACTIVATED_WELCOME", label: "Plano ativo: boas-vindas" },
+  { category: "Flow", key: "FLOW_POST_AD_BENEFIT", label: "Pós-anúncio: reforço de benefício" },
+  { category: "Flow", key: "FLOW_POST_AD_GROUPS_TIP", label: "Pós-anúncio: dica de grupos" },
+  { category: "Flow", key: "FLOW_PROGRESS_MILESTONE", label: "Progresso: marco de anúncios" },
+  { category: "Flow", key: "FLOW_DAILY_POSTING_HABIT", label: "Hábito: postar todos os dias" },
+  { category: "Flow", key: "FLOW_REWARD_AFTER_AD", label: "Pós-anúncio: recompensa" },
+  { category: "Flow", key: "FLOW_RETENTION_SIGNOFF", label: "Retenção: mensagem final" },
+  { category: "Flow", key: "FLOW_DAILY_AD_NUDGE", label: "Anúncio do dia" },
+  { category: "Flow", key: "FLOW_DAILY_AD_NUDGE_SHORT", label: "Anúncio do dia: versão curta" },
+  { category: "Flow", key: "FLOW_DAILY_AD_ALREADY_CREATED_TODAY", label: "Anúncio do dia: já usou hoje" },
+  { category: "Flow", key: "FLOW_PROGRESS_SIGNATURE_SUMMARY", label: "Minha assinatura: progresso resumido" },
 
   { category: "OpenAI", key: "OPENAI_SYSTEM_FIXED", label: "Prompt FIXO (system)" },
   { category: "OpenAI", key: "OPENAI_SYSTEM_FREE", label: "Prompt LIVRE (system)" },
