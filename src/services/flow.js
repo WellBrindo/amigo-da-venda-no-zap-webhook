@@ -18,7 +18,10 @@
  */
 
 import { generateAdText } from "./openai/generate.js";
-import { incDescriptionMetrics } from "./metrics.js";
+import {
+  incDescriptionMetrics,
+  incMetricEvent,
+} from "./metrics.js";
 import { getCopyText } from "./copy.js";
 
 import {
@@ -88,6 +91,10 @@ import {
   markFeedbackAsked,
   markFeedbackAnswered,
   markTestimonialAsked,
+  saveFeedbackComment,
+  saveTestimonialText,
+  setTestimonialConsent,
+  setTestimonialDisplayPreference,
   markReferralAsked,
 } from "./state.js";
 
@@ -141,6 +148,10 @@ const ST = Object.freeze({
   WAIT_SAVE_PROFILE: "WAIT_SAVE_PROFILE",
   WAIT_FIRST_RESULT_PROMPT: "WAIT_FIRST_RESULT_PROMPT",
   WAIT_FEEDBACK_RESPONSE: "WAIT_FEEDBACK_RESPONSE",
+  WAIT_FEEDBACK_COMMENT: "WAIT_FEEDBACK_COMMENT",
+  WAIT_TESTIMONIAL_TEXT: "WAIT_TESTIMONIAL_TEXT",
+  WAIT_TESTIMONIAL_CONSENT: "WAIT_TESTIMONIAL_CONSENT",
+  WAIT_TESTIMONIAL_DISPLAY: "WAIT_TESTIMONIAL_DISPLAY",
   WAIT_CATEGORY_DETAILS: "WAIT_CATEGORY_DETAILS",
 
   // Wizard: adicionar/ajustar dados da empresa (manual)
@@ -152,6 +163,15 @@ const ST = Object.freeze({
   WAIT_PROFILE_ADD_WEBSITE: "WAIT_PROFILE_ADD_WEBSITE",
   WAIT_PROFILE_ADD_PRODUCTS: "WAIT_PROFILE_ADD_PRODUCTS",
 });
+
+
+async function trackFeedbackMetric(eventName, waId, by = 1) {
+  try {
+    await incMetricEvent(eventName, { waId, by });
+  } catch (_) {
+    // métricas são observacionais; não devem quebrar o fluxo principal
+  }
+}
 
 // -------------------- Helpers --------------------
 function cleanText(t) {
@@ -364,6 +384,10 @@ function isTransientFlowStatus(status) {
     ST.WAIT_SAVE_PROFILE,
     ST.WAIT_FIRST_RESULT_PROMPT,
     ST.WAIT_FEEDBACK_RESPONSE,
+    ST.WAIT_FEEDBACK_COMMENT,
+    ST.WAIT_TESTIMONIAL_TEXT,
+    ST.WAIT_TESTIMONIAL_CONSENT,
+    ST.WAIT_TESTIMONIAL_DISPLAY,
     ST.WAIT_CATEGORY_DETAILS,
     ST.WAIT_PROFILE_ADD_COMPANY,
     ST.WAIT_PROFILE_ADD_WHATSAPP,
@@ -1458,6 +1482,22 @@ async function msgFeedbackAsk(waId) {
   return await getCopyText("FLOW_FEEDBACK_ASK", { waId });
 }
 
+async function msgFeedbackCommentAsk(waId) {
+  return await getCopyText("FLOW_FEEDBACK_COMMENT_ASK", { waId });
+}
+
+async function msgTestimonialAsk(waId) {
+  return await getCopyText("FLOW_TESTIMONIAL_ASK", { waId });
+}
+
+async function msgTestimonialConsentAsk(waId) {
+  return await getCopyText("FLOW_TESTIMONIAL_CONSENT_ASK", { waId });
+}
+
+async function msgTestimonialDisplayAsk(waId) {
+  return await getCopyText("FLOW_TESTIMONIAL_DISPLAY_ASK", { waId });
+}
+
 async function msgReferralInvite(waId) {
   return await getCopyText("FLOW_REFERRAL_INVITE", {
     waId,
@@ -1493,6 +1533,14 @@ async function msgRetentionSignoff(waId) {
   return await getCopyText("FLOW_RETENTION_SIGNOFF", { waId });
 }
 
+async function finishFeedbackFlow(waId, messages = []) {
+  const prev = await getPrevStatus(waId);
+  await clearPrevStatus(waId);
+  await setUserStatus(waId, prev || ST.ACTIVE);
+  const arr = Array.isArray(messages) ? messages : [messages];
+  arr.push(await msgRetentionSignoff(waId));
+  return replyMulti(arr);
+}
 
 function buildRefinementReminder(maxRefinements) {
   const qty = Number.isFinite(Number(maxRefinements)) && Number(maxRefinements) >= 0
@@ -2477,29 +2525,83 @@ async function handleInboundTextCore({ waId, text }) {
   // 0.42) Feedback pós-uso
   if (status === ST.WAIT_FEEDBACK_RESPONSE) {
     const c = normalizeChoice(inbound);
-    if (!["1", "2", "3"].includes(c)) {
+    if (![["1"], ["2"], ["3"]].flat().includes(c)) {
       return reply(await msgFeedbackAsk(id));
     }
 
     await markFeedbackAnswered(id, c);
-
-    const prev = await getPrevStatus(id);
-    await clearPrevStatus(id);
-    await setUserStatus(id, prev || ST.ACTIVE);
+    await trackFeedbackMetric("feedback_answered", id);
+    await trackFeedbackMetric(c === "1" ? "feedback_positive" : c === "2" ? "feedback_neutral" : "feedback_negative", id);
 
     if (c === "1") {
       await markTestimonialAsked(id);
-      return replyMulti([
-        await getCopyText("FLOW_TESTIMONIAL_ASK", { waId: id }),
-        await getCopyText("FLOW_MENU_URL_FEEDBACK", { waId: id }),
-        await msgRetentionSignoff(id),
-      ]);
+      await trackFeedbackMetric("testimonial_asked", id);
+      await setUserStatus(id, ST.WAIT_TESTIMONIAL_TEXT);
+      return reply(await msgTestimonialAsk(id));
     }
 
-    return replyMulti([
-      await msgPostAdBenefit(id),
-      await msgRetentionSignoff(id),
-    ]);
+    await setUserStatus(id, ST.WAIT_FEEDBACK_COMMENT);
+    return reply(await msgFeedbackCommentAsk(id));
+  }
+
+  if (status === ST.WAIT_FEEDBACK_COMMENT) {
+    if (wantsSkipCommand(inbound)) {
+      return await finishFeedbackFlow(id, [await msgPostAdBenefit(id)]);
+    }
+
+    const comment = cleanText(inbound);
+    if (!comment) {
+      return reply(await msgFeedbackCommentAsk(id));
+    }
+
+    await saveFeedbackComment(id, comment);
+    await trackFeedbackMetric("feedback_comment_saved", id);
+    return await finishFeedbackFlow(id, [await msgPostAdBenefit(id)]);
+  }
+
+  if (status === ST.WAIT_TESTIMONIAL_TEXT) {
+    if (wantsSkipCommand(inbound)) {
+      return await finishFeedbackFlow(id);
+    }
+
+    const testimonialText = cleanText(inbound);
+    if (!testimonialText) {
+      return reply(await msgTestimonialAsk(id));
+    }
+
+    await saveTestimonialText(id, testimonialText);
+    await trackFeedbackMetric("testimonial_created", id);
+    await setUserStatus(id, ST.WAIT_TESTIMONIAL_CONSENT);
+    return reply(await msgTestimonialConsentAsk(id));
+  }
+
+  if (status === ST.WAIT_TESTIMONIAL_CONSENT) {
+    const c = normalizeChoice(inbound);
+    if (!["1", "2"].includes(c)) {
+      return reply(await msgTestimonialConsentAsk(id));
+    }
+
+    await setTestimonialConsent(id, c === "1" ? "YES" : "NO");
+    await trackFeedbackMetric(c === "1" ? "testimonial_consent_yes" : "testimonial_consent_no", id);
+
+    if (c === "1") {
+      await setUserStatus(id, ST.WAIT_TESTIMONIAL_DISPLAY);
+      return reply(await msgTestimonialDisplayAsk(id));
+    }
+
+    return await finishFeedbackFlow(id, [await getCopyText("FLOW_TESTIMONIAL_INTERNAL_ONLY_THANKS", { waId: id })]);
+  }
+
+  if (status === ST.WAIT_TESTIMONIAL_DISPLAY) {
+    const c = normalizeChoice(inbound);
+    const displayMode = c === "1" ? "FIRST_NAME" : c === "2" ? "COMPANY" : c === "3" ? "ANONYMOUS" : "";
+    if (!displayMode) {
+      return reply(await msgTestimonialDisplayAsk(id));
+    }
+
+    await setTestimonialDisplayPreference(id, displayMode);
+    await trackFeedbackMetric(displayMode === "FIRST_NAME" ? "testimonial_display_first_name" : displayMode === "COMPANY" ? "testimonial_display_company" : "testimonial_display_anonymous", id);
+    return await finishFeedbackFlow(id, [await getCopyText("FLOW_TESTIMONIAL_THANKS", { waId: id })]);
   }
 
 
@@ -3118,6 +3220,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   const shouldAskFeedback = adsCreatedTotal >= 8 && !currentGrowthMeta?.feedbackAskedAt && !currentGrowthMeta?.feedbackAnsweredAt;
   if (shouldAskFeedback) {
     await markFeedbackAsked(id);
+    await trackFeedbackMetric("feedback_asked", id);
     await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
     await setUserStatus(id, ST.WAIT_FEEDBACK_RESPONSE);
     growthMessages.push(await msgFeedbackAsk(id));
