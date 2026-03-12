@@ -273,8 +273,23 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
   FLOW_FEEDBACK_ASK:
     "Posso te perguntar uma coisa?\n\nO Amigo está ajudando nas suas vendas?\n\n1) *Muito*\n2) *Mais ou menos*\n3) *Não*",
 
+  FLOW_FEEDBACK_COMMENT_ASK:
+    "Obrigado por me contar 💚\n\nSe quiser, me diga em uma frase o que podemos melhorar.\n\nSe preferir, digite *PULAR*.",
+
   FLOW_TESTIMONIAL_ASK:
-    "Que bom ouvir isso 🙂\n\nVocê topa me mandar um depoimento para que possamos compartilhar nas nossas mídias sociais?",
+    "Que bom ouvir isso 🙂\n\nMe manda, por favor, um depoimento curtinho sobre como o Amigo te ajuda nas vendas.\n\nPode ser do seu jeito, em uma frase.\n\nSe preferir, digite *PULAR*.",
+
+  FLOW_TESTIMONIAL_CONSENT_ASK:
+    "Perfeito 💚\n\nPosso usar esse depoimento no nosso site, Instagram ou materiais do Amigo das Vendas?\n\n1) *Sim*\n2) *Não*",
+
+  FLOW_TESTIMONIAL_DISPLAY_ASK:
+    "Como você prefere aparecer nesse depoimento?\n\n1) *Primeiro nome*\n2) *Nome da empresa*\n3) *Sem identificação*",
+
+  FLOW_TESTIMONIAL_THANKS:
+    "Depoimento salvo com sucesso 💚\n\nMuito obrigado por ajudar o Amigo das Vendas a crescer!",
+
+  FLOW_TESTIMONIAL_INTERNAL_ONLY_THANKS:
+    "Perfeito 💚\n\nVou guardar seu depoimento apenas para análise interna. Obrigado pela ajuda!",
 
   FLOW_REFERRAL_INVITE:
     "Se o Amigo te ajuda nas vendas, indique para um amigo 🙂\n\nEnvie este link:\n{{referralLink}}\n\nQuanto mais gente vender, melhor!",
@@ -541,7 +556,12 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_PAYMENT_RECOVERY", label: "Pagamento: recuperação por falha" },
   { category: "Flow", key: "FLOW_FLOOD_NOTICE", label: "Proteção: flood / spam" },
   { category: "Flow", key: "FLOW_FEEDBACK_ASK", label: "Feedback: pedir opinião" },
+  { category: "Flow", key: "FLOW_FEEDBACK_COMMENT_ASK", label: "Feedback: pedir comentário" },
   { category: "Flow", key: "FLOW_TESTIMONIAL_ASK", label: "Feedback: pedir depoimento" },
+  { category: "Flow", key: "FLOW_TESTIMONIAL_CONSENT_ASK", label: "Feedback: autorização de uso do depoimento" },
+  { category: "Flow", key: "FLOW_TESTIMONIAL_DISPLAY_ASK", label: "Feedback: forma de exibição do depoimento" },
+  { category: "Flow", key: "FLOW_TESTIMONIAL_THANKS", label: "Feedback: agradecimento por depoimento" },
+  { category: "Flow", key: "FLOW_TESTIMONIAL_INTERNAL_ONLY_THANKS", label: "Feedback: depoimento apenas interno" },
   { category: "Flow", key: "FLOW_REFERRAL_INVITE", label: "Crescimento: pedir indicação" },
   { category: "Flow", key: "FLOW_REFERRAL_BONUS_UNLOCKED", label: "Crescimento: bônus por indicação" },
   { category: "Flow", key: "FLOW_FIRST_RESULT_PROMPT", label: "Pós-primeiro anúncio: próximo passo" },
