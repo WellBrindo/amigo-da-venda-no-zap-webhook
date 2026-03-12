@@ -21,9 +21,10 @@ import {
   redisExpire,
 } from "./redis.js";
 
-import { listUsers, getUserPlan } from "./state.js";
-import { listWindow24hActive, nowMs } from "./window24h.js";
+import { listUsers, getUserPlan, getUserStatus, getActivityMeta, setActivityMeta, getGrowthMeta, markAdOfDaySent } from "./state.js";
+import { listWindow24hActive, nowMs, getLastInboundTs } from "./window24h.js";
 import { sendWhatsAppText } from "./meta/whatsapp.js";
+import { getCopyText } from "./copy.js";
 import { pushSystemAlert } from "./alerts.js";
 
 const CAMPAIGNS_LIST_KEY = "campaigns:list"; // LIST de campaignId (newest first)
@@ -383,4 +384,162 @@ export async function processPendingForWaId(waId) {
   }
 
   return { ok: true, waId: id, processed };
+}
+
+const AUTOMATION_TZ = "America/Sao_Paulo";
+const DAILY_AD_TARGET_HOUR = 10;
+const DAILY_AD_MIN_REMAINING_MS = 30 * 60 * 1000;
+const DAILY_AD_MAX_REMAINING_MS = 6 * 60 * 60 * 1000;
+const IDLE_REMINDER_DELAY_MS = 5 * 60 * 1000;
+
+function getTzParts(inputMs = nowMs(), timeZone = AUTOMATION_TZ) {
+  const dtf = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(dtf.formatToParts(new Date(inputMs)).map((p) => [p.type, p.value]));
+  return {
+    year: Number(parts.year || 0),
+    month: Number(parts.month || 0),
+    day: Number(parts.day || 0),
+    hour: Number(parts.hour || 0),
+    minute: Number(parts.minute || 0),
+    second: Number(parts.second || 0),
+    date: `${parts.year || "0000"}-${parts.month || "00"}-${parts.day || "00"}`,
+  };
+}
+
+function previousTzDate(inputMs = nowMs(), timeZone = AUTOMATION_TZ) {
+  const parts = getTzParts(inputMs, timeZone);
+  const utcMidnight = Date.UTC(parts.year, Math.max(0, parts.month - 1), parts.day);
+  return getTzParts(utcMidnight - 24 * 60 * 60 * 1000, timeZone).date;
+}
+
+function isDailyAdEligibleStatus(status) {
+  return status === "TRIAL" || status === "ACTIVE";
+}
+
+function isIdleEligibleStatus(status) {
+  return String(status || "").startsWith("WAIT_") || status === "PAYMENT_PENDING";
+}
+
+async function sendCopyMessage(waId, key, vars = {}) {
+  const text = await getCopyText(key, { waId, vars });
+  if (!String(text || "").trim()) return false;
+  await sendWhatsAppText({ to: String(waId), text: String(text) });
+  return true;
+}
+
+async function maybeSendIdleReminder(waId, nowTs) {
+  const status = await getUserStatus(waId).catch(() => "");
+  if (!isIdleEligibleStatus(status)) return { sent: false };
+
+  const activityMeta = await getActivityMeta(waId).catch(() => ({}));
+  const lastInboundAt = String(activityMeta?.lastInboundAt || "").trim();
+  if (!lastInboundAt) return { sent: false };
+
+  const lastInboundMs = new Date(lastInboundAt).getTime();
+  if (!Number.isFinite(lastInboundMs)) return { sent: false };
+  if (nowTs - lastInboundMs < IDLE_REMINDER_DELAY_MS) return { sent: false };
+
+  const idleReminderSentAt = String(activityMeta?.idleReminderSentAt || "").trim();
+  const idleReminderSentMs = idleReminderSentAt ? new Date(idleReminderSentAt).getTime() : NaN;
+  if (Number.isFinite(idleReminderSentMs) && idleReminderSentMs >= lastInboundMs) return { sent: false };
+
+  await sendCopyMessage(waId, "FLOW_IDLE_NUDGE");
+  await setActivityMeta(waId, { ...activityMeta, idleReminderSentAt: new Date(nowTs).toISOString() }).catch(() => ({}));
+  return { sent: true, type: "idle" };
+}
+
+async function maybeSendDailyAdNudge(waId, nowTs) {
+  const status = await getUserStatus(waId).catch(() => "");
+  if (!isDailyAdEligibleStatus(status)) return { sent: false };
+
+  const currentParts = getTzParts(nowTs);
+  if (currentParts.hour !== DAILY_AD_TARGET_HOUR) return { sent: false };
+
+  const growthMeta = await getGrowthMeta(waId).catch(() => ({}));
+  if (String(growthMeta?.lastAdCreatedDate || "") === currentParts.date) return { sent: false, skipped: "already-created-today" };
+  if (String(growthMeta?.adOfDaySentDate || "") === currentParts.date) return { sent: false, skipped: "already-sent-today" };
+
+  const lastInboundMs = Number(await getLastInboundTs(waId).catch(() => 0) || 0);
+  if (!lastInboundMs) return { sent: false };
+
+  const remainingMs = (lastInboundMs + 24 * 60 * 60 * 1000) - nowTs;
+  if (!(remainingMs > DAILY_AD_MIN_REMAINING_MS && remainingMs <= DAILY_AD_MAX_REMAINING_MS)) return { sent: false };
+
+  const lastInboundDate = getTzParts(lastInboundMs).date;
+  if (lastInboundDate !== previousTzDate(nowTs)) return { sent: false };
+
+  const key = remainingMs <= 90 * 60 * 1000 ? "FLOW_DAILY_AD_NUDGE_SHORT" : "FLOW_DAILY_AD_NUDGE";
+  await sendCopyMessage(waId, key);
+  await markAdOfDaySent(waId, new Date(nowTs).toISOString()).catch(() => ({}));
+  return { sent: true, type: "daily_ad" };
+}
+
+export async function runLifecycleAutomationTick({ limit = 5000, tsMs = nowMs() } = {}) {
+  const activeWaIds = await listWindow24hActive(tsMs, Number(limit || 5000)).catch(() => []);
+  const list = Array.isArray(activeWaIds) ? activeWaIds.map((x) => String(x || "").trim()).filter(Boolean) : [];
+
+  let idleSent = 0;
+  let dailyAdSent = 0;
+  let errors = 0;
+
+  for (const waId of list) {
+    try {
+      const idle = await maybeSendIdleReminder(waId, tsMs);
+      if (idle?.sent) idleSent += 1;
+    } catch (err) {
+      errors += 1;
+      await recordError("automation_idle", waId, err?.message || err).catch(() => 0);
+    }
+
+    try {
+      const dailyAd = await maybeSendDailyAdNudge(waId, tsMs);
+      if (dailyAd?.sent) dailyAdSent += 1;
+    } catch (err) {
+      errors += 1;
+      await recordError("automation_daily_ad", waId, err?.message || err).catch(() => 0);
+    }
+  }
+
+  return { ok: true, activeWindow: list.length, idleSent, dailyAdSent, errors };
+}
+
+let automationTimer = null;
+let automationRunning = false;
+
+export function startLifecycleAutomationLoop({ intervalMs = 60_000 } = {}) {
+  const ms = Math.max(30_000, Number(intervalMs) || 60_000);
+  if (automationTimer) return automationTimer;
+
+  const tick = async () => {
+    if (automationRunning) return;
+    automationRunning = true;
+    try {
+      await runLifecycleAutomationTick({ limit: 5000, tsMs: nowMs() });
+    } catch (err) {
+      console.warn(JSON.stringify({
+        level: "warn",
+        tag: "automation_tick_failed",
+        error: String(err?.message || err),
+      }));
+    } finally {
+      automationRunning = false;
+    }
+  };
+
+  automationTimer = setInterval(() => {
+    void tick();
+  }, ms);
+
+  if (typeof automationTimer?.unref === "function") automationTimer.unref();
+  void tick();
+  return automationTimer;
 }
