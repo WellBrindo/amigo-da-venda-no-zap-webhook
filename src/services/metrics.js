@@ -18,6 +18,25 @@
 
 import { redisGet, redisIncrBy, redisExpire, redisDel } from "./redis.js";
 
+const FEEDBACK_EVENTS = Object.freeze([
+  "feedback_asked",
+  "feedback_answered",
+  "feedback_positive",
+  "feedback_neutral",
+  "feedback_negative",
+  "feedback_comment_saved",
+  "testimonial_asked",
+  "testimonial_created",
+  "testimonial_consent_yes",
+  "testimonial_consent_no",
+  "testimonial_display_first_name",
+  "testimonial_display_company",
+  "testimonial_display_anonymous",
+  "testimonial_review_approved",
+  "testimonial_review_rejected",
+  "testimonial_review_published",
+]);
+
 const TTL_DAY_SECONDS = 60 * 60 * 24 * 90;    // 90 dias
 const TTL_MONTH_SECONDS = 60 * 60 * 24 * 450; // ~15 meses
 
@@ -51,6 +70,157 @@ function kUserDay(waId, day) {
 }
 function kUserMonth(waId, month) {
   return `metrics:desc:user:${waId}:month:${month}`;
+}
+
+
+function normalizeMetricEventName(eventName) {
+  return String(eventName ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9:_-]+/g, "_")
+    .replace(/_{2,}/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function kEventGlobalDay(eventName, day) {
+  return `metrics:event:${eventName}:global:day:${day}`;
+}
+function kEventGlobalMonth(eventName, month) {
+  return `metrics:event:${eventName}:global:month:${month}`;
+}
+function kEventUserDay(waId, eventName, day) {
+  return `metrics:event:${eventName}:user:${waId}:day:${day}`;
+}
+function kEventUserMonth(waId, eventName, month) {
+  return `metrics:event:${eventName}:user:${waId}:month:${month}`;
+}
+
+export async function incMetricEvent(eventName, { waId = "", by = 1, date = new Date() } = {}) {
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  const inc = Number(by) || 1;
+  if (!normalizedEvent) return { ok: false, error: "eventName required" };
+
+  const { day, month } = getDayKeyParts(date);
+  const keys = {
+    gd: kEventGlobalDay(normalizedEvent, day),
+    gm: kEventGlobalMonth(normalizedEvent, month),
+  };
+
+  const jobs = [
+    redisIncrBy(keys.gd, inc),
+    redisIncrBy(keys.gm, inc),
+  ];
+
+  const id = safeStr(waId);
+  if (id) {
+    keys.ud = kEventUserDay(id, normalizedEvent, day);
+    keys.um = kEventUserMonth(id, normalizedEvent, month);
+    jobs.push(redisIncrBy(keys.ud, inc));
+    jobs.push(redisIncrBy(keys.um, inc));
+  }
+
+  const valuesRaw = await Promise.all(jobs);
+  const values = {
+    gd: valuesRaw[0],
+    gm: valuesRaw[1],
+  };
+  if (id) {
+    values.ud = valuesRaw[2];
+    values.um = valuesRaw[3];
+  }
+
+  const ttlJobs = [
+    redisExpire(keys.gd, TTL_DAY_SECONDS),
+    redisExpire(keys.gm, TTL_MONTH_SECONDS),
+  ];
+  if (id) {
+    ttlJobs.push(redisExpire(keys.ud, TTL_DAY_SECONDS));
+    ttlJobs.push(redisExpire(keys.um, TTL_MONTH_SECONDS));
+  }
+  await Promise.allSettled(ttlJobs);
+
+  return { ok: true, eventName: normalizedEvent, waId: id || null, keys, values };
+}
+
+export async function getGlobalMetricEvent(eventName, date = new Date()) {
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  if (!normalizedEvent) return { ok: false, error: "eventName required" };
+  const { day, month } = getDayKeyParts(date);
+  const [d, m] = await Promise.all([
+    redisGet(kEventGlobalDay(normalizedEvent, day)),
+    redisGet(kEventGlobalMonth(normalizedEvent, month)),
+  ]);
+  return {
+    ok: true,
+    eventName: normalizedEvent,
+    day,
+    month,
+    dayCount: Number(d || 0),
+    monthCount: Number(m || 0),
+  };
+}
+
+export async function getUserMetricEvent(eventName, waId, date = new Date()) {
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  const id = safeStr(waId);
+  if (!normalizedEvent) return { ok: false, error: "eventName required" };
+  if (!id) return { ok: false, error: "waId required" };
+  const { day, month } = getDayKeyParts(date);
+  const [d, m] = await Promise.all([
+    redisGet(kEventUserDay(id, normalizedEvent, day)),
+    redisGet(kEventUserMonth(id, normalizedEvent, month)),
+  ]);
+  return {
+    ok: true,
+    eventName: normalizedEvent,
+    waId: id,
+    day,
+    month,
+    dayCount: Number(d || 0),
+    monthCount: Number(m || 0),
+  };
+}
+
+export async function getMetricEventLastNDays(eventName, n = 30, endDate = new Date()) {
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  if (!normalizedEvent) return { ok: false, error: "eventName required" };
+
+  const days = clampInt(n, 1, 365, 30);
+  const end = new Date(endDate.getTime());
+  const start = addDays(end, -(days - 1));
+
+  const labels = [];
+  const keys = [];
+  for (let i = 0; i < days; i++) {
+    const d = fmtYmd(addDays(start, i));
+    labels.push(d);
+    keys.push(kEventGlobalDay(normalizedEvent, d));
+  }
+
+  const values = [];
+  for (const k of keys) {
+    const v = await redisGet(k);
+    values.push(Number(v || 0));
+  }
+
+  return {
+    ok: true,
+    eventName: normalizedEvent,
+    start: labels[0],
+    end: labels[labels.length - 1],
+    points: labels.map((label, index) => ({ day: label, count: values[index] })),
+  };
+}
+
+export async function getFeedbackMetricsOverview(date = new Date()) {
+  const events = await Promise.all(FEEDBACK_EVENTS.map((eventName) => getGlobalMetricEvent(eventName, date)));
+  const eventCounts = Object.fromEntries(events.filter((entry) => entry && entry.ok).map((entry) => [entry.eventName, { dayCount: entry.dayCount, monthCount: entry.monthCount }]));
+  return {
+    ok: true,
+    day: events[0]?.day || getDayKeyParts(date).day,
+    month: events[0]?.month || getDayKeyParts(date).month,
+    events: eventCounts,
+  };
 }
 
 /**
