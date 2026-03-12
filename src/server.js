@@ -7,6 +7,7 @@ import { adminRouter } from "./routes/admin.js";
 
 import { redisPing } from "./services/redis.js";
 import { resolveAdminSession } from "./services/adminAccess.js";
+import { startLifecycleAutomationLoop } from "./services/broadcast.js";
 
 const APP_NAME = "amigo-das-vendas";
 const APP_VERSION = "16.0.9-modular-clean-server-bootstrap";
@@ -82,7 +83,26 @@ app.get("/asaas/test", basicAuth, (req, res) => {
 
 // -------------------- Start --------------------
 const PORT = Number(process.env.PORT || 10000);
+const LIFECYCLE_AUTOMATION_INTERVAL_MS = Math.max(
+  30_000,
+  Number(process.env.LIFECYCLE_AUTOMATION_INTERVAL_MS || 60_000)
+);
+
 app.listen(PORT, () => {
   console.log(`[${APP_NAME}] ${APP_VERSION} listening on :${PORT}`);
-});
 
+  try {
+    startLifecycleAutomationLoop({
+      intervalMs: LIFECYCLE_AUTOMATION_INTERVAL_MS,
+    });
+
+    console.log(
+      `[${APP_NAME}] lifecycle automation loop started (${LIFECYCLE_AUTOMATION_INTERVAL_MS}ms)`
+    );
+  } catch (err) {
+    console.error(
+      `[${APP_NAME}] failed to start lifecycle automation loop:`,
+      err?.message || err
+    );
+  }
+});
