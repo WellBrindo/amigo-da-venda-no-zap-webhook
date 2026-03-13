@@ -359,6 +359,15 @@ function normalizeActivityMeta(metaObj) {
   const idleReminderSentAt = normalizeIsoTimestamp(src.idleReminderSentAt);
   if (idleReminderSentAt) dst.idleReminderSentAt = idleReminderSentAt;
 
+  const postAdIdleState = safeStr(src.postAdIdleState).toUpperCase();
+  if (["REFINE_OR_OK", "WAIT_NEXT_DESCRIPTION"].includes(postAdIdleState)) dst.postAdIdleState = postAdIdleState;
+
+  const postAdIdleArmedAt = normalizeIsoTimestamp(src.postAdIdleArmedAt);
+  if (postAdIdleArmedAt) dst.postAdIdleArmedAt = postAdIdleArmedAt;
+
+  const postAdIdleReminderSentAt = normalizeIsoTimestamp(src.postAdIdleReminderSentAt);
+  if (postAdIdleReminderSentAt) dst.postAdIdleReminderSentAt = postAdIdleReminderSentAt;
+
   const flood = isPlainObject(src.flood) ? src.flood : null;
   if (flood) {
     const normalizedFlood = {};
@@ -450,6 +459,9 @@ function normalizeGrowthMeta(metaObj) {
 
   const adOfDaySentDate = normalizeIsoDate(src.adOfDaySentDate || adOfDaySentAt);
   if (adOfDaySentDate) dst.adOfDaySentDate = adOfDaySentDate;
+
+  const postAdIdleVariantIndex = toInt(src.postAdIdleVariantIndex, 0);
+  if (postAdIdleVariantIndex > 0) dst.postAdIdleVariantIndex = Math.max(1, Math.min(20, postAdIdleVariantIndex));
 
   return dst;
 }
@@ -1161,6 +1173,58 @@ export async function clearFloodMeta(waId) {
   const meta = await getActivityMeta(waId);
   delete meta.flood;
   return setActivityMeta(waId, meta);
+}
+
+export async function getPostAdIdleMeta(waId) {
+  const meta = await getActivityMeta(waId);
+  return {
+    postAdIdleState: safeStr(meta.postAdIdleState).toUpperCase(),
+    postAdIdleArmedAt: safeStr(meta.postAdIdleArmedAt),
+    postAdIdleReminderSentAt: safeStr(meta.postAdIdleReminderSentAt),
+  };
+}
+
+export async function armPostAdIdleReminder(waId, idleState, isoTs = new Date().toISOString()) {
+  const meta = await getActivityMeta(waId);
+  const normalizedState = safeStr(idleState).toUpperCase();
+  if (!["REFINE_OR_OK", "WAIT_NEXT_DESCRIPTION"].includes(normalizedState)) {
+    delete meta.postAdIdleState;
+    delete meta.postAdIdleArmedAt;
+    delete meta.postAdIdleReminderSentAt;
+    return setActivityMeta(waId, meta);
+  }
+  meta.postAdIdleState = normalizedState;
+  meta.postAdIdleArmedAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  delete meta.postAdIdleReminderSentAt;
+  return setActivityMeta(waId, meta);
+}
+
+export async function markPostAdIdleReminderSent(waId, isoTs = new Date().toISOString()) {
+  const meta = await getActivityMeta(waId);
+  meta.postAdIdleReminderSentAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setActivityMeta(waId, meta);
+}
+
+export async function clearPostAdIdleReminder(waId) {
+  const meta = await getActivityMeta(waId);
+  delete meta.postAdIdleState;
+  delete meta.postAdIdleArmedAt;
+  delete meta.postAdIdleReminderSentAt;
+  return setActivityMeta(waId, meta);
+}
+
+export async function getPostAdIdleVariantIndex(waId) {
+  const meta = await getGrowthMeta(waId);
+  return Math.max(0, Math.min(20, toInt(meta.postAdIdleVariantIndex, 0)));
+}
+
+export async function advancePostAdIdleVariantIndex(waId) {
+  const meta = await getGrowthMeta(waId);
+  const current = Math.max(0, Math.min(20, toInt(meta.postAdIdleVariantIndex, 0)));
+  const next = current >= 20 ? 1 : current + 1;
+  meta.postAdIdleVariantIndex = next;
+  await setGrowthMeta(waId, meta);
+  return next;
 }
 
 export async function getGrowthMeta(waId) {
