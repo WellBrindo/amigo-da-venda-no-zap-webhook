@@ -2620,6 +2620,32 @@ function buildBizProfileContext(profile) {
   ].join("\n");
 }
 
+function hasMeaningfulBizProfile(profile) {
+  if (!profile || typeof profile !== "object") return false;
+
+  const companyName = normalizeProfileScalar(profile.companyName);
+  const serviceArea = normalizeProfileScalar(profile.serviceArea);
+  const location = normalizeProfileScalar(profile.location);
+  const hours = normalizeProfileScalar(profile.hours);
+  const whatsapp = normalizeWhatsappLike(normalizeProfileScalar(profile.whatsapp));
+  const website = normalizeUrlLike(normalizeProfileScalar(profile.website));
+  const productList = normalizeProfileScalar(profile.productList || profile.productsUrl);
+  const socials = ensureArray(profile.socials)
+    .map((item) => normalizeUrlLike(normalizeProfileScalar(item)))
+    .filter(Boolean);
+
+  return Boolean(
+    companyName ||
+    serviceArea ||
+    location ||
+    hours ||
+    whatsapp ||
+    website ||
+    productList ||
+    socials.length
+  );
+}
+
 async function msgAfterSaveProfile(waId, saved, maxRefinements) {
   const lines = [];
   lines.push(
@@ -4120,7 +4146,12 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
       intentContext,
     });
 
-    const r = await generateAdText({ userText: promptToSend, mode });
+    const hasBizProfile = hasMeaningfulBizProfile(bizProfile);
+    const systemKey = mode === "FIXED" && !hasBizProfile
+      ? "OPENAI_SYSTEM_FIXED_NO_PROFILE"
+      : null;
+
+    const r = await generateAdText({ userText: promptToSend, mode, systemKey });
     ad = r.text;
   } catch {
     return reply(await getCopyText("FLOW_OPENAI_ERROR", { waId: id }));
