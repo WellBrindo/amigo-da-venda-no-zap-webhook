@@ -1814,12 +1814,26 @@ function getIntentPromptFieldLabels({ schemaKey, intentKey, fieldsToAsk }) {
   }
 
   if (intent === AD_INTENTS.PROMOTION) {
-    return [
-      "Oferta / desconto / condição",
-      "Produtos ou serviços em destaque",
-      "Validade / período da promoção",
-      "Cidade / loja / entrega",
-    ];
+    const promotionFieldLabels = {
+      offer: "Oferta / campanha / produtos em destaque",
+      price: "Preço / desconto / condição",
+      availability: "Validade / período da promoção",
+      location: "Cidade / loja / entrega",
+      differential: "Destaque principal da oferta",
+    };
+
+    const mapped = ensureArray(fieldsToAsk)
+      .map((field) => promotionFieldLabels[String(field?.key || "").trim()] || field?.label)
+      .filter(Boolean);
+
+    return mapped.length
+      ? mapped
+      : [
+          "Oferta / campanha / produtos em destaque",
+          "Preço / desconto / condição",
+          "Validade / período da promoção",
+          "Cidade / loja / entrega",
+        ];
   }
 
   if (intent === AD_INTENTS.INSTITUTIONAL && ["SERVICE","BEAUTY","HEALTH","EDUCATION","PROFESSIONAL","EVENTS"].includes(key)) {
@@ -2401,6 +2415,10 @@ function lineContainsEquivalentUrl(line, value) {
   return canonicalizeUrlForCompare(source.replace(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/gi, "$1")).includes(target);
 }
 
+function normalizeMarkdownLinksDisplay(adText) {
+  return String(adText || "").replace(/\[[^\]]+\]\((https?:\/\/[^)\s]+)\)/gi, "$1");
+}
+
 function normalizeSocialLinksDisplay(adText) {
   return String(adText || "").replace(
     /(📸\s*(?:Siga-nos|Nos acompanhe|Acompanhe-nos|Redes sociais?):\s*)(.+)/gi,
@@ -2496,6 +2514,7 @@ function removeGeneratedPlaceholders(adText) {
 function sanitizeGeneratedAd(adText, bizProfile) {
   const hasCompany = !!normalizeProfileScalar(bizProfile?.companyName);
   let text = String(adText || "");
+  text = normalizeMarkdownLinksDisplay(text);
   text = removeGeneratedPlaceholders(text);
   if (hasCompany) text = normalizeBusinessVoice(text, bizProfile);
   text = hasCompany ? normalizeCompanyCtas(text, bizProfile) : normalizeGenericCtas(text);
