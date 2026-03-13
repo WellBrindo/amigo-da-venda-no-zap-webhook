@@ -21,7 +21,7 @@ import {
   redisExpire,
 } from "./redis.js";
 
-import { listUsers, getUserPlan, getUserStatus, getActivityMeta, setActivityMeta, getGrowthMeta, markAdOfDaySent } from "./state.js";
+import { listUsers, getUserPlan, getUserStatus, getPostAdIdleMeta, markPostAdIdleReminderSent, advancePostAdIdleVariantIndex, getGrowthMeta, markAdOfDaySent } from "./state.js";
 import { listWindow24hActive, nowMs, getLastInboundTs } from "./window24h.js";
 import { sendWhatsAppText } from "./meta/whatsapp.js";
 import { getCopyText } from "./copy.js";
@@ -436,25 +436,32 @@ async function sendCopyMessage(waId, key, vars = {}) {
   return true;
 }
 
+function postAdIdleVariationKey(index) {
+  const n = Math.max(1, Math.min(20, Number(index) || 1));
+  return `FLOW_POST_AD_IDLE_VARIATION_${String(n).padStart(2, "0")}`;
+}
+
 async function maybeSendIdleReminder(waId, nowTs) {
-  const status = await getUserStatus(waId).catch(() => "");
-  if (!isIdleEligibleStatus(status)) return { sent: false };
+  const postAdIdle = await getPostAdIdleMeta(waId).catch(() => ({}));
+  const idleState = String(postAdIdle?.postAdIdleState || "").trim();
+  if (!idleState) return { sent: false };
 
-  const activityMeta = await getActivityMeta(waId).catch(() => ({}));
-  const lastInboundAt = String(activityMeta?.lastInboundAt || "").trim();
-  if (!lastInboundAt) return { sent: false };
+  const armedAt = String(postAdIdle?.postAdIdleArmedAt || "").trim();
+  if (!armedAt) return { sent: false };
 
-  const lastInboundMs = new Date(lastInboundAt).getTime();
-  if (!Number.isFinite(lastInboundMs)) return { sent: false };
-  if (nowTs - lastInboundMs < IDLE_REMINDER_DELAY_MS) return { sent: false };
+  const armedMs = new Date(armedAt).getTime();
+  if (!Number.isFinite(armedMs)) return { sent: false };
+  if (nowTs - armedMs < IDLE_REMINDER_DELAY_MS) return { sent: false };
 
-  const idleReminderSentAt = String(activityMeta?.idleReminderSentAt || "").trim();
-  const idleReminderSentMs = idleReminderSentAt ? new Date(idleReminderSentAt).getTime() : NaN;
-  if (Number.isFinite(idleReminderSentMs) && idleReminderSentMs >= lastInboundMs) return { sent: false };
+  const reminderSentAt = String(postAdIdle?.postAdIdleReminderSentAt || "").trim();
+  const reminderSentMs = reminderSentAt ? new Date(reminderSentAt).getTime() : NaN;
+  if (Number.isFinite(reminderSentMs) && reminderSentMs >= armedMs) return { sent: false };
 
-  await sendCopyMessage(waId, "FLOW_IDLE_NUDGE");
-  await setActivityMeta(waId, { ...activityMeta, idleReminderSentAt: new Date(nowTs).toISOString() }).catch(() => ({}));
-  return { sent: true, type: "idle" };
+  const nextVariant = await advancePostAdIdleVariantIndex(waId).catch(() => 1);
+  const key = postAdIdleVariationKey(nextVariant);
+  await sendCopyMessage(waId, key);
+  await markPostAdIdleReminderSent(waId, new Date(nowTs).toISOString()).catch(() => ({}));
+  return { sent: true, type: "idle", key, idleState };
 }
 
 async function maybeSendDailyAdNudge(waId, nowTs) {
