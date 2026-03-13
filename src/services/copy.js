@@ -67,7 +67,21 @@ Qual é o seu NOME COMPLETO?
 A qualquer momento, você pode digitar *MENU* para acessar as opções de configuração.`,
 
   // FLOW — Coleta de contexto
-  FLOW_ASK_PRODUCT: "Perfeito{{firstNameComma}}! ✅\n\nAgora me diga: *o que você vende* ou *qual serviço você presta*?\n\nPode ser simples, tipo: “vendo bolo R$30” 😄",
+  FLOW_ASK_PRODUCT: `Prontinho{{firstNameSuffix}}! 😊💚
+
+Agora me conta 👇
+
+O que você vende, qual serviço presta ou qual promoção quer divulgar?
+
+Pode escrever simples, do seu jeito.
+Exemplo: “vendo bolo R$30” 🍰
+
+Se quiser, inclua nome da empresa, preço, horário, endereço, cidade ou qualquer detalhe importante.
+Quanto mais informação você mandar, mais completo e persuasivo fica o anúncio 😉
+
+Me envie sua primeira descrição e comece agora suas {{trialMaxDescriptions}} descrições gratuitas 💚
+
+A qualquer momento, você pode digitar MENU para acessar as opções de configuração.`,
   FLOW_ASK_REFINEMENT: "Certo! ✅\n\nAgora me diga o que você quer *melhorar* nesse anúncio.\n\nExemplo: “deixa mais curto”, “coloca mais emoção”, “foca no preço”, etc.",
   FLOW_ASK_TEMPLATE_CHOICE:
     "Agora me diga como você prefere as próximas descrições:\n\n1) *Modelo FIXO* (padrão, sempre no mesmo formato)\n2) *Modelo LIVRE* (o Amigo escolhe o melhor formato)\n\nResponda com *1* ou *2* 🙂",
