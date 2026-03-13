@@ -20,6 +20,7 @@
 import { generateAdText } from "./openai/generate.js";
 import { incDescriptionMetrics } from "./metrics.js";
 import { getCopyText } from "./copy.js";
+import { redisGet } from "./redis.js";
 
 import {
   ensureUserExists,
@@ -105,7 +106,28 @@ import {
 } from "./asaas/client.js";
 
 // -------------------- Config --------------------
-const TRIAL_LIMIT = 5;
+const TRIAL_LIMIT_DEFAULT = 5;
+const GLOBAL_SETTINGS_PREFIX = "cfg:global:";
+const TRIAL_MAX_DESCRIPTIONS_KEY = `${GLOBAL_SETTINGS_PREFIX}trial.maxDescriptions`;
+
+function normalizeGlobalIntSetting(rawValue, fallback, { min = 1, max = 1000 } = {}) {
+  if (rawValue === undefined || rawValue === null || rawValue === "") {
+    return fallback;
+  }
+
+  const parsed = Number(rawValue);
+  let value = Number.isFinite(parsed) ? Math.trunc(parsed) : Number(fallback);
+
+  if (Number.isFinite(min)) value = Math.max(min, value);
+  if (Number.isFinite(max)) value = Math.min(max, value);
+
+  return value;
+}
+
+async function getTrialMaxDescriptions() {
+  const rawValue = await redisGet(TRIAL_MAX_DESCRIPTIONS_KEY);
+  return normalizeGlobalIntSetting(rawValue, TRIAL_LIMIT_DEFAULT, { min: 1, max: 1000 });
+}
 
 // -------------------- Statuses (FSM) --------------------
 const ST = Object.freeze({
@@ -2211,7 +2233,12 @@ async function msgAskName(waId){
 async function msgAskProduct(waId){
   const fullName = await getUserFullName(waId);
   const firstName = firstNameFromFullName(fullName);
-  return withMenuHint(waId, await getCopyText("FLOW_ASK_PRODUCT", { waId, vars: { firstName } }));
+  const trialMaxDescriptions = await getTrialMaxDescriptions();
+  const firstNameSuffix = firstName ? `, ${firstName}` : "";
+  return withMenuHint(waId, await getCopyText("FLOW_ASK_PRODUCT", {
+    waId,
+    vars: { firstName, firstNameSuffix, trialMaxDescriptions },
+  }));
 }
 
 async function msgTrialOverAndPlans() {
@@ -2704,7 +2731,7 @@ async function msgMenuSubscription(waId) {
   const validUntil = await getCardValidUntil(waId);
 
   let planName = "Trial";
-  let total = TRIAL_LIMIT;
+  let total = await getTrialMaxDescriptions();
   let used = await getUserTrialUsed(waId);
 
   if (planCode) {
@@ -4097,7 +4124,8 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   // TRIAL: checa limite (considera refinamentos que não consomem crédito)
   if (isTrial) {
     const used = await getUserTrialUsed(id);
-    if (creditsNeeded > 0 && used >= TRIAL_LIMIT) {
+    const trialLimit = await getTrialMaxDescriptions();
+    if (creditsNeeded > 0 && used >= trialLimit) {
       await setUserStatus(id, ST.WAIT_PLAN);
       return replyMulti([
         await getCopyText("FLOW_PLAN_VALUE_REINFORCEMENT", { waId: id }),
