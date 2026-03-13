@@ -3857,17 +3857,11 @@ async function resolveMaxRefinementsForUser(waId, isTrial) {
 }
 
 async function buildPostProfilePrompt({ waId, saved, maxRefinements }) {
-  const growthMeta = await getGrowthMeta(waId);
-  const adsCreatedTotal = Number(growthMeta?.adsCreatedTotal || 0);
-
-  const messages = [await msgAfterSaveProfile(waId, saved, maxRefinements)];
-  if (adsCreatedTotal === 1) {
-    const prev = await getPrevStatus(waId);
-    await setPrevStatus(waId, prev && prev !== ST.WAIT_SAVE_PROFILE ? prev : ST.WAIT_PRODUCT);
-    await setUserStatus(waId, ST.WAIT_FIRST_RESULT_PROMPT);
-    messages.push(await msgFirstResultPrompt(waId));
-  }
-  return messages;
+  // Após salvar (ou não) os dados da empresa, seguimos apenas com o pós-anúncio
+  // padrão. Não adicionamos um segundo prompt de continuidade aqui porque o
+  // próprio texto de pós-anúncio já orienta refinamento e criação de novo anúncio
+  // via comando OK.
+  return [await msgAfterSaveProfile(waId, saved, maxRefinements)];
 }
 
 async function buildPostAdGrowthMessages({ waId, adsCreatedTotal }) {
