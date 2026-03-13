@@ -18,10 +18,7 @@
  */
 
 import { generateAdText } from "./openai/generate.js";
-import {
-  incDescriptionMetrics,
-  incMetricEvent,
-} from "./metrics.js";
+import { incDescriptionMetrics } from "./metrics.js";
 import { getCopyText } from "./copy.js";
 
 import {
@@ -91,10 +88,6 @@ import {
   markFeedbackAsked,
   markFeedbackAnswered,
   markTestimonialAsked,
-  saveFeedbackComment,
-  saveTestimonialText,
-  setTestimonialConsent,
-  setTestimonialDisplayPreference,
   markReferralAsked,
 } from "./state.js";
 
@@ -148,10 +141,8 @@ const ST = Object.freeze({
   WAIT_SAVE_PROFILE: "WAIT_SAVE_PROFILE",
   WAIT_FIRST_RESULT_PROMPT: "WAIT_FIRST_RESULT_PROMPT",
   WAIT_FEEDBACK_RESPONSE: "WAIT_FEEDBACK_RESPONSE",
-  WAIT_FEEDBACK_COMMENT: "WAIT_FEEDBACK_COMMENT",
-  WAIT_TESTIMONIAL_TEXT: "WAIT_TESTIMONIAL_TEXT",
-  WAIT_TESTIMONIAL_CONSENT: "WAIT_TESTIMONIAL_CONSENT",
-  WAIT_TESTIMONIAL_DISPLAY: "WAIT_TESTIMONIAL_DISPLAY",
+  WAIT_CATEGORY_DISAMBIGUATION: "WAIT_CATEGORY_DISAMBIGUATION",
+  WAIT_INTENT_DISAMBIGUATION: "WAIT_INTENT_DISAMBIGUATION",
   WAIT_CATEGORY_DETAILS: "WAIT_CATEGORY_DETAILS",
 
   // Wizard: adicionar/ajustar dados da empresa (manual)
@@ -163,15 +154,6 @@ const ST = Object.freeze({
   WAIT_PROFILE_ADD_WEBSITE: "WAIT_PROFILE_ADD_WEBSITE",
   WAIT_PROFILE_ADD_PRODUCTS: "WAIT_PROFILE_ADD_PRODUCTS",
 });
-
-
-async function trackFeedbackMetric(eventName, waId, by = 1) {
-  try {
-    await incMetricEvent(eventName, { waId, by });
-  } catch (_) {
-    // métricas são observacionais; não devem quebrar o fluxo principal
-  }
-}
 
 // -------------------- Helpers --------------------
 function cleanText(t) {
@@ -384,10 +366,8 @@ function isTransientFlowStatus(status) {
     ST.WAIT_SAVE_PROFILE,
     ST.WAIT_FIRST_RESULT_PROMPT,
     ST.WAIT_FEEDBACK_RESPONSE,
-    ST.WAIT_FEEDBACK_COMMENT,
-    ST.WAIT_TESTIMONIAL_TEXT,
-    ST.WAIT_TESTIMONIAL_CONSENT,
-    ST.WAIT_TESTIMONIAL_DISPLAY,
+    ST.WAIT_CATEGORY_DISAMBIGUATION,
+    ST.WAIT_INTENT_DISAMBIGUATION,
     ST.WAIT_CATEGORY_DETAILS,
     ST.WAIT_PROFILE_ADD_COMPANY,
     ST.WAIT_PROFILE_ADD_WHATSAPP,
@@ -763,28 +743,7 @@ function firstNameFromFullName(fullName) {
   return parts.length ? parts[0] : "";
 }
 
-function normalizeCategoryDetectionText(text) {
-  return ` ${upper(text)
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[^A-Z0-9]+/g, " ")
-    .trim()} `;
-}
 
-function hasCategoryTerms(text, terms) {
-  const normalized = normalizeCategoryDetectionText(text);
-  return ensureArray(terms).some((term) => {
-    const token = cleanText(term)
-      .toUpperCase()
-      .normalize("NFD")
-      .replace(/[̀-ͯ]/g, "")
-      .replace(/[^A-Z0-9]+/g, " ")
-      .trim();
-
-    if (!token) return false;
-    return normalized.includes(` ${token} `);
-  });
-}
 
 const CATEGORY_TERMS = Object.freeze({
   VEHICLE: [
@@ -797,7 +756,7 @@ const CATEGORY_TERMS = Object.freeze({
   ],
   PROPERTY: [
     "APARTAMENTO", "APARTAMENTOS", "APTO", "APTOS", "CASA", "CASAS", "SOBRADO", "SOBRADOS", "KITNET", "KITNETS", "STUDIO", "STUDIOS", "FLAT", "FLATS",
-    "TERRENO", "TERRENOS", "LOTE", "LOTES", "LOTEAMENTO", "IMOVEL", "IMOVEIS", "IMÓVEL", "IMÓVEIS", "SALA COMERCIAL", "SALA COMERCIAL", "SALAS COMERCIAIS",
+    "TERRENO", "TERRENOS", "LOTE", "LOTES", "LOTEAMENTO", "IMOVEL", "IMOVEIS", "IMÓVEL", "IMÓVEIS", "SALA COMERCIAL", "SALAS COMERCIAIS",
     "PONTO COMERCIAL", "PONTOS COMERCIAIS", "GALPAO", "GALPOES", "GALPÃO", "GALPÕES", "CHACARA", "CHACARAS", "CHÁCARA", "CHÁCARAS", "FAZENDA", "FAZENDAS",
     "COBERTURA", "COBERTURAS", "CONDOMINIO", "CONDOMINIOS", "CONDOMÍNIO", "CONDOMÍNIOS", "ALUGO", "ALUGAR", "ALUGUEL", "LOCAÇÃO", "LOCACAO", "LOCAR", "VENDA DE IMOVEIS", "VENDA DE IMÓVEIS"
   ],
@@ -808,9 +767,9 @@ const CATEGORY_TERMS = Object.freeze({
   ],
   SERVICE: [
     "SERVICO", "SERVICOS", "SERVIÇO", "SERVIÇOS", "FAÇO", "FACO", "FAZEMOS", "PRESTO", "PRESTAMOS", "OFEREÇO", "OFERECO", "OFERECEMOS",
-    "REALIZO", "REALIZAMOS", "TRABALHO COM", "ATENDO", "ATENDEMOS", "CONSULTORIA", "ASSESSORIA", "ADVOGADO", "ADVOGADA", "ADVOCACIA",
-    "JURIDICO", "JURÍDICO", "CONDOMINIAL", "MANICURE", "DIARISTA", "PEDREIRO", "PINTOR", "ELETRICISTA", "ENCANADOR", "MECANICO", "MECÂNICO",
-    "FRETE", "MASSAGEM", "DESIGNER", "AULA", "AULAS", "INSTALACAO", "INSTALAÇÃO", "MANUTENCAO", "MANUTENÇÃO", "LIMPEZA", "CABELO", "BARBEIRO", "CABELEIREIRA", "UNHAS", "DEPILACAO", "DEPILAÇÃO", "CONSERTO", "REPARO"
+    "REALIZO", "REALIZAMOS", "TRABALHO COM", "ATENDO", "ATENDEMOS", "CONSULTORIA", "ASSESSORIA", "INSTALACAO", "INSTALAÇÃO", "MANUTENCAO", "MANUTENÇÃO",
+    "LIMPEZA", "CONSERTO", "REPARO", "PINTURA", "PEDREIRO", "PINTOR", "ELETRICISTA", "ENCANADOR", "MARCENEIRO", "GESSEIRO", "VIDRACEIRO", "JARDINAGEM",
+    "FRETE", "MUDANCA", "MUDANÇA", "MONTAGEM", "DESENTUPIMENTO", "DEDETIZACAO", "DEDETIZAÇÃO", "MARIDO DE ALUGUEL"
   ],
   FOOD: [
     "BOLO", "BOLOS", "DOCINHO", "DOCINHOS", "DOCE", "DOCES", "SALGADO", "SALGADOS", "SALGADINHO", "SALGADINHOS", "MARMITA", "MARMITAS", "LANCHE", "LANCHES",
@@ -827,6 +786,57 @@ const CATEGORY_TERMS = Object.freeze({
     "MAQUINA DE LAVAR", "LAVA E SECA", "SOFA", "SOFÁ", "SOFAS", "SOFÁS", "ARMARIO", "ARMÁRIO", "ARMARIOS", "ARMÁRIOS", "MESA", "MESAS", "CADEIRA", "CADEIRAS",
     "GUARDA ROUPA", "GUARDA-ROUPA", "COLCHAO", "COLCHÃO", "COLCHOES", "COLCHÕES", "COOKTOP", "PAINEL", "RACK", "RAQUE", "LAVADORA", "LAVADORAS", "SECADORA", "SECADORAS",
     "CAMA", "CAMAS", "POLTRONA", "POLTRONAS", "ESTANTE", "ESTANTES", "COMODA", "CÔMODA", "ESCRIVANINHA", "APARADOR"
+  ],
+  BEAUTY: [
+    "MANICURE", "PEDICURE", "UNHA", "UNHAS", "ALONGAMENTO", "ALONGAMENTO DE UNHAS", "CILIOS", "CÍLIOS", "SOBRANCELHA", "SOBRANCELHAS",
+    "MAQUIAGEM", "MAQUIADORA", "PENTEADO", "ESCOVA", "PROGRESSIVA", "BARBEARIA", "BARBEIRO", "CABELEIREIRA", "CABELEIREIRO", "HAIR STYLIST",
+    "DEPILACAO", "DEPILAÇÃO", "LASH DESIGNER", "DESIGNER DE SOBRANCELHAS", "ESTETICA", "ESTÉTICA"
+  ],
+  HEALTH: [
+    "MASSAGEM", "MASSAGISTA", "PERSONAL", "PERSONAL TRAINER", "PILATES", "FISIOTERAPIA", "FISIOTERAPEUTA", "NUTRICIONISTA", "PSICOLOGA", "PSICÓLOGA",
+    "PSICOLOGO", "PSICÓLOGO", "TERAPIA", "TERAPEUTA", "ACUPUNTURA", "QUIROPRAXIA", "CONSULTA", "ATENDIMENTO CLINICO", "ATENDIMENTO CLÍNICO", "BEM ESTAR", "BEM-ESTAR"
+  ],
+  EDUCATION: [
+    "AULA", "AULAS", "AULA PARTICULAR", "AULAS PARTICULARES", "CURSO", "CURSOS", "MENTORIA", "TREINAMENTO", "TREINAMENTOS", "REFORCO", "REFORÇO",
+    "REFORCO ESCOLAR", "REFORÇO ESCOLAR", "INGLES", "INGLÊS", "ESPANHOL", "MATEMATICA", "MATEMÁTICA", "PORTUGUES", "PORTUGUÊS", "MUSICA", "MÚSICA",
+    "VIOLAO", "VIOLÃO", "INFORMATICA", "INFORMÁTICA", "AULA ONLINE", "CURSO ONLINE"
+  ],
+  PROFESSIONAL: [
+    "ADVOGADO", "ADVOGADA", "ADVOCACIA", "CONTADOR", "CONTABIL", "CONTÁBIL", "CONTABILIDADE", "CONSULTOR", "CONSULTORA", "DESPACHANTE",
+    "MARKETING", "GESTAO", "GESTÃO", "GESTOR", "GESTORA", "DESIGNER", "PROGRAMADOR", "DESENVOLVEDOR", "ARQUITETO", "ARQUITETA", "ENGENHEIRO", "ENGENHEIRA",
+    "SOCIAL MEDIA", "TRAFEGO", "TRÁFEGO", "COPYWRITER", "AUDITORIA", "PLANEJAMENTO", "IMOBILIARIA", "IMOBILIÁRIA", "CORRETOR", "CORRETORA"
+  ],
+  EVENTS: [
+    "EVENTO", "EVENTOS", "FESTA", "FESTAS", "CASAMENTO", "CASAMENTOS", "ANIVERSARIO", "ANIVERSÁRIO", "FORMATURA", "FORMATURAS", "BUFFET", "DECORACAO", "DECORAÇÃO",
+    "DECORADOR", "DECORADORA", "FOTOGRAFO", "FOTÓGRAFO", "FOTOGRAFA", "FOTÓGRAFA", "DJ", "CERIMONIAL", "LEMBRANCINHA", "LEMBRANCINHAS", "BRINQUEDOS", "RECREACAO", "RECREAÇÃO"
+  ],
+  TOURISM: [
+    "TEMPORADA", "DIARIA", "DIÁRIA", "HOSPEDAGEM", "POUSADA", "CHALE", "CHALÉ", "AIRBNB", "ALUGUEL POR TEMPORADA", "CASA DE TEMPORADA", "APTO DE TEMPORADA",
+    "PASSEIO", "VIAGEM", "EXCURSAO", "EXCURSÃO", "PACOTE", "PACOTES", "RESORT", "HOTEL", "RANCHO", "CABANA"
+  ],
+  PETS: [
+    "PET", "PETS", "CACHORRO", "CACHORROS", "CACHORRINHO", "CACHORRINHOS", "GATO", "GATOS", "FILHOTE", "FILHOTES", "BANHO E TOSA", "RACAO", "RAÇÃO",
+    "VETERINARIO", "VETERINÁRIO", "VETERINARIA", "VETERINÁRIA", "ADOCAO", "ADOÇÃO", "DOG", "CAT", "COLEIRA", "CASINHA", "AREIA HIGIENICA", "AREIA HIGIÊNICA"
+  ],
+  BABY: [
+    "BEBE", "BEBÊ", "BEBES", "BEBÊS", "INFANTIL", "CRIANCA", "CRIANÇA", "CRIANCAS", "CRIANÇAS", "BERCO", "BERÇO", "CARRINHO", "CADEIRINHA",
+    "BEBE CONFORTO", "BEBÊ CONFORTO", "ENXOVAL", "BRINQUEDO", "BRINQUEDOS", "FRALDA", "FRALDAS", "MATERNIDADE", "ROUPA INFANTIL", "CALCADO INFANTIL", "CALÇADO INFANTIL"
+  ],
+  TOOLS: [
+    "FERRAMENTA", "FERRAMENTAS", "FURADEIRA", "PARAFUSADEIRA", "SERRA", "ESMERILHADEIRA", "BETONEIRA", "ROCADEIRA", "ROÇADEIRA", "MARTELETE", "COMPRESSOR",
+    "GERADOR", "ANDAIME", "ESCADA", "MATERIAL DE CONSTRUCAO", "MATERIAL DE CONSTRUÇÃO", "TINTA", "CIMENTO", "TIJOLO", "ARGAMASSA", "PISO", "REVESTIMENTO"
+  ],
+  COSMETICS: [
+    "PERFUME", "PERFUMES", "HIDRATANTE", "HIDRATANTES", "SKINCARE", "MAQUIAGEM", "MAQUIAGENS", "BATOM", "BATONS", "CREME", "CREMES",
+    "SERUM", "SÉRUM", "SHAMPOO", "CONDICIONADOR", "COLONIA", "COLÔNIA", "PRODUTO DE BELEZA", "COSMETICO", "COSMÉTICO", "COSMETICOS", "COSMÉTICOS"
+  ],
+  PROMOTION: [
+    "PROMOCAO", "PROMOÇÃO", "PROMOCOES", "PROMOÇÕES", "OFERTA", "OFERTAS", "LIQUIDACAO", "LIQUIDAÇÃO", "QUEIMA DE ESTOQUE", "COMBO", "COMBOS",
+    "DESCONTO", "DESCONTOS", "IMPERDIVEL", "IMPERDÍVEL", "OFERTA DO DIA", "PROMO DA SEMANA", "SEMANA DO CLIENTE", "BLACK FRIDAY"
+  ],
+  JOBS: [
+    "VAGA", "VAGAS", "CONTRATACAO", "CONTRATAÇÃO", "CONTRATANDO", "SELECAO", "SELEÇÃO", "OPORTUNIDADE", "OPORTUNIDADES", "TRABALHE CONOSCO",
+    "CURRICULO", "CURRÍCULO", "CANDIDATO", "CANDIDATOS", "REQUISITOS", "ENTREVISTA", "FREELANCER", "FREELA", "ESTAGIO", "ESTÁGIO", "EMPREGO"
   ],
 });
 
@@ -884,7 +894,7 @@ const CATEGORY_SCHEMAS = Object.freeze({
   },
   SERVICE: {
     key: "SERVICE",
-    label: "serviço",
+    label: "serviço geral",
     minAskScore: 68,
     detect(text) {
       return hasCategoryTerms(text, CATEGORY_TERMS.SERVICE);
@@ -943,6 +953,186 @@ const CATEGORY_SCHEMAS = Object.freeze({
       { key: "location", label: "Entrega / retirada / cidade", weight: 14, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
     ],
   },
+  BEAUTY: {
+    key: "BEAUTY",
+    label: "serviço de beleza ou estética",
+    minAskScore: 68,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.BEAUTY);
+    },
+    fields: [
+      { key: "service", label: "Procedimento / serviço oferecido", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasBeautyServiceSignal },
+      { key: "price", label: "Preço / pacote / promoção", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "location", label: "Local de atendimento / região", weight: 18, importance: "critical", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "hours", label: "Agenda / horário disponível", weight: 14, importance: "desired", allowProfileSupport: true, detect: hasHoursSignal },
+      { key: "differential", label: "Seu principal diferencial", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
+    ],
+  },
+  HEALTH: {
+    key: "HEALTH",
+    label: "serviço de saúde ou bem-estar",
+    minAskScore: 68,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.HEALTH);
+    },
+    fields: [
+      { key: "service", label: "Especialidade / atendimento", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasHealthServiceSignal },
+      { key: "price", label: "Preço / consulta / sessão", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "location", label: "Presencial / online / região", weight: 18, importance: "critical", allowProfileSupport: true, detect: hasOnlineOrLocationSignal },
+      { key: "hours", label: "Horário / agenda", weight: 14, importance: "desired", allowProfileSupport: true, detect: hasHoursSignal },
+      { key: "differential", label: "Seu diferencial / público atendido", weight: 22, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
+    ],
+  },
+  EDUCATION: {
+    key: "EDUCATION",
+    label: "curso ou aula",
+    minAskScore: 68,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.EDUCATION);
+    },
+    fields: [
+      { key: "subject", label: "Matéria / tema / curso", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasEducationTopicSignal },
+      { key: "modality", label: "Online / presencial / individual / turma", weight: 20, importance: "critical", allowProfileSupport: false, detect: hasOnlineOrModalitySignal },
+      { key: "price", label: "Preço / mensalidade / pacote", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "location", label: "Cidade / região / plataforma", weight: 16, importance: "desired", allowProfileSupport: true, detect: hasOnlineOrLocationSignal },
+      { key: "differential", label: "Público-alvo / diferencial", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
+    ],
+  },
+  PROFESSIONAL: {
+    key: "PROFESSIONAL",
+    label: "serviço profissional",
+    minAskScore: 68,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.PROFESSIONAL);
+    },
+    fields: [
+      { key: "service", label: "Serviço / especialidade", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasProfessionalServiceSignal },
+      { key: "price", label: "Honorários / orçamento / consulta", weight: 16, importance: "desired", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "location", label: "Atendimento online / presencial / região", weight: 18, importance: "critical", allowProfileSupport: true, detect: hasOnlineOrLocationSignal },
+      { key: "hours", label: "Horário / disponibilidade", weight: 12, importance: "desired", allowProfileSupport: true, detect: hasHoursSignal },
+      { key: "differential", label: "Principal diferencial / nicho atendido", weight: 26, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
+    ],
+  },
+  EVENTS: {
+    key: "EVENTS",
+    label: "serviço para evento ou festa",
+    minAskScore: 68,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.EVENTS);
+    },
+    fields: [
+      { key: "eventType", label: "Tipo de evento / serviço", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasEventTypeSignal },
+      { key: "date", label: "Data / agenda / disponibilidade", weight: 14, importance: "desired", allowProfileSupport: false, detect: hasBookingOrDateSignal },
+      { key: "location", label: "Cidade / região atendida", weight: 18, importance: "critical", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "price", label: "Pacote / orçamento / valor", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "differential", label: "Destaque do serviço", weight: 22, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
+    ],
+  },
+  TOURISM: {
+    key: "TOURISM",
+    label: "hospedagem ou turismo",
+    minAskScore: 68,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.TOURISM);
+    },
+    fields: [
+      { key: "location", label: "Cidade / destino / localização", weight: 22, importance: "critical", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "price", label: "Diária / pacote / valor", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "capacity", label: "Capacidade / quartos / comodidades", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasTourismCapacitySignal },
+      { key: "availability", label: "Datas disponíveis / reserva", weight: 16, importance: "desired", allowProfileSupport: false, detect: hasBookingOrDateSignal },
+      { key: "highlights", label: "Principal diferencial do local ou passeio", weight: 16, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
+    ],
+  },
+  PETS: {
+    key: "PETS",
+    label: "produto ou serviço pet",
+    minAskScore: 66,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.PETS);
+    },
+    fields: [
+      { key: "petType", label: "Animal / produto / serviço", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasPetSignal },
+      { key: "price", label: "Preço / taxa / valor", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "condition", label: "Idade / porte / estado / raça", weight: 24, importance: "critical", allowProfileSupport: false, detect: hasPetProfileSignal },
+      { key: "location", label: "Cidade / entrega / retirada", weight: 16, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "availability", label: "Disponibilidade / vacinação / agenda", weight: 14, importance: "desired", allowProfileSupport: false, detect: hasPetAvailabilitySignal },
+    ],
+  },
+  BABY: {
+    key: "BABY",
+    label: "produto infantil ou bebê",
+    minAskScore: 66,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.BABY);
+    },
+    fields: [
+      { key: "item", label: "Produto principal / faixa etária", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasBabyItemSignal },
+      { key: "price", label: "Preço", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "condition", label: "Estado / marca / tamanho", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasConditionSignal },
+      { key: "safety", label: "Idade indicada / segurança / acessórios", weight: 14, importance: "desired", allowProfileSupport: false, detect: hasSafetySignal },
+      { key: "location", label: "Entrega / retirada / cidade", weight: 14, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
+    ],
+  },
+  TOOLS: {
+    key: "TOOLS",
+    label: "ferramenta ou material de construção",
+    minAskScore: 66,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.TOOLS);
+    },
+    fields: [
+      { key: "item", label: "Produto / material / equipamento", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasToolsItemSignal },
+      { key: "price", label: "Preço / orçamento", weight: 20, importance: "critical", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "model", label: "Marca / modelo / potência / medida", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasToolsSpecSignal },
+      { key: "condition", label: "Estado / quantidade / uso", weight: 16, importance: "desired", allowProfileSupport: false, detect: hasConditionSignal },
+      { key: "location", label: "Entrega / retirada / cidade", weight: 14, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
+    ],
+  },
+  COSMETICS: {
+    key: "COSMETICS",
+    label: "produto de beleza ou cosmético",
+    minAskScore: 66,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.COSMETICS);
+    },
+    fields: [
+      { key: "item", label: "Produto / marca / linha", weight: 28, importance: "critical", allowProfileSupport: false, detect: hasCosmeticsItemSignal },
+      { key: "price", label: "Preço / kit / promoção", weight: 20, importance: "critical", allowProfileSupport: false, detect: hasPriceSignal },
+      { key: "use", label: "Fragrância / cor / finalidade", weight: 20, importance: "desired", allowProfileSupport: false, detect: hasCosmeticsUseSignal },
+      { key: "validity", label: "Validade / lacrado / original", weight: 16, importance: "desired", allowProfileSupport: false, detect: hasValiditySignal },
+      { key: "location", label: "Entrega / retirada / cidade", weight: 16, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
+    ],
+  },
+  PROMOTION: {
+    key: "PROMOTION",
+    label: "promoção ou campanha de loja",
+    minAskScore: 64,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.PROMOTION);
+    },
+    fields: [
+      { key: "offer", label: "Oferta / campanha / produtos em destaque", weight: 30, importance: "critical", allowProfileSupport: false, detect: hasPromotionSignal },
+      { key: "price", label: "Preço / desconto / condição", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "location", label: "Loja / site / cidade", weight: 16, importance: "desired", allowProfileSupport: true, detect: hasLocationSignal },
+      { key: "availability", label: "Validade / período da promoção", weight: 18, importance: "desired", allowProfileSupport: false, detect: hasBookingOrDateSignal },
+      { key: "differential", label: "Destaque principal da oferta", weight: 14, importance: "desired", allowProfileSupport: false, detect: hasDifferentialSignal },
+    ],
+  },
+  JOBS: {
+    key: "JOBS",
+    label: "vaga ou oportunidade",
+    minAskScore: 66,
+    detect(text) {
+      return hasCategoryTerms(text, CATEGORY_TERMS.JOBS);
+    },
+    fields: [
+      { key: "role", label: "Cargo / função / oportunidade", weight: 30, importance: "critical", allowProfileSupport: false, detect: hasJobRoleSignal },
+      { key: "location", label: "Cidade / presencial / remoto", weight: 18, importance: "critical", allowProfileSupport: true, detect: hasOnlineOrLocationSignal },
+      { key: "requirements", label: "Requisitos / experiência", weight: 22, importance: "critical", allowProfileSupport: false, detect: hasJobRequirementSignal },
+      { key: "salary", label: "Salário / diária / comissão", weight: 16, importance: "desired", allowProfileSupport: false, detect: hasPriceOrBudgetSignal },
+      { key: "contact", label: "Como se candidatar / prazo", weight: 14, importance: "desired", allowProfileSupport: false, detect: hasJobApplicationSignal },
+    ],
+  },
   GENERIC: {
     key: "GENERIC",
     label: "produto",
@@ -961,6 +1151,50 @@ const CATEGORY_SCHEMAS = Object.freeze({
 
 function countWords(text) {
   return cleanText(text).split(/\s+/).filter(Boolean).length;
+}
+
+function normalizeCategoryDetectionText(text) {
+  return ` ${upper(text)
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim()} `;
+}
+
+function hasCategoryTerms(text, terms) {
+  const normalized = normalizeCategoryDetectionText(text);
+  return ensureArray(terms).some((term) => {
+    const token = cleanText(term)
+      .toUpperCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^A-Z0-9]+/g, " ")
+      .trim();
+
+    if (!token) return false;
+    return normalized.includes(` ${token} `);
+  });
+}
+
+function scoreCategoryTermHits(text, terms) {
+  const normalized = normalizeCategoryDetectionText(text);
+  let score = 0;
+
+  for (const term of ensureArray(terms)) {
+    const token = cleanText(term)
+      .toUpperCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^A-Z0-9]+/g, " ")
+      .trim();
+
+    if (!token) continue;
+    if (normalized.includes(` ${token} `)) {
+      score += token.length >= 9 ? 8 : token.length >= 6 ? 7 : 5;
+    }
+  }
+
+  return score;
 }
 
 function hasPriceSignal(text) {
@@ -993,7 +1227,7 @@ function hasFuelSignal(text) {
 
 function hasConditionSignal(text) {
   const s = upper(text);
-  return /\b(CONSERVADO|CONSERVADA|NOVO|NOVA|SEMINOVO|SEMINOVA|REVISADO|REVISADA|PERFEITO ESTADO|ESTADO DE NOVO|USADO|USADA|FUNCIONANDO|FUNCIONA|BOAS? CONDI[CÇ][ÕO]ES|BOM ESTADO|PINTURA|POUCO USO|CARRO DE GARAGEM|GARAGEM|IMPEC[ÁA]VEL|ZERADO)\b/.test(s);
+  return /\b(CONSERVADO|CONSERVADA|NOVO|NOVA|SEMINOVO|SEMINOVA|REVISADO|REVISADA|PERFEITO ESTADO|ESTADO DE NOVO|USADO|USADA|FUNCIONANDO|FUNCIONA|BOAS? CONDI[CÇ][ÕO]ES|BOM ESTADO|PINTURA|POUCO USO|CARRO DE GARAGEM|GARAGEM|IMPEC[ÁA]VEL|ZERADO|LACRADO|SEM USO)\b/.test(s);
 }
 
 function hasVehicleConditionOrDocsSignal(text) {
@@ -1008,7 +1242,17 @@ function hasHighlightsSignal(text) {
 
 function hasLocationSignal(text) {
   const s = upper(text);
-  return /\b(ENTREGO|RETIRAR|RETIRADA|ENTREGA|BAIRRO|CIDADE|REGI[AÃ]O|ATENDO|ATENDIMENTO|ONLINE|DOMIC[ÍI]LIO|DOMICILIO|FRETE)\b/.test(s);
+  return /\b(ENTREGO|RETIRAR|RETIRADA|ENTREGA|BAIRRO|CIDADE|REGI[AÃ]O|ATENDO|ATENDIMENTO|ONLINE|DOMIC[ÍI]LIO|DOMICILIO|FRETE|PRESENCIAL|REMOTO)\b/.test(s);
+}
+
+function hasOnlineOrLocationSignal(text) {
+  const s = upper(text);
+  return hasLocationSignal(s) || /\b(ONLINE|PRESENCIAL|REMOTO|H[ÍI]BRIDO|PLATAFORMA|ZOOM|GOOGLE MEET|WHATSAPP)\b/.test(s);
+}
+
+function hasOnlineOrModalitySignal(text) {
+  const s = upper(text);
+  return /\b(ONLINE|PRESENCIAL|REMOTO|INDIVIDUAL|EM GRUPO|TURMA|TURMAS|AULA EXPERIMENTAL|MENTORIA|PLATAFORMA)\b/.test(s);
 }
 
 function hasPropertySizeSignal(text) {
@@ -1033,7 +1277,7 @@ function hasPropertyHighlightSignal(text) {
 
 function hasElectronicsModelSignal(text) {
   const s = upper(text);
-  return /\b(64GB|128GB|256GB|512GB|I5|I7|I9|M1|M2|M3|POLEGADAS?|INCH|\"|GB|SSD|RAM)\b/.test(s);
+  return /\b(64GB|128GB|256GB|512GB|I5|I7|I9|M1|M2|M3|POLEGADAS?|INCH|"|GB|SSD|RAM)\b/.test(s);
 }
 
 function hasAccessorySignal(text) {
@@ -1053,17 +1297,17 @@ function hasServiceDefinitionSignal(text) {
 
 function hasPriceOrBudgetSignal(text) {
   const s = upper(text);
-  return hasPriceSignal(s) || /\b(OR[CÇ]AMENTO|A COMBINAR|CONSULTAR|SOB CONSULTA)\b/.test(s);
+  return hasPriceSignal(s) || /\b(OR[CÇ]AMENTO|A COMBINAR|CONSULTAR|SOB CONSULTA|PACOTE|MENSALIDADE|COMISS[ÃA]O|DI[ÁA]RIA|TAXA)\b/.test(s);
 }
 
 function hasHoursSignal(text) {
   const s = upper(text);
-  return /\b(SEG|SEGUNDA|TER|QUA|QUI|SEX|SAB|SÁB|DOM|HOR[ÁA]RIO|HORARIO|\d{1,2}H)\b/.test(s);
+  return /\b(SEG|SEGUNDA|TER|QUA|QUI|SEX|SAB|SÁB|DOM|HOR[ÁA]RIO|HORARIO|AGENDA|DISPONIBILIDADE|\d{1,2}H)\b/.test(s);
 }
 
 function hasDifferentialSignal(text) {
   const s = upper(text);
-  return /\b(EXPERI[ÊE]NCIA|QUALIDADE|R[ÁA]PIDO|RAPIDO|CAPRICHO|GARANTIA|ATENDIMENTO|PERSONALIZADO|ARTESANAL|CASEIRO|ORIGINAL|ÚNICO DONO|UNICO DONO)\b/.test(s);
+  return /\b(EXPERI[ÊE]NCIA|QUALIDADE|R[ÁA]PIDO|RAPIDO|CAPRICHO|GARANTIA|ATENDIMENTO|PERSONALIZADO|ARTESANAL|CASEIRO|ORIGINAL|ÚNICO DONO|UNICO DONO|EXCLUSIVO|PREMIUM|ALTO PADR[ÃA]O)\b/.test(s);
 }
 
 function hasFoodItemsSignal(text) {
@@ -1096,6 +1340,111 @@ function hasVoltageOrMeasureSignal(text) {
   return /\b(110V|127V|220V|VOLTS?|CM|METROS?|LARGURA|ALTURA|PROFUNDIDADE|MEDIDAS?)\b/.test(s);
 }
 
+function hasBeautyServiceSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.BEAUTY) || /\b(PACOTE DE UNHAS|DESIGN DE SOBRANCELHAS|MECHAS|ESCOVA PROGRESSIVA)\b/.test(s);
+}
+
+function hasHealthServiceSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.HEALTH) || /\b(SESS[ÃA]O|CONSULTA|AVALIA[CÇ][AÃ]O|ATENDIMENTO TERAP[ÊE]UTICO)\b/.test(s);
+}
+
+function hasEducationTopicSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.EDUCATION) || /\b(AULA DE|CURSO DE|REFOR[ÇC]O|MAT[ÉE]RIA|CONTE[ÚU]DO)\b/.test(s);
+}
+
+function hasProfessionalServiceSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.PROFESSIONAL) || /\b(CONSULTORIA|ASSESSORIA|PLANEJAMENTO|PROJETO|REGULARIZA[CÇ][AÃ]O|DECLARA[CÇ][AÃ]O)\b/.test(s);
+}
+
+function hasEventTypeSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.EVENTS) || /\b(EVENTO|FESTA|CASAMENTO|ANIVERS[ÁA]RIO|FORMATURA|15 ANOS)\b/.test(s);
+}
+
+function hasBookingOrDateSignal(text) {
+  const s = upper(text);
+  return /\b(HOJE|AMANH[ÃA]|FINAL DE SEMANA|SEMANA|M[EÊ]S|RESERVA|AGENDAMENTO|AGENDA|DATA|DATAS|\d{1,2}\/\d{1,2}(\/\d{2,4})?)\b/.test(s);
+}
+
+function hasTourismCapacitySignal(text) {
+  const s = upper(text);
+  return /\b(H[ÓO]SPEDES?|PESSOAS|QUARTOS?|SU[ÍI]TES?|PISCINA|CHURRASQUEIRA|WI[- ]?FI|CAF[EÉ] DA MANH[ÃA]|DI[ÁA]RIA)\b/.test(s);
+}
+
+function hasPetSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.PETS);
+}
+
+function hasPetProfileSignal(text) {
+  const s = upper(text);
+  return /\b(PORTE|RA[CÇ]A|VACINADO|VACINADA|VERMIFUGADO|IDADE|MESES?|ANOS?|BANHO E TOSA)\b/.test(s) || hasConditionSignal(s);
+}
+
+function hasPetAvailabilitySignal(text) {
+  const s = upper(text);
+  return /\b(DISPON[ÍI]VEL|PRONTA ENTREGA|AGENDA|VACINADO|VACINADA|RETIRADA|ENTREGA)\b/.test(s);
+}
+
+function hasBabyItemSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.BABY) || /\b(FAIXA ET[ÁA]RIA|RN|0 A 3|0 A 6|BEB[ÊE])\b/.test(s);
+}
+
+function hasSafetySignal(text) {
+  const s = upper(text);
+  return /\b(SELO|SEGURAN[ÇC]A|CINTO|TRAVA|IDADE INDICADA|CERTIFICADO|INMETRO)\b/.test(s);
+}
+
+function hasToolsItemSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.TOOLS) || /\b(FERRAMENTA|MATERIAL DE CONSTRU[CÇ][AÃ]O|EQUIPAMENTO)\b/.test(s);
+}
+
+function hasToolsSpecSignal(text) {
+  const s = upper(text);
+  return /\b(MARCA|MODELO|POT[ÊE]NCIA|VOLTAGEM|MEDIDAS?|CAPACIDADE|LITROS|WATTS?)\b/.test(s);
+}
+
+function hasCosmeticsItemSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.COSMETICS) || /\b(LINHA|KIT|FRAGR[ÂA]NCIA|TONALIDADE)\b/.test(s);
+}
+
+function hasCosmeticsUseSignal(text) {
+  const s = upper(text);
+  return /\b(FRAGR[ÂA]NCIA|CHEIRO|COR|PELE|CABELO|ROSTO|HIDRATA[CÇ][AÃ]O|TRATAMENTO)\b/.test(s);
+}
+
+function hasValiditySignal(text) {
+  const s = upper(text);
+  return /\b(VALIDADE|LACRADO|LACRADA|ORIGINAL|SELO)\b/.test(s);
+}
+
+function hasPromotionSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.PROMOTION) || /\b(DESCONTO|QUEIMA DE ESTOQUE|OFERTA DO DIA|POR TEMPO LIMITADO|CUPOM|LEVE \d+ PAGUE \d+)\b/.test(s);
+}
+
+function hasJobRoleSignal(text) {
+  const s = upper(text);
+  return hasCategoryTerms(s, CATEGORY_TERMS.JOBS) || /\b(CARGO|FUN[CÇ][AÃ]O|OPORTUNIDADE|VAGA PARA|CONTRATANDO)\b/.test(s);
+}
+
+function hasJobRequirementSignal(text) {
+  const s = upper(text);
+  return /\b(EXPERI[ÊE]NCIA|REQUISITOS?|CURR[ÍI]CULO|CNH|DISPONIBILIDADE|CLT|COMISS[ÃA]O|REMOTO|PRESENCIAL)\b/.test(s);
+}
+
+function hasJobApplicationSignal(text) {
+  const s = upper(text);
+  return /\b(ENVIAR CURR[ÍI]CULO|CHAMAR NO WHATSAPP|CANDIDATAR|PRAZO|ENTREVISTA|SELE[CÇ][AÃ]O)\b/.test(s);
+}
+
 const CATEGORY_HINTS = Object.freeze({
   VEHICLE: [...CATEGORY_TERMS.VEHICLE, "0KM", "KM", "AUTOMATICO", "AUTOMÁTICO", "MANUAL", "FLEX", "DIESEL"],
   PROPERTY: [...CATEGORY_TERMS.PROPERTY, "ALTO PADRAO", "ALTO PADRÃO", "METRAGEM", "SUITE", "SUÍTE", "QUARTOS", "VAGAS"],
@@ -1104,25 +1453,134 @@ const CATEGORY_HINTS = Object.freeze({
   FOOD: [...CATEGORY_TERMS.FOOD, "CARDAPIO", "CARDÁPIO", "ENCOMENDA", "PRONTA ENTREGA", "SABORES"],
   FASHION: [...CATEGORY_TERMS.FASHION, "NUMERACAO", "NUMERAÇÃO", "TAMANHO", "MARCA", "COR"],
   HOME: [...CATEGORY_TERMS.HOME, "VOLTAGEM", "CAPACIDADE", "MEDIDAS", "LITROS"],
+  BEAUTY: [...CATEGORY_TERMS.BEAUTY, "AGENDA", "HORARIO", "HORÁRIO", "ATENDIMENTO", "ESCOVA", "PROCEDIMENTO"],
+  HEALTH: [...CATEGORY_TERMS.HEALTH, "SESSAO", "SESSÃO", "CONSULTA", "ONLINE", "PRESENCIAL", "BEM ESTAR", "BEM-ESTAR"],
+  EDUCATION: [...CATEGORY_TERMS.EDUCATION, "ONLINE", "PRESENCIAL", "TURMA", "AULA EXPERIMENTAL", "CERTIFICADO"],
+  PROFESSIONAL: [...CATEGORY_TERMS.PROFESSIONAL, "CONSULTORIA", "ASSESSORIA", "ATENDIMENTO ONLINE", "ATENDIMENTO PRESENCIAL"],
+  EVENTS: [...CATEGORY_TERMS.EVENTS, "PACOTE", "ORCAMENTO", "ORÇAMENTO", "AGENDA", "DECORAÇÃO", "DECORACAO"],
+  TOURISM: [...CATEGORY_TERMS.TOURISM, "RESERVA", "HOSPEDAGEM", "COMODIDADES", "DIARIA", "DIÁRIA", "FINAL DE SEMANA"],
+  PETS: [...CATEGORY_TERMS.PETS, "VACINA", "VACINADO", "BANHO", "TOSA", "PORTE", "RACAO", "RAÇÃO"],
+  BABY: [...CATEGORY_TERMS.BABY, "IDADE", "FAIXA ETARIA", "FAIXA ETÁRIA", "TAMANHO", "SEGURANCA", "SEGURANÇA"],
+  TOOLS: [...CATEGORY_TERMS.TOOLS, "POTENCIA", "POTÊNCIA", "MEDIDAS", "LITROS", "USADO", "SEMINOVO"],
+  COSMETICS: [...CATEGORY_TERMS.COSMETICS, "LACRADO", "ORIGINAL", "VALIDADE", "KIT", "FRAGRANCIA", "FRAGRÂNCIA"],
+  PROMOTION: [...CATEGORY_TERMS.PROMOTION, "POR TEMPO LIMITADO", "ATE", "ATÉ", "%", "CUPOM"],
+  JOBS: [...CATEGORY_TERMS.JOBS, "REMOTO", "PRESENCIAL", "CURRICULO", "CURRÍCULO", "CLT", "COMISSAO", "COMISSÃO"],
+});
+
+const CATEGORY_MACRO_GROUPS = Object.freeze({
+  PROPERTY: "PROPERTY",
+  VEHICLE: "GOODS",
+  ELECTRONICS: "GOODS",
+  SERVICE: "SERVICE",
+  FOOD: "FOOD",
+  FASHION: "GOODS",
+  HOME: "GOODS",
+  BEAUTY: "SERVICE",
+  HEALTH: "SERVICE",
+  EDUCATION: "SERVICE",
+  PROFESSIONAL: "SERVICE",
+  EVENTS: "SERVICE",
+  TOURISM: "PROPERTY",
+  PETS: "GOODS",
+  BABY: "GOODS",
+  TOOLS: "GOODS",
+  COSMETICS: "GOODS",
+  PROMOTION: "PROMOTION",
+  JOBS: "JOBS",
+  GENERIC: "GENERIC",
+});
+
+const CATEGORY_AMBIGUITY_PAIRS = Object.freeze({
+  "BEAUTY|EDUCATION": {
+    question: "Quero entender melhor seu anúncio antes de continuar. Ele está mais para:",
+    options: [
+      { key: "EDUCATION", label: "curso ou aula" },
+      { key: "BEAUTY", label: "serviço de beleza ou estética" },
+    ],
+  },
+  "PROPERTY|TOURISM": {
+    question: "Quero entender melhor seu anúncio antes de continuar. Ele está mais para:",
+    options: [
+      { key: "PROPERTY", label: "imóvel para venda ou locação comum" },
+      { key: "TOURISM", label: "hospedagem ou aluguel por temporada" },
+    ],
+  },
+  "FOOD|EVENTS": {
+    question: "Quero entender melhor seu anúncio antes de continuar. Ele está mais para:",
+    options: [
+      { key: "FOOD", label: "venda de alimentos" },
+      { key: "EVENTS", label: "serviço para evento ou festa" },
+    ],
+  },
+  "SERVICE|PROFESSIONAL": {
+    question: "Quero entender melhor seu anúncio antes de continuar. Ele está mais para:",
+    options: [
+      { key: "SERVICE", label: "serviço geral" },
+      { key: "PROFESSIONAL", label: "serviço profissional especializado" },
+    ],
+  },
+  "COSMETICS|BEAUTY": {
+    question: "Quero entender melhor seu anúncio antes de continuar. Ele está mais para:",
+    options: [
+      { key: "COSMETICS", label: "produto de beleza ou cosmético" },
+      { key: "BEAUTY", label: "serviço de beleza ou estética" },
+    ],
+  },
+  "FASHION|BABY": {
+    question: "Quero entender melhor seu anúncio antes de continuar. Ele está mais para:",
+    options: [
+      { key: "FASHION", label: "roupa ou acessório em geral" },
+      { key: "BABY", label: "produto infantil ou bebê" },
+    ],
+  },
+  "PROMOTION|FOOD": {
+    question: "Quero entender melhor seu anúncio antes de continuar. Ele está mais para:",
+    options: [
+      { key: "PROMOTION", label: "promoção da loja ou campanha" },
+      { key: "FOOD", label: "venda de alimento específico" },
+    ],
+  },
+});
+
+const CATEGORY_ANTI_HINTS = Object.freeze({
+  SERVICE: [
+    ...CATEGORY_TERMS.BEAUTY,
+    ...CATEGORY_TERMS.HEALTH,
+    ...CATEGORY_TERMS.EDUCATION,
+    ...CATEGORY_TERMS.PROFESSIONAL,
+    ...CATEGORY_TERMS.EVENTS,
+    ...CATEGORY_TERMS.TOURISM,
+  ],
+  FASHION: [...CATEGORY_TERMS.BABY],
 });
 
 function scoreKeywordHits(text, hints) {
-  const normalized = normalizeCategoryDetectionText(text);
-  let score = 0;
+  return scoreCategoryTermHits(text, hints);
+}
 
-  for (const hint of ensureArray(hints)) {
-    const token = cleanText(hint)
-      .toUpperCase()
-      .normalize("NFD")
-      .replace(/[̀-ͯ]/g, "")
-      .replace(/[^A-Z0-9]+/g, " ")
-      .trim();
+function getCategoryMacroGroup(categoryKey) {
+  return CATEGORY_MACRO_GROUPS[String(categoryKey || "").trim().toUpperCase()] || "GENERIC";
+}
 
-    if (!token) continue;
-    if (normalized.includes(` ${token} `)) score += token.length >= 6 ? 8 : 6;
-  }
+function getAmbiguityPairConfig(primaryKey, runnerUpKey) {
+  const a = String(primaryKey || "").trim().toUpperCase();
+  const b = String(runnerUpKey || "").trim().toUpperCase();
+  if (!a || !b || a === b) return null;
+  return CATEGORY_AMBIGUITY_PAIRS[`${a}|${b}`] || CATEGORY_AMBIGUITY_PAIRS[`${b}|${a}`] || null;
+}
 
-  return score;
+function hasStrongCategoryIndicator(text, schemaKey) {
+  const key = String(schemaKey || "").trim().toUpperCase();
+  const schema = CATEGORY_SCHEMAS[key];
+  if (!schema || key === "GENERIC") return false;
+
+  if (schema.detect(text)) return true;
+
+  const categoryTermsScore = scoreCategoryTermHits(text, CATEGORY_TERMS[key]);
+  if (categoryTermsScore >= 12) return true;
+
+  const hintScore = scoreKeywordHits(text, CATEGORY_HINTS[key]);
+  return hintScore >= 16;
 }
 
 function scoreCategorySchema(text, schema) {
@@ -1131,6 +1589,10 @@ function scoreCategorySchema(text, schema) {
   let score = 0;
   if (schema.detect(text)) score += 40;
   score += scoreKeywordHits(text, CATEGORY_HINTS[schema.key]);
+
+  if (CATEGORY_ANTI_HINTS[schema.key]) {
+    score -= Math.min(18, Math.floor(scoreCategoryTermHits(text, CATEGORY_ANTI_HINTS[schema.key]) / 2));
+  }
 
   const completeness = computeCategoryCompleteness({ schema, text, bizProfile: null });
   score += Math.min(36, completeness.presentWeight);
@@ -1141,22 +1603,317 @@ function scoreCategorySchema(text, schema) {
   return score;
 }
 
-function detectCategorySchema(text) {
-  const candidates = Object.values(CATEGORY_SCHEMAS).filter((schema) => schema.key !== "GENERIC");
-  let bestSchema = CATEGORY_SCHEMAS.GENERIC;
-  let bestScore = 0;
+function getCategoryCandidates(text) {
+  const candidates = Object.values(CATEGORY_SCHEMAS)
+    .filter((schema) => schema.key !== "GENERIC")
+    .map((schema) => ({
+      schema,
+      key: schema.key,
+      label: schema.label,
+      score: scoreCategorySchema(text, schema),
+      strong: hasStrongCategoryIndicator(text, schema.key),
+      macroGroup: getCategoryMacroGroup(schema.key),
+    }))
+    .sort((a, b) => b.score - a.score);
 
-  for (const schema of candidates) {
-    const score = scoreCategorySchema(text, schema);
-    if (score > bestScore) {
-      bestSchema = schema;
-      bestScore = score;
-    }
-  }
-
-  return bestScore >= 40 ? bestSchema : CATEGORY_SCHEMAS.GENERIC;
+  return candidates;
 }
 
+const AD_INTENTS = Object.freeze({
+  SPECIFIC_ITEM: "SPECIFIC_ITEM",
+  SERVICE_OFFER: "SERVICE_OFFER",
+  INSTITUTIONAL: "INSTITUTIONAL",
+  CATALOG: "CATALOG",
+  PROMOTION: "PROMOTION",
+  OPPORTUNITY: "OPPORTUNITY",
+});
+
+const CATEGORY_ALLOWED_INTENTS = Object.freeze({
+  PROPERTY: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.INSTITUTIONAL, AD_INTENTS.CATALOG],
+  VEHICLE: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.PROMOTION],
+  ELECTRONICS: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.PROMOTION],
+  SERVICE: [AD_INTENTS.SERVICE_OFFER, AD_INTENTS.INSTITUTIONAL],
+  FOOD: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.PROMOTION],
+  FASHION: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.PROMOTION],
+  HOME: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.PROMOTION],
+  BEAUTY: [AD_INTENTS.SERVICE_OFFER, AD_INTENTS.PROMOTION],
+  HEALTH: [AD_INTENTS.SERVICE_OFFER],
+  EDUCATION: [AD_INTENTS.SERVICE_OFFER, AD_INTENTS.INSTITUTIONAL],
+  PROFESSIONAL: [AD_INTENTS.SERVICE_OFFER, AD_INTENTS.INSTITUTIONAL],
+  EVENTS: [AD_INTENTS.SERVICE_OFFER, AD_INTENTS.INSTITUTIONAL],
+  TOURISM: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.INSTITUTIONAL],
+  PETS: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.SERVICE_OFFER, AD_INTENTS.CATALOG],
+  BABY: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.PROMOTION],
+  TOOLS: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.PROMOTION],
+  COSMETICS: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.PROMOTION],
+  PROMOTION: [AD_INTENTS.PROMOTION],
+  JOBS: [AD_INTENTS.OPPORTUNITY],
+  GENERIC: [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.SERVICE_OFFER, AD_INTENTS.CATALOG, AD_INTENTS.PROMOTION, AD_INTENTS.INSTITUTIONAL],
+});
+
+function getAllowedIntentsForCategory(schemaKey) {
+  return CATEGORY_ALLOWED_INTENTS[String(schemaKey || "").trim().toUpperCase()] || CATEGORY_ALLOWED_INTENTS.GENERIC;
+}
+
+function scoreIntentKeywordHits(text, terms) {
+  return scoreCategoryTermHits(text, terms);
+}
+
+function scorePromotionIntent(text) {
+  const s = upper(text);
+  let score = scoreIntentKeywordHits(text, CATEGORY_TERMS.PROMOTION);
+  if (/\b(PROMO|PROMOCAO|PROMOÇÃO|OFERTA|DESCONTO|LIQUIDACAO|LIQUIDAÇÃO|COMBO)\b/.test(s)) score += 18;
+  if (/%/.test(s)) score += 6;
+  if (/\b(ATE|ATÉ)\s+\d+%/.test(s)) score += 8;
+  return score;
+}
+
+function scoreCatalogIntent(text, schemaKey) {
+  const s = upper(text);
+  let score = 0;
+  if (/\b(CATALOGO|CATÁLOGO|LINHA|COLECAO|COLEÇÃO|VARIEDADE|VARIEDADES|OPCOES|OPÇÕES|MODELOS|DIVERSOS|VARIOS|VÁRIOS|SELECAO|SELEÇÃO)\b/.test(s)) score += 18;
+  if (/\b(TENHO|TEMOS|TRABALHO COM|TRABALHAMOS COM|OPCOES|OPÇÕES|ITENS|PRODUTOS|SERVICOS|SERVIÇOS)\b/.test(s)) score += 12;
+  if (schemaKey === "PROPERTY" && /\b(IMOVEIS|IMÓVEIS|CASAS|APARTAMENTOS|TERRENOS|LOTES)\b/.test(s)) score += 12;
+  return score;
+}
+
+function scoreInstitutionalIntent(text, schemaKey) {
+  const s = upper(text);
+  let score = 0;
+  if (/\b(EMPRESA|SOMOS|ATENDEMOS|ATENDO|ATUO|ATUAMOS|ESPECIALISTA|ESPECIALIZADO|ESPECIALIZADA|NOSSO|NOSSA|TRABALHO COM|TRABALHAMOS COM|AJUDO|AJUDAMOS|OFERECO|OFEREÇO|OFERECEMOS)\b/.test(s)) score += 18;
+  if (schemaKey === "PROPERTY" && /\b(CORRETOR|CORRETORA|IMOBILIARIA|IMOBILIÁRIA|ALTO PADRAO|ALTO PADRÃO|OPORTUNIDADES)\b/.test(s)) score += 18;
+  if (schemaKey === "PROFESSIONAL" && /\b(CONSULTORIA|ASSESSORIA|ESCRITORIO|ESCRITÓRIO)\b/.test(s)) score += 12;
+  return score;
+}
+
+function scoreServiceOfferIntent(text, schemaKey) {
+  const s = upper(text);
+  let score = 0;
+  if (/\b(FAÇO|FACO|PRESTO|OFERECO|OFEREÇO|REALIZO|ATENDO|AGENDA|ATENDIMENTO|SERVICO|SERVIÇO|CONSULTA|SESSAO|SESSÃO|AULA|CURSO)\b/.test(s)) score += 16;
+  if (["SERVICE","BEAUTY","HEALTH","EDUCATION","PROFESSIONAL","EVENTS"].includes(schemaKey)) score += 10;
+  return score;
+}
+
+function scoreSpecificItemIntent(text, schema) {
+  const s = upper(text);
+  let score = 8;
+  if (hasPriceSignal(text)) score += 10;
+  if (hasConditionSignal(text)) score += 6;
+  if (schema && computeCategoryCompleteness({ schema, text, bizProfile: null }).presentWeight >= 24) score += 10;
+  if (/\b(ESTE|ESSA|ESSAS|ESSA|UNICO|ÚNICO|UNICA|ÚNICA|MODELO|ANO|KM|METROS|M2|QUARTOS|VAGAS|LITROS|GB|TAMANHO)\b/.test(s)) score += 8;
+  return score;
+}
+
+function scoreOpportunityIntent(text) {
+  return scoreIntentKeywordHits(text, CATEGORY_TERMS.JOBS) + (upper(text).match(/\b(VAGA|CONTRATANDO|OPORTUNIDADE|CURRICULO|CURRÍCULO)\b/) ? 18 : 0);
+}
+
+function getIntentOptionLabel(schemaKey, intentKey) {
+  const schemaLabel = CATEGORY_SCHEMAS[String(schemaKey || "").trim().toUpperCase()]?.label || "anúncio";
+  const intent = String(intentKey || "").trim().toUpperCase();
+  if (schemaKey === "PROPERTY" && intent === AD_INTENTS.SPECIFIC_ITEM) return "anunciar um imóvel específico";
+  if (schemaKey === "PROPERTY" && intent === AD_INTENTS.INSTITUTIONAL) return "divulgar meu trabalho/opções de imóveis";
+  if (schemaKey === "PROPERTY" && intent === AD_INTENTS.CATALOG) return "mostrar várias opções de imóveis";
+  if (intent === AD_INTENTS.SERVICE_OFFER) return `divulgar meu ${schemaLabel}`;
+  if (intent === AD_INTENTS.CATALOG) return "mostrar várias opções / catálogo";
+  if (intent === AD_INTENTS.PROMOTION) return "divulgar uma promoção / oferta";
+  if (intent === AD_INTENTS.INSTITUTIONAL) return "fazer um anúncio institucional";
+  if (intent === AD_INTENTS.OPPORTUNITY) return "divulgar uma vaga / oportunidade";
+  return "anunciar um item específico";
+}
+
+function getIntentInstructionLabel(intentKey) {
+  const intent = String(intentKey || "").trim().toUpperCase();
+  if (intent === AD_INTENTS.SERVICE_OFFER) return "serviço oferecido";
+  if (intent === AD_INTENTS.CATALOG) return "catálogo / várias opções";
+  if (intent === AD_INTENTS.PROMOTION) return "promoção / oferta";
+  if (intent === AD_INTENTS.INSTITUTIONAL) return "institucional";
+  if (intent === AD_INTENTS.OPPORTUNITY) return "vaga / oportunidade";
+  return "item específico";
+}
+
+function buildIntentDisambiguationPrompt({ schema, primaryIntentKey, runnerUpIntentKey }) {
+  const schemaKey = String(schema?.key || "GENERIC").trim().toUpperCase();
+  return [
+    `Antes de continuar, quero entender melhor *como* você quer anunciar esse ${schema?.label || "item"}:`,
+    "",
+    `1️⃣ ${getIntentOptionLabel(schemaKey, primaryIntentKey)}`,
+    `2️⃣ ${getIntentOptionLabel(schemaKey, runnerUpIntentKey)}`,
+    "3️⃣ seguir com uma versão mais genérica",
+    "",
+    "Responda só com *1*, *2* ou *3*. ✅",
+  ].join("\n");
+}
+
+function detectAdIntentDecision({ text, schema }) {
+  const schemaKey = String(schema?.key || "GENERIC").trim().toUpperCase();
+  const allowed = getAllowedIntentsForCategory(schemaKey);
+  if (!allowed.length) {
+    return { intentKey: AD_INTENTS.SPECIFIC_ITEM, runnerUpIntentKey: "", confidence: "medium", shouldAskDisambiguation: false, prompt: "" };
+  }
+  if (allowed.length === 1) {
+    return { intentKey: allowed[0], runnerUpIntentKey: "", confidence: "high", shouldAskDisambiguation: false, prompt: "" };
+  }
+
+  const scores = [];
+  for (const intentKey of allowed) {
+    let score = 0;
+    if (intentKey === AD_INTENTS.PROMOTION) score = scorePromotionIntent(text);
+    else if (intentKey === AD_INTENTS.CATALOG) score = scoreCatalogIntent(text, schemaKey);
+    else if (intentKey === AD_INTENTS.INSTITUTIONAL) score = scoreInstitutionalIntent(text, schemaKey);
+    else if (intentKey === AD_INTENTS.SERVICE_OFFER) score = scoreServiceOfferIntent(text, schemaKey);
+    else if (intentKey === AD_INTENTS.OPPORTUNITY) score = scoreOpportunityIntent(text);
+    else score = scoreSpecificItemIntent(text, schema);
+    scores.push({ intentKey, score });
+  }
+  scores.sort((a,b)=>b.score-a.score);
+  const primary = scores[0] || { intentKey: allowed[0], score: 0 };
+  const runnerUp = scores[1] || null;
+  const gap = primary.score - Number(runnerUp?.score || 0);
+
+  const shouldAskDisambiguation = !!runnerUp && primary.score >= 10 && runnerUp.score >= 10 && gap <= 8 && (
+    [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.INSTITUTIONAL, AD_INTENTS.PROMOTION].includes(primary.intentKey) ||
+    [AD_INTENTS.SPECIFIC_ITEM, AD_INTENTS.CATALOG, AD_INTENTS.INSTITUTIONAL, AD_INTENTS.PROMOTION].includes(runnerUp.intentKey)
+  );
+
+  const confidence = shouldAskDisambiguation ? "medium" : primary.score >= 24 && gap >= 10 ? "high" : gap >= 6 ? "medium" : "low";
+  return {
+    intentKey: primary.intentKey,
+    runnerUpIntentKey: runnerUp?.intentKey || "",
+    confidence,
+    shouldAskDisambiguation,
+    prompt: shouldAskDisambiguation ? buildIntentDisambiguationPrompt({ schema, primaryIntentKey: primary.intentKey, runnerUpIntentKey: runnerUp?.intentKey || "" }) : "",
+    scores,
+  };
+}
+
+function getIntentPromptFieldLabels({ schemaKey, intentKey, fieldsToAsk }) {
+  const intent = String(intentKey || "").trim().toUpperCase();
+  const key = String(schemaKey || "").trim().toUpperCase();
+
+  if (key === "PROPERTY" && [AD_INTENTS.INSTITUTIONAL, AD_INTENTS.CATALOG].includes(intent)) {
+    return [
+      "Região / bairros / cidades atendidas",
+      "Tipo de imóvel / perfil que você trabalha",
+      "Faixa de valor ou padrão dos imóveis",
+      "Seu principal diferencial",
+      "Forma de contato / visita",
+    ];
+  }
+
+  if ([AD_INTENTS.CATALOG].includes(intent) && ["VEHICLE","ELECTRONICS","FOOD","FASHION","HOME","BABY","TOOLS","COSMETICS","GENERIC","PETS","TOURISM"].includes(key)) {
+    return [
+      "Produtos / opções principais",
+      "Faixa de preço / condição / promoção",
+      "Cidade / entrega / retirada",
+      "Destaque principal da sua linha",
+    ];
+  }
+
+  if (intent === AD_INTENTS.PROMOTION) {
+    return [
+      "Oferta / desconto / condição",
+      "Produtos ou serviços em destaque",
+      "Validade / período da promoção",
+      "Cidade / loja / entrega",
+    ];
+  }
+
+  if (intent === AD_INTENTS.INSTITUTIONAL && ["SERVICE","BEAUTY","HEALTH","EDUCATION","PROFESSIONAL","EVENTS"].includes(key)) {
+    return [
+      "Serviço / especialidade",
+      "Região / formato de atendimento",
+      "Seu principal diferencial",
+      "Forma de contato / agenda",
+    ];
+  }
+
+  return ensureArray(fieldsToAsk).map((field) => field.label);
+}
+
+function buildIntentContext({ schema, intentKey }) {
+  const schemaLabel = schema?.label || "anúncio";
+  const intent = String(intentKey || "").trim().toUpperCase();
+  const lines = [
+    "INTENCAO_DO_ANUNCIO:",
+    `- Categoria detectada: ${schemaLabel}.`,
+    `- Tipo de anúncio: ${getIntentInstructionLabel(intent)}.`,
+  ];
+
+  if (intent === AD_INTENTS.SPECIFIC_ITEM) lines.push("- Trate como item específico. Não invente catálogo, lista numerada, múltiplas opções ou dados que o usuário não informou.");
+  if (intent === AD_INTENTS.SERVICE_OFFER) lines.push("- Trate como oferta de serviço. Destaque o que a pessoa faz, região, benefícios e chamada para contato, sem inventar itens ou produtos.");
+  if (intent === AD_INTENTS.INSTITUTIONAL) lines.push("- Trate como anúncio institucional. Não invente unidades, modelos, imóveis, itens numerados, preços fictícios ou exemplos falsos.");
+  if (intent === AD_INTENTS.CATALOG) lines.push("- Trate como anúncio de variedade/opções. Não crie lista numerada falsa nem exemplos inventados; fale de variedade real de forma genérica e vendedora.");
+  if (intent === AD_INTENTS.PROMOTION) lines.push("- Trate como promoção/oferta. Destaque vantagem, condição e urgência com base no que foi informado, sem inventar percentuais, itens ou datas.");
+  if (intent === AD_INTENTS.OPPORTUNITY) lines.push("- Trate como vaga/oportunidade. Foque em cargo, requisitos, local e forma de candidatura.");
+
+  return lines.join("\n");
+}
+
+function buildCategoryDisambiguationPrompt(decision) {
+  const config = getAmbiguityPairConfig(decision?.schema?.key, decision?.runnerUp?.schema?.key);
+  const optionA = config?.options?.[0] || { key: decision?.schema?.key, label: decision?.schema?.label || "categoria 1" };
+  const optionB = config?.options?.[1] || { key: decision?.runnerUp?.schema?.key, label: decision?.runnerUp?.schema?.label || "categoria 2" };
+  const question = config?.question || "Quero entender melhor seu anúncio antes de continuar. Ele está mais para:";
+
+  return [
+    question,
+    "",
+    `1️⃣ ${optionA.label}`,
+    `2️⃣ ${optionB.label}`,
+    "3️⃣ seguir com uma versão mais genérica",
+    "",
+    "Responda só com *1*, *2* ou *3*. ✅",
+  ].join("\n");
+}
+
+function detectCategoryDecision(text) {
+  const candidates = getCategoryCandidates(text);
+  const primary = candidates[0] || null;
+  const runnerUp = candidates[1] || null;
+
+  if (!primary || primary.score < 40) {
+    return {
+      schema: CATEGORY_SCHEMAS.GENERIC,
+      runnerUp: null,
+      confidence: "low",
+      shouldAskDisambiguation: false,
+      prompt: "",
+      candidates,
+    };
+  }
+
+  const gap = primary.score - Number(runnerUp?.score || 0);
+  const sameMacroGroup = !!runnerUp && primary.macroGroup === runnerUp.macroGroup;
+  const pairConfig = getAmbiguityPairConfig(primary.key, runnerUp?.key);
+
+  const shouldAskDisambiguation = !!runnerUp && (
+    (pairConfig && runnerUp.score >= 34 && gap <= 20) ||
+    (sameMacroGroup && primary.score < 64 && runnerUp.score >= 32 && gap <= 10) ||
+    (!primary.strong && !!runnerUp.strong && gap <= 14)
+  );
+
+  const confidence = shouldAskDisambiguation
+    ? "medium"
+    : primary.score >= 72 && gap >= 18
+      ? "high"
+      : gap >= 10
+        ? "medium"
+        : "low";
+
+  return {
+    schema: primary.schema,
+    runnerUp: runnerUp ? { schema: runnerUp.schema, score: runnerUp.score, strong: runnerUp.strong, macroGroup: runnerUp.macroGroup } : null,
+    confidence,
+    shouldAskDisambiguation,
+    prompt: shouldAskDisambiguation ? buildCategoryDisambiguationPrompt({ schema: primary.schema, runnerUp: runnerUp ? { schema: runnerUp.schema } : null }) : "",
+    candidates,
+  };
+}
+
+function detectCategorySchema(text) {
+  return detectCategoryDecision(text).schema;
+}
 function profileHasUsefulValue(value) {
   if (value === undefined || value === null) return false;
   if (Array.isArray(value)) return value.map((item) => cleanText(item)).filter(Boolean).length > 0;
@@ -1266,7 +2023,7 @@ function shouldAskCategoryQuestions({ schema, text, completeness, attemptCount =
   return words <= 3 && completeness.missingAll.length >= 1;
 }
 
-function buildCategoryQuestionPrompt({ schema, fieldsToAsk, bizProfile }) {
+function buildCategoryQuestionPrompt({ schema, intentKey = AD_INTENTS.SPECIFIC_ITEM, fieldsToAsk, bizProfile }) {
   const hints = [];
 
   if (hasProfileSupportForField("location", bizProfile)) {
@@ -1276,10 +2033,20 @@ function buildCategoryQuestionPrompt({ schema, fieldsToAsk, bizProfile }) {
     hints.push("horário eu já posso aproveitar dos seus dados salvos");
   }
 
+  const promptFields = getIntentPromptFieldLabels({ schemaKey: schema?.key, intentKey, fieldsToAsk });
+  const introByIntent = {
+    [AD_INTENTS.SPECIFIC_ITEM]: `Perfeito! Para o anúncio de ${schema.label} ficar mais forte, me manda em *uma única mensagem* só o que você quiser informar destes pontos:`,
+    [AD_INTENTS.SERVICE_OFFER]: `Perfeito! Para esse anúncio de ${schema.label} ficar mais forte, me manda em *uma única mensagem* só o que você quiser informar destes pontos:`,
+    [AD_INTENTS.INSTITUTIONAL]: `Perfeito! Como esse anúncio está mais para uma versão *institucional*, me manda em *uma única mensagem* só o que você quiser informar destes pontos:`,
+    [AD_INTENTS.CATALOG]: `Perfeito! Como esse anúncio está mais para *várias opções / catálogo*, me manda em *uma única mensagem* só o que você quiser informar destes pontos:`,
+    [AD_INTENTS.PROMOTION]: `Perfeito! Como esse anúncio está mais para uma *promoção / oferta*, me manda em *uma única mensagem* só o que você quiser informar destes pontos:`,
+    [AD_INTENTS.OPPORTUNITY]: `Perfeito! Para essa *vaga / oportunidade* ficar mais forte, me manda em *uma única mensagem* só o que você quiser informar destes pontos:`,
+  };
+
   const lines = [
-    `Perfeito! Para o anúncio de ${schema.label} ficar mais forte, me manda em *uma única mensagem* só o que você quiser informar destes pontos:`,
+    introByIntent[String(intentKey || AD_INTENTS.SPECIFIC_ITEM).trim().toUpperCase()] || `Perfeito! Para o anúncio de ${schema.label} ficar mais forte, me manda em *uma única mensagem* só o que você quiser informar destes pontos:`,
     "",
-    ...fieldsToAsk.map((field) => `* ${field.label}`),
+    ...promptFields.map((label) => `* ${label}`),
     "",
     "Pode mandar apenas o que você tiver.",
   ];
@@ -1293,27 +2060,73 @@ function buildCategoryQuestionPrompt({ schema, fieldsToAsk, bizProfile }) {
   return lines.join("\n");
 }
 
-function buildCategoryIntakePlan({ text, bizProfile, attemptCount = 0 }) {
-  const schema = detectCategorySchema(text);
+function buildCategoryIntakePlan({ text, bizProfile, attemptCount = 0, forcedSchemaKey = "", forcedIntentKey = "", skipDisambiguation = false, skipIntentDisambiguation = false }) {
+  const forcedKey = String(forcedSchemaKey || "").trim().toUpperCase();
+  const detection = forcedKey && CATEGORY_SCHEMAS[forcedKey]
+    ? { schema: CATEGORY_SCHEMAS[forcedKey], runnerUp: null, confidence: "forced", shouldAskDisambiguation: false, prompt: "", candidates: [] }
+    : detectCategoryDecision(text);
+
+  const schema = detection.schema || CATEGORY_SCHEMAS.GENERIC;
   const completeness = computeCategoryCompleteness({ schema, text, bizProfile });
   const fieldsToAsk = pickFieldsToAsk({ completeness });
+
+  if (!skipDisambiguation && detection.shouldAskDisambiguation && attemptCount < 1) {
+    return {
+      shouldAsk: false,
+      shouldAskDisambiguation: true,
+      shouldAskIntentDisambiguation: false,
+      schema,
+      completeness,
+      fieldsToAsk: [],
+      prompt: detection.prompt || "",
+      detection,
+      intentDecision: { intentKey: AD_INTENTS.SPECIFIC_ITEM, runnerUpIntentKey: "", confidence: "medium", shouldAskDisambiguation: false, prompt: "" },
+    };
+  }
+
+  const forcedIntent = String(forcedIntentKey || "").trim().toUpperCase();
+  const intentDecision = forcedIntent && Object.values(AD_INTENTS).includes(forcedIntent)
+    ? { intentKey: forcedIntent, runnerUpIntentKey: "", confidence: "forced", shouldAskDisambiguation: false, prompt: "" }
+    : detectAdIntentDecision({ text, schema });
+
+  if (!skipIntentDisambiguation && intentDecision.shouldAskDisambiguation && attemptCount < 1) {
+    return {
+      shouldAsk: false,
+      shouldAskDisambiguation: false,
+      shouldAskIntentDisambiguation: true,
+      schema,
+      completeness,
+      fieldsToAsk: [],
+      prompt: intentDecision.prompt || "",
+      detection,
+      intentDecision,
+    };
+  }
 
   if (!shouldAskCategoryQuestions({ schema, text, completeness, attemptCount })) {
     return {
       shouldAsk: false,
+      shouldAskDisambiguation: false,
+      shouldAskIntentDisambiguation: false,
       schema,
       completeness,
       fieldsToAsk: [],
       prompt: "",
+      detection,
+      intentDecision,
     };
   }
 
   return {
     shouldAsk: true,
+    shouldAskDisambiguation: false,
+    shouldAskIntentDisambiguation: false,
     schema,
     completeness,
     fieldsToAsk,
-    prompt: buildCategoryQuestionPrompt({ schema, fieldsToAsk, bizProfile }),
+    prompt: buildCategoryQuestionPrompt({ schema, intentKey: intentDecision.intentKey, fieldsToAsk, bizProfile }),
+    detection,
+    intentDecision,
   };
 }
 
@@ -1338,7 +2151,7 @@ function buildLeadIntakeCombinedText(baseText, complementText) {
   ].join("\n");
 }
 
-function buildGenerationPrompt({ userText, lastAd, isRefinement, bizContext }) {
+function buildGenerationPrompt({ userText, lastAd, isRefinement, bizContext, intentContext = "" }) {
   const sections = [];
 
   sections.push([
@@ -1358,6 +2171,7 @@ function buildGenerationPrompt({ userText, lastAd, isRefinement, bizContext }) {
   ].join("\n"));
 
   if (bizContext) sections.push(bizContext);
+  if (intentContext) sections.push(intentContext);
 
   if (isRefinement) {
     sections.push(`ANUNCIO_ATUAL:
@@ -1482,22 +2296,6 @@ async function msgFeedbackAsk(waId) {
   return await getCopyText("FLOW_FEEDBACK_ASK", { waId });
 }
 
-async function msgFeedbackCommentAsk(waId) {
-  return await getCopyText("FLOW_FEEDBACK_COMMENT_ASK", { waId });
-}
-
-async function msgTestimonialAsk(waId) {
-  return await getCopyText("FLOW_TESTIMONIAL_ASK", { waId });
-}
-
-async function msgTestimonialConsentAsk(waId) {
-  return await getCopyText("FLOW_TESTIMONIAL_CONSENT_ASK", { waId });
-}
-
-async function msgTestimonialDisplayAsk(waId) {
-  return await getCopyText("FLOW_TESTIMONIAL_DISPLAY_ASK", { waId });
-}
-
 async function msgReferralInvite(waId) {
   return await getCopyText("FLOW_REFERRAL_INVITE", {
     waId,
@@ -1533,14 +2331,6 @@ async function msgRetentionSignoff(waId) {
   return await getCopyText("FLOW_RETENTION_SIGNOFF", { waId });
 }
 
-async function finishFeedbackFlow(waId, messages = []) {
-  const prev = await getPrevStatus(waId);
-  await clearPrevStatus(waId);
-  await setUserStatus(waId, prev || ST.ACTIVE);
-  const arr = Array.isArray(messages) ? messages : [messages];
-  arr.push(await msgRetentionSignoff(waId));
-  return replyMulti(arr);
-}
 
 function buildRefinementReminder(maxRefinements) {
   const qty = Number.isFinite(Number(maxRefinements)) && Number(maxRefinements) >= 0
@@ -2525,83 +3315,159 @@ async function handleInboundTextCore({ waId, text }) {
   // 0.42) Feedback pós-uso
   if (status === ST.WAIT_FEEDBACK_RESPONSE) {
     const c = normalizeChoice(inbound);
-    if (![["1"], ["2"], ["3"]].flat().includes(c)) {
+    if (!["1", "2", "3"].includes(c)) {
       return reply(await msgFeedbackAsk(id));
     }
 
     await markFeedbackAnswered(id, c);
-    await trackFeedbackMetric("feedback_answered", id);
-    await trackFeedbackMetric(c === "1" ? "feedback_positive" : c === "2" ? "feedback_neutral" : "feedback_negative", id);
+
+    const prev = await getPrevStatus(id);
+    await clearPrevStatus(id);
+    await setUserStatus(id, prev || ST.ACTIVE);
 
     if (c === "1") {
       await markTestimonialAsked(id);
-      await trackFeedbackMetric("testimonial_asked", id);
-      await setUserStatus(id, ST.WAIT_TESTIMONIAL_TEXT);
-      return reply(await msgTestimonialAsk(id));
+      return replyMulti([
+        await getCopyText("FLOW_TESTIMONIAL_ASK", { waId: id }),
+        await getCopyText("FLOW_MENU_URL_FEEDBACK", { waId: id }),
+        await msgRetentionSignoff(id),
+      ]);
     }
 
-    await setUserStatus(id, ST.WAIT_FEEDBACK_COMMENT);
-    return reply(await msgFeedbackCommentAsk(id));
+    return replyMulti([
+      await msgPostAdBenefit(id),
+      await msgRetentionSignoff(id),
+    ]);
   }
 
-  if (status === ST.WAIT_FEEDBACK_COMMENT) {
-    if (wantsSkipCommand(inbound)) {
-      return await finishFeedbackFlow(id, [await msgPostAdBenefit(id)]);
+
+  // 0.44) Desambiguação curta de categoria quando o motor detectar conflito
+  if (status === ST.WAIT_CATEGORY_DISAMBIGUATION) {
+    const intake = await getAdSessionPayload(id);
+
+    if (!intake?.baseText) {
+      await clearAdSessionPayload(id);
+      await setUserStatus(id, ST.WAIT_PRODUCT);
+      return reply(await msgAskProduct(id));
     }
 
-    const comment = cleanText(inbound);
-    if (!comment) {
-      return reply(await msgFeedbackCommentAsk(id));
+    const choice = normalizeChoice(inbound);
+    if (!["1", "2", "3"].includes(choice)) {
+      return reply(String(intake.prompt || "").trim() || "Responda só com 1, 2 ou 3.");
     }
 
-    await saveFeedbackComment(id, comment);
-    await trackFeedbackMetric("feedback_comment_saved", id);
-    return await finishFeedbackFlow(id, [await msgPostAdBenefit(id)]);
+    const baseStatus = intake.prevStatus === ST.ACTIVE ? ST.ACTIVE : ST.TRIAL;
+    const isTrialFlow = baseStatus !== ST.ACTIVE;
+    const bizProfile = await getBizProfile(id);
+
+    const selectedSchemaKey = choice === "1"
+      ? String(intake.primaryCategoryKey || "").trim().toUpperCase()
+      : choice === "2"
+        ? String(intake.runnerUpCategoryKey || "").trim().toUpperCase()
+        : "GENERIC";
+
+    const intakePlan = buildCategoryIntakePlan({
+      text: intake.baseText,
+      bizProfile,
+      attemptCount: 1,
+      forcedSchemaKey: selectedSchemaKey,
+      skipDisambiguation: true,
+    });
+
+    await clearAdSessionPayload(id);
+    await setUserStatus(id, baseStatus);
+
+    if (intakePlan.shouldAsk) {
+      await setAdSessionPayload(id, {
+        kind: "CATEGORY_DETAILS",
+        baseText: intake.baseText,
+        prevStatus: baseStatus,
+        categoryKey: intakePlan.schema.key,
+        categoryLabel: intakePlan.schema.label,
+        intentKey: intakePlan.intentDecision?.intentKey || AD_INTENTS.SPECIFIC_ITEM,
+        intentLabel: getIntentInstructionLabel(intakePlan.intentDecision?.intentKey || AD_INTENTS.SPECIFIC_ITEM),
+        askedFieldKeys: intakePlan.fieldsToAsk.map((field) => field.key),
+        scoreBeforeAsk: intakePlan.completeness.score,
+        attemptCount: 1,
+      });
+      await setUserStatus(id, ST.WAIT_CATEGORY_DETAILS);
+      return reply(intakePlan.prompt);
+    }
+
+    return await handleGenerateAdInTrialOrActive({
+      waId: id,
+      inboundText: intake.baseText,
+      isTrial: isTrialFlow,
+      currentStatus: baseStatus,
+      skipCategoryIntake: true,
+    });
   }
 
-  if (status === ST.WAIT_TESTIMONIAL_TEXT) {
-    if (wantsSkipCommand(inbound)) {
-      return await finishFeedbackFlow(id);
+
+  // 0.445) Desambiguação curta da intenção do anúncio
+  if (status === ST.WAIT_INTENT_DISAMBIGUATION) {
+    const intake = await getAdSessionPayload(id);
+
+    if (!intake?.baseText) {
+      await clearAdSessionPayload(id);
+      await setUserStatus(id, ST.WAIT_PRODUCT);
+      return reply(await msgAskProduct(id));
     }
 
-    const testimonialText = cleanText(inbound);
-    if (!testimonialText) {
-      return reply(await msgTestimonialAsk(id));
+    const choice = normalizeChoice(inbound);
+    if (!["1", "2", "3"].includes(choice)) {
+      return reply(String(intake.prompt || "").trim() || "Responda só com 1, 2 ou 3.");
     }
 
-    await saveTestimonialText(id, testimonialText);
-    await trackFeedbackMetric("testimonial_created", id);
-    await setUserStatus(id, ST.WAIT_TESTIMONIAL_CONSENT);
-    return reply(await msgTestimonialConsentAsk(id));
-  }
+    const baseStatus = intake.prevStatus === ST.ACTIVE ? ST.ACTIVE : ST.TRIAL;
+    const isTrialFlow = baseStatus !== ST.ACTIVE;
+    const bizProfile = await getBizProfile(id);
 
-  if (status === ST.WAIT_TESTIMONIAL_CONSENT) {
-    const c = normalizeChoice(inbound);
-    if (!["1", "2"].includes(c)) {
-      return reply(await msgTestimonialConsentAsk(id));
+    const selectedIntentKey = choice === "1"
+      ? String(intake.primaryIntentKey || "").trim().toUpperCase()
+      : choice === "2"
+        ? String(intake.runnerUpIntentKey || "").trim().toUpperCase()
+        : AD_INTENTS.SPECIFIC_ITEM;
+
+    const intakePlan = buildCategoryIntakePlan({
+      text: intake.baseText,
+      bizProfile,
+      attemptCount: 1,
+      forcedSchemaKey: intake.categoryKey || "",
+      forcedIntentKey: selectedIntentKey,
+      skipDisambiguation: true,
+      skipIntentDisambiguation: true,
+    });
+
+    await clearAdSessionPayload(id);
+    await setUserStatus(id, baseStatus);
+
+    if (intakePlan.shouldAsk) {
+      await setAdSessionPayload(id, {
+        kind: "CATEGORY_DETAILS",
+        baseText: intake.baseText,
+        prevStatus: baseStatus,
+        categoryKey: intakePlan.schema.key,
+        categoryLabel: intakePlan.schema.label,
+        intentKey: intakePlan.intentDecision?.intentKey || selectedIntentKey,
+        intentLabel: getIntentInstructionLabel(intakePlan.intentDecision?.intentKey || selectedIntentKey),
+        askedFieldKeys: intakePlan.fieldsToAsk.map((field) => field.key),
+        scoreBeforeAsk: intakePlan.completeness.score,
+        attemptCount: 1,
+      });
+      await setUserStatus(id, ST.WAIT_CATEGORY_DETAILS);
+      return reply(intakePlan.prompt);
     }
 
-    await setTestimonialConsent(id, c === "1" ? "YES" : "NO");
-    await trackFeedbackMetric(c === "1" ? "testimonial_consent_yes" : "testimonial_consent_no", id);
-
-    if (c === "1") {
-      await setUserStatus(id, ST.WAIT_TESTIMONIAL_DISPLAY);
-      return reply(await msgTestimonialDisplayAsk(id));
-    }
-
-    return await finishFeedbackFlow(id, [await getCopyText("FLOW_TESTIMONIAL_INTERNAL_ONLY_THANKS", { waId: id })]);
-  }
-
-  if (status === ST.WAIT_TESTIMONIAL_DISPLAY) {
-    const c = normalizeChoice(inbound);
-    const displayMode = c === "1" ? "FIRST_NAME" : c === "2" ? "COMPANY" : c === "3" ? "ANONYMOUS" : "";
-    if (!displayMode) {
-      return reply(await msgTestimonialDisplayAsk(id));
-    }
-
-    await setTestimonialDisplayPreference(id, displayMode);
-    await trackFeedbackMetric(displayMode === "FIRST_NAME" ? "testimonial_display_first_name" : displayMode === "COMPANY" ? "testimonial_display_company" : "testimonial_display_anonymous", id);
-    return await finishFeedbackFlow(id, [await getCopyText("FLOW_TESTIMONIAL_THANKS", { waId: id })]);
+    return await handleGenerateAdInTrialOrActive({
+      waId: id,
+      inboundText: intake.baseText,
+      isTrial: isTrialFlow,
+      currentStatus: baseStatus,
+      skipCategoryIntake: true,
+      forcedSchemaKey: intake.categoryKey || "",
+      forcedIntentKey: intakePlan.intentDecision?.intentKey || selectedIntentKey,
+    });
   }
 
 
@@ -2628,6 +3494,8 @@ async function handleInboundTextCore({ waId, text }) {
         isTrial: isTrialFlow,
         currentStatus: baseStatus,
         skipCategoryIntake: true,
+        forcedSchemaKey: intake.categoryKey || "",
+        forcedIntentKey: intake.intentKey || "",
       });
     }
 
@@ -2638,6 +3506,8 @@ async function handleInboundTextCore({ waId, text }) {
       isTrial: isTrialFlow,
       currentStatus: baseStatus,
       skipCategoryIntake: true,
+      forcedSchemaKey: intake.categoryKey || "",
+      forcedIntentKey: intake.intentKey || "",
     });
   }
 
@@ -3042,7 +3912,7 @@ async function handlePostAdDecisionCommand({ waId, inboundText }) {
 }
 
 // -------------------- Generate Ad --------------------
-async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, currentStatus, skipCategoryIntake = false }) {
+async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, currentStatus, skipCategoryIntake = false, forcedSchemaKey = "", forcedIntentKey = "" }) {
   const id = waId;
   const userText = inboundText;
 
@@ -3054,7 +3924,38 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   const bizProfile = await getBizProfile(id);
 
   if (!isRefinement && !skipCategoryIntake) {
-    const intakePlan = buildCategoryIntakePlan({ text: userText, bizProfile, attemptCount: 0 });
+    const intakePlan = buildCategoryIntakePlan({ text: userText, bizProfile, attemptCount: 0, forcedSchemaKey, forcedIntentKey });
+
+    if (intakePlan.shouldAskDisambiguation) {
+      await setAdSessionPayload(id, {
+        kind: "CATEGORY_DISAMBIGUATION",
+        baseText: userText,
+        prevStatus: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+        primaryCategoryKey: intakePlan.schema.key,
+        runnerUpCategoryKey: intakePlan.detection?.runnerUp?.schema?.key || "",
+        prompt: intakePlan.prompt || "",
+        confidence: intakePlan.detection?.confidence || "medium",
+      });
+      await setUserStatus(id, ST.WAIT_CATEGORY_DISAMBIGUATION);
+      return reply(intakePlan.prompt);
+    }
+
+    if (intakePlan.shouldAskIntentDisambiguation) {
+      await setAdSessionPayload(id, {
+        kind: "INTENT_DISAMBIGUATION",
+        baseText: userText,
+        prevStatus: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+        categoryKey: intakePlan.schema.key,
+        categoryLabel: intakePlan.schema.label,
+        primaryIntentKey: intakePlan.intentDecision?.intentKey || AD_INTENTS.SPECIFIC_ITEM,
+        runnerUpIntentKey: intakePlan.intentDecision?.runnerUpIntentKey || "",
+        prompt: intakePlan.prompt || "",
+        confidence: intakePlan.intentDecision?.confidence || "medium",
+      });
+      await setUserStatus(id, ST.WAIT_INTENT_DISAMBIGUATION);
+      return reply(intakePlan.prompt);
+    }
+
     if (intakePlan.shouldAsk) {
       await setAdSessionPayload(id, {
         kind: "CATEGORY_DETAILS",
@@ -3062,6 +3963,8 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
         prevStatus: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
         categoryKey: intakePlan.schema.key,
         categoryLabel: intakePlan.schema.label,
+        intentKey: intakePlan.intentDecision?.intentKey || AD_INTENTS.SPECIFIC_ITEM,
+        intentLabel: getIntentInstructionLabel(intakePlan.intentDecision?.intentKey || AD_INTENTS.SPECIFIC_ITEM),
         askedFieldKeys: intakePlan.fieldsToAsk.map((field) => field.key),
         scoreBeforeAsk: intakePlan.completeness.score,
         attemptCount: 1,
@@ -3140,15 +4043,24 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   const mode = await getTemplateMode(id);
 
+  const resolvedSchema = forcedSchemaKey && CATEGORY_SCHEMAS[String(forcedSchemaKey || "").trim().toUpperCase()]
+    ? CATEGORY_SCHEMAS[String(forcedSchemaKey || "").trim().toUpperCase()]
+    : detectCategoryDecision(userText).schema || CATEGORY_SCHEMAS.GENERIC;
+  const resolvedIntentKey = forcedIntentKey && Object.values(AD_INTENTS).includes(String(forcedIntentKey || "").trim().toUpperCase())
+    ? String(forcedIntentKey || "").trim().toUpperCase()
+    : detectAdIntentDecision({ text: userText, schema: resolvedSchema }).intentKey;
+
   // OpenAI
   let ad = "";
   try {
     const bizContext = buildBizProfileContext(bizProfile);
+    const intentContext = buildIntentContext({ schema: resolvedSchema, intentKey: resolvedIntentKey });
     const promptToSend = buildGenerationPrompt({
       userText,
       lastAd,
       isRefinement,
       bizContext,
+      intentContext,
     });
 
     const r = await generateAdText({ userText: promptToSend, mode });
@@ -3220,7 +4132,6 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   const shouldAskFeedback = adsCreatedTotal >= 8 && !currentGrowthMeta?.feedbackAskedAt && !currentGrowthMeta?.feedbackAnsweredAt;
   if (shouldAskFeedback) {
     await markFeedbackAsked(id);
-    await trackFeedbackMetric("feedback_asked", id);
     await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
     await setUserStatus(id, ST.WAIT_FEEDBACK_RESPONSE);
     growthMessages.push(await msgFeedbackAsk(id));
