@@ -298,7 +298,32 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
     "🎁 Bônus liberado!\n\nSeu amigo começou a usar o Amigo das Vendas.\n\nVocê ganhou *{{bonusAmount}}* descriç{{bonusPlural}} neste mês.",
 
   FLOW_FIRST_RESULT_PROMPT:
-    "Quer que eu crie mais anúncios para você?\n\n1) *Sim*\n2) *Quero testar outro*\n3) *Como funciona*",
+    "Sabia que o Amigo pode criar seus anúncios em dois estilos? 🙂
+
+Esse que acabamos de gerar está no modelo *FIXO*.
+
+Quer ver como esse mesmo anúncio ficaria no modelo *LIVRE* também?
+
+1️⃣ *Sim, quero ver*
+2️⃣ *Não, seguir assim*
+3️⃣ *Explica melhor*",
+
+  FLOW_FIRST_RESULT_EXPLAIN:
+    "O modelo *FIXO* usa um formato organizado e padronizado.
+
+Ele é constantemente atualizado com os formatos mais estudados para gerar melhor conversão nos grupos do WhatsApp.
+
+Já o modelo *LIVRE* dá mais liberdade para o Amigo montar o anúncio de forma mais criativa, adaptando o texto para cada situação.
+
+Quer ver como esse mesmo anúncio ficaria no modelo *LIVRE*?
+
+1️⃣ *Sim, quero ver*
+2️⃣ *Não, seguir com o FIXO*",
+
+  FLOW_FIRST_RESULT_SHOW_FREE:
+    "Perfeito! ✅
+
+Agora vou te mostrar como essa mesma descrição fica no modelo *LIVRE*.",
 
   FLOW_HABIT_NUDGE:
     "Você já criou *{{count}} anúncios* comigo 🙂\n\nMuita gente usa o Amigo para postar todos os dias nos grupos.\n\nAssim vende muito mais.\n\nQuer continuar criando anúncios?",
@@ -564,7 +589,9 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_TESTIMONIAL_INTERNAL_ONLY_THANKS", label: "Feedback: depoimento apenas interno" },
   { category: "Flow", key: "FLOW_REFERRAL_INVITE", label: "Crescimento: pedir indicação" },
   { category: "Flow", key: "FLOW_REFERRAL_BONUS_UNLOCKED", label: "Crescimento: bônus por indicação" },
-  { category: "Flow", key: "FLOW_FIRST_RESULT_PROMPT", label: "Pós-primeiro anúncio: próximo passo" },
+  { category: "Flow", key: "FLOW_FIRST_RESULT_PROMPT", label: "Pós-primeiro anúncio: convite para comparar modelos" },
+  { category: "Flow", key: "FLOW_FIRST_RESULT_EXPLAIN", label: "Pós-primeiro anúncio: explicar FIXO x LIVRE" },
+  { category: "Flow", key: "FLOW_FIRST_RESULT_SHOW_FREE", label: "Pós-primeiro anúncio: introdução ao modelo LIVRE" },
   { category: "Flow", key: "FLOW_HABIT_NUDGE", label: "Hábito: incentivo após alguns anúncios" },
   { category: "Flow", key: "FLOW_PLAN_VALUE_REINFORCEMENT", label: "Planos: reforço de valor" },
   { category: "Flow", key: "FLOW_PLAN_ACTIVATED_WELCOME", label: "Plano ativo: boas-vindas" },
