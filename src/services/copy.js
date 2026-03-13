@@ -213,27 +213,6 @@ FLOW_ACTIVE_NO_PLAN_ERROR: "⚠️ Identificamos uma inconsistência na sua assi
 FLOW_MENU_NAME_UPDATED: "✅ Nome atualizado!",
 FLOW_MENU_DOC_UPDATED: "✅ CPF/CNPJ atualizado!",
 FLOW_OK_NEXT_DESCRIPTION: "Show! ✅\n\nMe manda a próxima descrição (produto/serviço/promoção) que eu monto outro anúncio.",
-FLOW_OK_AFTER_AD: "✨ Anúncio concluído!\n\nQuando você quiser, já posso montar o próximo também 🙂",
-FLOW_POST_AD_IDLE_VARIATION_01: "Boa sorte nas vendas hoje! 🙂\n\nSe quiser criar outro anúncio mais tarde, é só me chamar.",
-FLOW_POST_AD_IDLE_VARIATION_02: "Tomara que esse anúncio traga muitos clientes! 🚀\n\nQuando quiser criar outro, é só me chamar.",
-FLOW_POST_AD_IDLE_VARIATION_03: "Agora é só postar nos grupos e aguardar os clientes 😉\n\nSe precisar de outro anúncio, estou por aqui.",
-FLOW_POST_AD_IDLE_VARIATION_04: "Boa sorte nas vendas! 💚\n\nSe quiser testar outro anúncio depois, é só me mandar a descrição.",
-FLOW_POST_AD_IDLE_VARIATION_05: "Esse anúncio tem tudo pra dar resultado! 🙌\n\nQuando quiser criar outro, me chama aqui.",
-FLOW_POST_AD_IDLE_VARIATION_06: "Agora é só espalhar nos grupos da cidade 😄\n\nDepois me conta como foram as vendas!",
-FLOW_POST_AD_IDLE_VARIATION_07: "Torcendo para aparecerem vários clientes! 🚀\n\nSe precisar de outro anúncio, é só falar comigo.",
-FLOW_POST_AD_IDLE_VARIATION_08: "Posta nos grupos e deixa o anúncio trabalhar por você 😉\n\nQuando quiser fazer outro, me chama.",
-FLOW_POST_AD_IDLE_VARIATION_09: "Boa sorte com as vendas hoje! 💰\n\nSe quiser criar outro anúncio, estou por aqui.",
-FLOW_POST_AD_IDLE_VARIATION_10: "Agora é hora de deixar o anúncio rodar nos grupos 🙂\n\nSe precisar de outro, é só me chamar.",
-FLOW_POST_AD_IDLE_VARIATION_11: "Tomara que apareçam muitos interessados! 🙌\n\nSe quiser criar outro anúncio depois, estou aqui.",
-FLOW_POST_AD_IDLE_VARIATION_12: "Anúncio pronto, agora é só divulgar! 🚀\n\nQuando quiser fazer outro, me chama.",
-FLOW_POST_AD_IDLE_VARIATION_13: "Boa sorte nas vendas! 💚\n\nSe precisar de outro anúncio mais tarde, é só falar comigo.",
-FLOW_POST_AD_IDLE_VARIATION_14: "Esse anúncio já pode começar a trazer clientes 😉\n\nSe quiser criar outro, me chama.",
-FLOW_POST_AD_IDLE_VARIATION_15: "Agora é só postar e esperar os contatos chegarem! 😄\n\nSe precisar de outro anúncio, estou por aqui.",
-FLOW_POST_AD_IDLE_VARIATION_16: "Tomara que esse anúncio traga ótimas vendas! 💰\n\nQuando quiser criar outro, me chama.",
-FLOW_POST_AD_IDLE_VARIATION_17: "Poste nos grupos da sua cidade e veja o resultado 😉\n\nSe quiser fazer outro anúncio depois, estou aqui.",
-FLOW_POST_AD_IDLE_VARIATION_18: "Boa sorte com esse anúncio! 🚀\n\nSe precisar de outro mais tarde, me chama.",
-FLOW_POST_AD_IDLE_VARIATION_19: "Agora é só divulgar e esperar os clientes aparecerem 🙂\n\nQuando quiser criar outro anúncio, estou aqui.",
-FLOW_POST_AD_IDLE_VARIATION_20: "Torcendo para que esse anúncio gere muitos contatos! 💚\n\nSe precisar de outro depois, é só me chamar.",
 // FLOW — Salvar dados da empresa (auto preenchimento)
 FLOW_SAVE_PROFILE_INTRO: "Notei que você incluiu alguns dados da sua empresa no anúncio.",
 FLOW_SAVE_PROFILE_ASK: "Quer que eu *salve isso* para usar automaticamente nos próximos anúncios? 🙂",
@@ -279,6 +258,8 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
 
 
   // FLOW — Reengajamento / Crescimento / Retenção (preparação para próximas fases)
+  FLOW_IDLE_NUDGE:
+    "Oi 🙂 ainda quer criar seu anúncio?\n\nMe diga o que você vende ou digite *MENU*.",
 
   FLOW_UPGRADE_OFFER:
     "Você atingiu o limite do seu plano.\n\nPlano atual:\n*{{currentPlanName}}*{{currentPlanQuotaLine}}\n\nQuer subir para um plano maior?\n\n1) *Sim*{{upgradePlanLine}}\n2) *Ver outros planos*",
@@ -316,8 +297,31 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
   FLOW_REFERRAL_BONUS_UNLOCKED:
     "🎁 Bônus liberado!\n\nSeu amigo começou a usar o Amigo das Vendas.\n\nVocê ganhou *{{bonusAmount}}* descriç{{bonusPlural}} neste mês.",
 
-  FLOW_FIRST_RESULT_PROMPT:
-    "Quer que eu crie mais anúncios para você?\n\n1) *Sim*\n2) *Quero testar outro*\n3) *Como funciona*",
+  FLOW_FIRST_RESULT_PROMPT: `Sabia que o Amigo pode criar seus anúncios em dois estilos? 🙂
+
+Esse que acabamos de gerar está no modelo *FIXO*.
+
+Quer ver como esse mesmo anúncio ficaria no modelo *LIVRE* também?
+
+1️⃣ *Sim, quero ver*
+2️⃣ *Não, seguir assim*
+3️⃣ *Explica melhor*`,
+
+  FLOW_FIRST_RESULT_EXPLAIN: `O modelo *FIXO* usa um formato organizado e padronizado.
+
+Ele é constantemente atualizado com os formatos mais estudados para gerar melhor conversão nos grupos do WhatsApp.
+
+Já o modelo *LIVRE* dá mais liberdade para o Amigo montar o anúncio de forma mais criativa, adaptando o texto para cada situação.
+
+Quer ver como esse mesmo anúncio ficaria no modelo *LIVRE*?
+
+1️⃣ *Sim, quero ver*
+2️⃣ *Não, seguir com o FIXO*`,
+
+  FLOW_FIRST_RESULT_SHOW_FREE: `Perfeito! ✅
+
+Agora vou te mostrar como essa mesma descrição fica no modelo *LIVRE*.
+`,
 
   FLOW_HABIT_NUDGE:
     "Você já criou *{{count}} anúncios* comigo 🙂\n\nMuita gente usa o Amigo para postar todos os dias nos grupos.\n\nAssim vende muito mais.\n\nQuer continuar criando anúncios?",
@@ -328,11 +332,23 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
   FLOW_PLAN_ACTIVATED_WELCOME:
     "🎉 Seu plano está ativo!\n\nAgora você pode criar anúncios sempre que quiser.\n\nDica: poste em vários grupos diferentes.\n\nQuer criar um agora?",
 
+  FLOW_POST_AD_BENEFIT:
+    "Isso ajuda você a vender mais.\n\nSe quiser, você pode copiar e enviar direto nos grupos 🙂\n\nOu posso gerar outra versão do anúncio.",
+
+  FLOW_POST_AD_GROUPS_TIP:
+    "💡 Dica:\n\nPoste em vários grupos da sua cidade.\nAssim mais pessoas veem seu anúncio.",
+
   FLOW_PROGRESS_MILESTONE:
     "Você já criou *{{count}} anúncios* com o Amigo 🙂\n\nMuitos usuários conseguem clientes apenas com posts em grupos.",
 
   FLOW_DAILY_POSTING_HABIT:
     "💡 Dica do Amigo\n\nQuem posta anúncios todos os dias costuma vender mais.\n\nQuer criar um anúncio rápido para hoje?",
+
+  FLOW_REWARD_AFTER_AD:
+    "✨ Anúncio pronto!\n\nAgora é só postar nos grupos da sua cidade.\n\nMuitos usuários conseguem clientes assim 🙂",
+
+  FLOW_RETENTION_SIGNOFF:
+    "Boa sorte nas vendas hoje! 🙂\n\nSe quiser criar outro anúncio mais tarde, é só me chamar.",
 
   FLOW_DAILY_AD_NUDGE:
     "Bom dia! ☀️\n\nQuer criar um anúncio para postar hoje nos grupos?\n\nLeva menos de 10 segundos 🙂",
@@ -383,6 +399,7 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
     "- Nunca invente preços, prazos, descontos, contatos, localização ou condições.",
     "- Nunca invente nomes de produtos, imóveis, modelos, versões, listas de opções, quantidades, numerações, metragem, quartos, vagas, marcas, estoque ou qualquer detalhe específico que o usuário não informou.",
     "- Nunca use placeholders, campos genéricos ou textos de preenchimento como [Nome da Empresa], [Seu Nome], [Contato], [Seu WhatsApp], [Seu Site], [Instagram], R$00,00, Produto 1, Item 1, Imóvel 1 ou equivalentes.",
+    "- Nunca escreva links em formato Markdown como [texto](url). Quando houver site ou link, mostre apenas a URL simples, limpa e direta.",
     "- Nunca omita um preço ou condição relevante que tenha sido informada.",
     "- Preserve exatamente os preços informados pelo usuário.",
     "- Se um dado não foi informado, não invente. Só use 'Sob consulta' se isso realmente ajudar e for estritamente necessário.",
@@ -427,6 +444,48 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
     "CTA FINAL:",
     "- Sempre finalize com uma chamada clara para ação.",
     "- Exemplos: '📩 Faça seu pedido agora', '📩 Peça seu orçamento', '📩 Agende seu horário', '📩 Fale comigo para mais informações'.",
+    "",
+    "SAÍDA:",
+    "- Retorne apenas o anúncio final pronto para enviar no WhatsApp.",
+    "- Não explique nada.",
+    "- Não escreva comentários fora do anúncio.",
+  ].join("\n"),
+
+  OPENAI_SYSTEM_FIXED_NO_PROFILE: [
+    "Você é o *Amigo das Vendas*, especialista em copywriting para vendas diretas no WhatsApp (Brasil).",
+    "Sua função é transformar descrições simples em anúncios visualmente bonitos, humanos, claros e altamente focados em conversão.",
+    "Objetivo: fazer a pessoa que está lendo querer comprar, pedir orçamento ou iniciar uma conversa no WhatsApp.",
+    "",
+    "Este prompt deve ser usado quando ainda não existe perfil salvo suficiente da empresa.",
+    "Nesse cenário, a mensagem atual do usuário é soberana.",
+    "Use integralmente tudo o que o usuário realmente informou na descrição atual, mesmo no primeiro anúncio.",
+    "",
+    "REGRAS CRÍTICAS:",
+    "- Se o usuário informou nome da empresa, use.",
+    "- Se o usuário informou site, use.",
+    "- Se o usuário informou rede social, use.",
+    "- Se o usuário informou telefone, WhatsApp, endereço, cidade, horário ou qualquer dado comercial, use.",
+    "- Nunca invente nome da empresa, site, rede social, WhatsApp, telefone, catálogo, endereço, bairro, cidade, preço, condição, desconto, estoque ou qualquer outro dado que o usuário não informou.",
+    "- Nunca use placeholders, campos genéricos ou textos de preenchimento como [Nome da Empresa], [Seu Nome], [Contato], [Seu WhatsApp], [Seu Site], [Instagram], R$00,00, Produto 1, Item 1, Imóvel 1 ou equivalentes.",
+    "- Nunca escreva links em formato Markdown como [texto](url). Quando houver site ou link, mostre apenas a URL simples, limpa e direta.",
+    "- Nunca gere blocos vazios ou restos de estrutura, como linhas soltas de site, redes sociais, catálogo ou contato sem conteúdo real.",
+    "- Se um dado não existe, simplesmente omita esse bloco.",
+    "- Não crie listas fictícias de produtos, imóveis, características, modelos, versões, metragens, quartos, vagas, marcas ou benefícios específicos não informados.",
+    "- Quando a descrição for ampla ou institucional, transforme em anúncio de apresentação do negócio, sem fingir que existem itens específicos cadastrados.",
+    "",
+    "ESTILO E ESTRUTURA:",
+    "- Sempre comece com um título chamativo e específico.",
+    "- Após o título, inclua uma frase emocional curta, humana e natural, com no máximo duas linhas.",
+    "- Use linguagem simples, próxima, natural e vendedora.",
+    "- Use espaçamento entre blocos para o anúncio ficar bonito no celular.",
+    "- Use emojis como marcadores no início da linha, nunca no final.",
+    "- Mantenha o anúncio entre 8 e 14 linhas, salvo se a própria descrição exigir um pouco mais.",
+    "- Preserve exatamente os preços e condições informados pelo usuário.",
+    "- Se faltarem dados específicos, faça um anúncio institucional bonito, confiável e vendedor, sem inventar complemento.",
+    "",
+    "CTA FINAL:",
+    "- Finalize com uma chamada clara, natural e coerente com os dados realmente informados.",
+    "- Se não houver contato explícito, use CTA genérico natural, como: '📩 Entre em contato para mais informações' ou '📩 Me chame para saber mais'.",
     "",
     "SAÍDA:",
     "- Retorne apenas o anúncio final pronto para enviar no WhatsApp.",
@@ -558,6 +617,7 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_ADDED", label: "Wizard perfil: rede social adicionada" },
   { category: "Flow", key: "FLOW_PROFILE_WIZARD_SOCIAL_INVALID", label: "Wizard perfil: rede social inválida" },
 
+  { category: "Flow", key: "FLOW_IDLE_NUDGE", label: "Reengajamento: usuário parado" },
   { category: "Flow", key: "FLOW_UPGRADE_OFFER", label: "Upgrade automático ao atingir limite" },
   { category: "Flow", key: "FLOW_PAYMENT_RECOVERY", label: "Pagamento: recuperação por falha" },
   { category: "Flow", key: "FLOW_FLOOD_NOTICE", label: "Proteção: flood / spam" },
@@ -570,39 +630,25 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_TESTIMONIAL_INTERNAL_ONLY_THANKS", label: "Feedback: depoimento apenas interno" },
   { category: "Flow", key: "FLOW_REFERRAL_INVITE", label: "Crescimento: pedir indicação" },
   { category: "Flow", key: "FLOW_REFERRAL_BONUS_UNLOCKED", label: "Crescimento: bônus por indicação" },
-  { category: "Flow", key: "FLOW_FIRST_RESULT_PROMPT", label: "Pós-primeiro anúncio: próximo passo" },
-  { category: "Flow", key: "FLOW_OK_AFTER_AD", label: "Pós-anúncio: mensagem após OK" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_01", label: "Pós-anúncio inativo: variação 01" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_02", label: "Pós-anúncio inativo: variação 02" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_03", label: "Pós-anúncio inativo: variação 03" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_04", label: "Pós-anúncio inativo: variação 04" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_05", label: "Pós-anúncio inativo: variação 05" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_06", label: "Pós-anúncio inativo: variação 06" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_07", label: "Pós-anúncio inativo: variação 07" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_08", label: "Pós-anúncio inativo: variação 08" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_09", label: "Pós-anúncio inativo: variação 09" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_10", label: "Pós-anúncio inativo: variação 10" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_11", label: "Pós-anúncio inativo: variação 11" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_12", label: "Pós-anúncio inativo: variação 12" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_13", label: "Pós-anúncio inativo: variação 13" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_14", label: "Pós-anúncio inativo: variação 14" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_15", label: "Pós-anúncio inativo: variação 15" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_16", label: "Pós-anúncio inativo: variação 16" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_17", label: "Pós-anúncio inativo: variação 17" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_18", label: "Pós-anúncio inativo: variação 18" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_19", label: "Pós-anúncio inativo: variação 19" },
-  { category: "Flow", key: "FLOW_POST_AD_IDLE_VARIATION_20", label: "Pós-anúncio inativo: variação 20" },
+  { category: "Flow", key: "FLOW_FIRST_RESULT_PROMPT", label: "Pós-primeiro anúncio: convite para comparar modelos" },
+  { category: "Flow", key: "FLOW_FIRST_RESULT_EXPLAIN", label: "Pós-primeiro anúncio: explicar FIXO x LIVRE" },
+  { category: "Flow", key: "FLOW_FIRST_RESULT_SHOW_FREE", label: "Pós-primeiro anúncio: introdução ao modelo LIVRE" },
   { category: "Flow", key: "FLOW_HABIT_NUDGE", label: "Hábito: incentivo após alguns anúncios" },
   { category: "Flow", key: "FLOW_PLAN_VALUE_REINFORCEMENT", label: "Planos: reforço de valor" },
   { category: "Flow", key: "FLOW_PLAN_ACTIVATED_WELCOME", label: "Plano ativo: boas-vindas" },
+  { category: "Flow", key: "FLOW_POST_AD_BENEFIT", label: "Pós-anúncio: reforço de benefício" },
+  { category: "Flow", key: "FLOW_POST_AD_GROUPS_TIP", label: "Pós-anúncio: dica de grupos" },
   { category: "Flow", key: "FLOW_PROGRESS_MILESTONE", label: "Progresso: marco de anúncios" },
   { category: "Flow", key: "FLOW_DAILY_POSTING_HABIT", label: "Hábito: postar todos os dias" },
+  { category: "Flow", key: "FLOW_REWARD_AFTER_AD", label: "Pós-anúncio: recompensa" },
+  { category: "Flow", key: "FLOW_RETENTION_SIGNOFF", label: "Retenção: mensagem final" },
   { category: "Flow", key: "FLOW_DAILY_AD_NUDGE", label: "Anúncio do dia" },
   { category: "Flow", key: "FLOW_DAILY_AD_NUDGE_SHORT", label: "Anúncio do dia: versão curta" },
   { category: "Flow", key: "FLOW_DAILY_AD_ALREADY_CREATED_TODAY", label: "Anúncio do dia: já usou hoje" },
   { category: "Flow", key: "FLOW_PROGRESS_SIGNATURE_SUMMARY", label: "Minha assinatura: progresso resumido" },
 
   { category: "OpenAI", key: "OPENAI_SYSTEM_FIXED", label: "Prompt FIXO (system)" },
+  { category: "OpenAI", key: "OPENAI_SYSTEM_FIXED_NO_PROFILE", label: "Prompt FIXO sem perfil salvo (system)" },
   { category: "OpenAI", key: "OPENAI_SYSTEM_FREE", label: "Prompt LIVRE (system)" },
 ]);
 
