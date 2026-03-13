@@ -297,8 +297,7 @@ FLOW_MENU_ASK_NEW_NAME: "Perfeito! ✅\n\nMe envie seu *nome completo* (como voc
   FLOW_REFERRAL_BONUS_UNLOCKED:
     "🎁 Bônus liberado!\n\nSeu amigo começou a usar o Amigo das Vendas.\n\nVocê ganhou *{{bonusAmount}}* descriç{{bonusPlural}} neste mês.",
 
-  FLOW_FIRST_RESULT_PROMPT:
-    "Sabia que o Amigo pode criar seus anúncios em dois estilos? 🙂
+  FLOW_FIRST_RESULT_PROMPT: `Sabia que o Amigo pode criar seus anúncios em dois estilos? 🙂
 
 Esse que acabamos de gerar está no modelo *FIXO*.
 
@@ -306,10 +305,9 @@ Quer ver como esse mesmo anúncio ficaria no modelo *LIVRE* também?
 
 1️⃣ *Sim, quero ver*
 2️⃣ *Não, seguir assim*
-3️⃣ *Explica melhor*",
+3️⃣ *Explica melhor*`,
 
-  FLOW_FIRST_RESULT_EXPLAIN:
-    "O modelo *FIXO* usa um formato organizado e padronizado.
+  FLOW_FIRST_RESULT_EXPLAIN: `O modelo *FIXO* usa um formato organizado e padronizado.
 
 Ele é constantemente atualizado com os formatos mais estudados para gerar melhor conversão nos grupos do WhatsApp.
 
@@ -318,12 +316,12 @@ Já o modelo *LIVRE* dá mais liberdade para o Amigo montar o anúncio de forma 
 Quer ver como esse mesmo anúncio ficaria no modelo *LIVRE*?
 
 1️⃣ *Sim, quero ver*
-2️⃣ *Não, seguir com o FIXO*",
+2️⃣ *Não, seguir com o FIXO*`,
 
-  FLOW_FIRST_RESULT_SHOW_FREE:
-    "Perfeito! ✅
+  FLOW_FIRST_RESULT_SHOW_FREE: `Perfeito! ✅
 
-Agora vou te mostrar como essa mesma descrição fica no modelo *LIVRE*.",
+Agora vou te mostrar como essa mesma descrição fica no modelo *LIVRE*.
+`,
 
   FLOW_HABIT_NUDGE:
     "Você já criou *{{count}} anúncios* comigo 🙂\n\nMuita gente usa o Amigo para postar todos os dias nos grupos.\n\nAssim vende muito mais.\n\nQuer continuar criando anúncios?",
