@@ -2363,9 +2363,6 @@ async function msgPostAdGroupsTip(waId) {
   return await getCopyText("FLOW_POST_AD_GROUPS_TIP", { waId });
 }
 
-async function msgRewardAfterAd(waId) {
-  return await getCopyText("FLOW_REWARD_AFTER_AD", { waId });
-}
 
 async function msgHabitNudge(waId, count) {
   return await getCopyText("FLOW_HABIT_NUDGE", { waId, vars: { count } });
@@ -4260,7 +4257,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   // Mantém o status atual e apenas orienta refinamentos
   const refineMsg = await msgRefinementPrompt(id, maxRefinements);
-  const followups = [await msgRewardAfterAd(id), await msgPostAdBenefit(id), refineMsg];
+  const followups = [await msgPostAdBenefit(id), refineMsg];
   const growthMessages = await buildPostAdGrowthMessages({ waId: id, adsCreatedTotal });
 
   const currentGrowthMeta = await getGrowthMeta(id);
