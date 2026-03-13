@@ -142,6 +142,7 @@ const ST = Object.freeze({
   WAIT_TEMPLATE_MODE: "WAIT_TEMPLATE_MODE",
   WAIT_SAVE_PROFILE: "WAIT_SAVE_PROFILE",
   WAIT_FIRST_RESULT_PROMPT: "WAIT_FIRST_RESULT_PROMPT",
+  WAIT_FIRST_RESULT_EXPLAIN: "WAIT_FIRST_RESULT_EXPLAIN",
   WAIT_FEEDBACK_RESPONSE: "WAIT_FEEDBACK_RESPONSE",
   WAIT_CATEGORY_DISAMBIGUATION: "WAIT_CATEGORY_DISAMBIGUATION",
   WAIT_INTENT_DISAMBIGUATION: "WAIT_INTENT_DISAMBIGUATION",
@@ -367,6 +368,7 @@ function isTransientFlowStatus(status) {
     ST.WAIT_TEMPLATE_MODE,
     ST.WAIT_SAVE_PROFILE,
     ST.WAIT_FIRST_RESULT_PROMPT,
+    ST.WAIT_FIRST_RESULT_EXPLAIN,
     ST.WAIT_FEEDBACK_RESPONSE,
     ST.WAIT_CATEGORY_DISAMBIGUATION,
     ST.WAIT_INTENT_DISAMBIGUATION,
@@ -2294,6 +2296,14 @@ async function msgFirstResultPrompt(waId) {
   return await getCopyText("FLOW_FIRST_RESULT_PROMPT", { waId });
 }
 
+async function msgFirstResultExplain(waId) {
+  return await getCopyText("FLOW_FIRST_RESULT_EXPLAIN", { waId });
+}
+
+async function msgFirstResultShowFree(waId) {
+  return await getCopyText("FLOW_FIRST_RESULT_SHOW_FREE", { waId });
+}
+
 async function msgFeedbackAsk(waId) {
   return await getCopyText("FLOW_FEEDBACK_ASK", { waId });
 }
@@ -3263,32 +3273,32 @@ async function handleInboundTextCore({ waId, text }) {
     return reply(await msgAskProfileRegistration(id));
   }
 
-  // 0.41) Pós-primeiro resultado — próximo passo
+  // 0.41) Pós-primeiro resultado — descoberta do modelo LIVRE
   if (status === ST.WAIT_FIRST_RESULT_PROMPT) {
     const c = normalizeChoice(inbound);
-    const prev = await getPrevStatus(id);
-    await clearPrevStatus(id);
 
     if (c === "1" || c === "2") {
-      await clearLastAd(id);
-      await clearRefineCount(id);
-      await clearLastPrompt(id);
-      await setUserStatus(id, prev || ST.WAIT_PRODUCT);
-      return reply(await msgAskProduct(id));
+      const result = await handleFirstResultFlowChoice({ waId: id, choice: c });
+      if (result) return result;
     }
 
     if (c === "3") {
-      await clearLastAd(id);
-      await clearRefineCount(id);
-      await clearLastPrompt(id);
-      await setUserStatus(id, prev || ST.WAIT_PRODUCT);
-      return replyMulti([
-        await getCopyText("FLOW_MENU_URL_HELP", { waId: id }),
-        await msgAskProduct(id),
-      ]);
+      await setUserStatus(id, ST.WAIT_FIRST_RESULT_EXPLAIN);
+      return reply(await msgFirstResultExplain(id));
     }
 
     return reply(await msgFirstResultPrompt(id));
+  }
+
+  if (status === ST.WAIT_FIRST_RESULT_EXPLAIN) {
+    const c = normalizeChoice(inbound);
+
+    if (c === "1" || c === "2") {
+      const result = await handleFirstResultFlowChoice({ waId: id, choice: c });
+      if (result) return result;
+    }
+
+    return reply(await msgFirstResultExplain(id));
   }
 
   // 0.42) Feedback pós-uso
@@ -3886,6 +3896,72 @@ async function handlePostAdDecisionCommand({ waId, inboundText }) {
   ]);
 }
 
+async function renderTemplatePreviewForMode({ waId, sourceText, targetMode }) {
+  const baseText = cleanText(sourceText);
+  if (!baseText) return "";
+
+  const bizProfile = await getBizProfile(waId);
+  const resolvedSchema = detectCategoryDecision(baseText).schema || CATEGORY_SCHEMAS.GENERIC;
+  const resolvedIntentKey = detectAdIntentDecision({ text: baseText, schema: resolvedSchema }).intentKey;
+  const bizContext = buildBizProfileContext(bizProfile);
+  const intentContext = buildIntentContext({ schema: resolvedSchema, intentKey: resolvedIntentKey });
+  const promptToSend = buildGenerationPrompt({
+    userText: baseText,
+    lastAd: "",
+    isRefinement: false,
+    bizContext,
+    intentContext,
+  });
+
+  const response = await generateAdText({ userText: promptToSend, mode: targetMode });
+  let formattedAd = enforceAdFormatting(response.text || "");
+  formattedAd = sanitizeGeneratedAd(formattedAd, bizProfile);
+  formattedAd = applyPersistentBusinessInfo(formattedAd, bizProfile, baseText, false);
+  formattedAd = sanitizeGeneratedAd(formattedAd, bizProfile);
+  formattedAd = enforceAdFormatting(formattedAd);
+  return formattedAd;
+}
+
+async function handleFirstResultFlowChoice({ waId, choice }) {
+  const id = waId;
+
+  if (choice === "2") {
+    await setTemplateMode(id, "FIXED");
+    await setTemplatePrompted(id, true);
+
+    const currentBiz = await getBizProfile(id);
+    await setPendingBizProfile(id, (currentBiz && typeof currentBiz === "object") ? currentBiz : {});
+    await setUserStatus(id, ST.WAIT_SAVE_PROFILE);
+    return replyMulti([await msgTemplateSet(id, "FIXED"), await msgAskProfileRegistration(id)]);
+  }
+
+  if (choice !== "1") return null;
+
+  const sourceText = await getLastPrompt(id);
+  if (!sourceText) {
+    await setUserStatus(id, ST.WAIT_FIRST_RESULT_PROMPT);
+    return reply(await msgFirstResultPrompt(id));
+  }
+
+  let freePreview = "";
+  try {
+    freePreview = await renderTemplatePreviewForMode({
+      waId: id,
+      sourceText,
+      targetMode: "FREE",
+    });
+  } catch {
+    return reply(await getCopyText("FLOW_OPENAI_ERROR", { waId: id }));
+  }
+
+  await setUserStatus(id, ST.WAIT_TEMPLATE_MODE);
+  return replyMulti([
+    await msgFirstResultShowFree(id),
+    freePreview,
+    await msgAfterAdAskTemplateChoice(id, "FREE"),
+  ]);
+}
+
 // -------------------- Generate Ad --------------------
 async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, currentStatus, skipCategoryIntake = false, forcedSchemaKey = "", forcedIntentKey = "" }) {
   const id = waId;
@@ -4094,8 +4170,8 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   if (!alreadyPrompted) {
     await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
-    await setUserStatus(id, ST.WAIT_TEMPLATE_MODE);
-    return replyMulti([formattedAd, await msgAfterAdAskTemplateChoice(id, mode)]);
+    await setUserStatus(id, ST.WAIT_FIRST_RESULT_PROMPT);
+    return replyMulti([formattedAd, await msgFirstResultPrompt(id)]);
   }
 
   // Mantém o status atual e apenas orienta refinamentos
