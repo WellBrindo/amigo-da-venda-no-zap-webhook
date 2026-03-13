@@ -19,17 +19,21 @@ export async function generateAdText({
   userText,
   mode = "FIXED",
   maxTokens = 650,
+  systemKey = null,
 }) {
   assertOpenAIEnv();
 
   const clean = String(userText || "").trim();
   if (!clean) throw new Error("Missing userText");
 
+  const resolvedSystemKey = String(systemKey || "").trim().toUpperCase();
+
   const systemFixed = await getCopyText("OPENAI_SYSTEM_FIXED");
 
   const systemFree = await getCopyText("OPENAI_SYSTEM_FREE");
 
-  const system = mode === "FREE" ? systemFree : systemFixed;
+  const explicitSystem = resolvedSystemKey ? await getCopyText(resolvedSystemKey) : "";
+  const system = explicitSystem || (mode === "FREE" ? systemFree : systemFixed);
 
   const modeGuard = mode === "FREE"
     ? "Modo LIVRE: escolha a melhor estrutura para conversão, mantendo clareza, visual bonito e fidelidade às informações do usuário."
