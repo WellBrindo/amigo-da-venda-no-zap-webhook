@@ -1,5 +1,5 @@
 // src/services/metrics.js
-// ✅ V16.4.10 — Métricas de uso (descrições) global e por usuário
+// ✅ V16.4.10 — Métricas de uso (descrições) global e por usuário canônico
 // Objetivo:
 // - Contadores baratos e estáveis (INCRBY) para:
 //   - Global por dia e por mês
@@ -9,8 +9,8 @@
 // Chaves:
 // - metrics:desc:global:day:{YYYY-MM-DD}   => INT
 // - metrics:desc:global:month:{YYYY-MM}    => INT
-// - metrics:desc:user:{waId}:day:{YYYY-MM-DD}   => INT
-// - metrics:desc:user:{waId}:month:{YYYY-MM}    => INT
+// - metrics:desc:user:{userId}:day:{YYYY-MM-DD}   => INT
+// - metrics:desc:user:{userId}:month:{YYYY-MM}    => INT
 //
 // Observação:
 // - Esse contador é "descrições geradas com sucesso" (após resposta da OpenAI).
@@ -44,6 +44,10 @@ function safeStr(v) {
   return String(v ?? "").trim();
 }
 
+function normalizeUserMetricRef(userRef) {
+  return safeStr(userRef);
+}
+
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -65,11 +69,11 @@ function kGlobalDay(day) {
 function kGlobalMonth(month) {
   return `metrics:desc:global:month:${month}`;
 }
-function kUserDay(waId, day) {
-  return `metrics:desc:user:${waId}:day:${day}`;
+function kUserDay(userRef, day) {
+  return `metrics:desc:user:${userRef}:day:${day}`;
 }
-function kUserMonth(waId, month) {
-  return `metrics:desc:user:${waId}:month:${month}`;
+function kUserMonth(userRef, month) {
+  return `metrics:desc:user:${userRef}:month:${month}`;
 }
 
 
@@ -88,14 +92,14 @@ function kEventGlobalDay(eventName, day) {
 function kEventGlobalMonth(eventName, month) {
   return `metrics:event:${eventName}:global:month:${month}`;
 }
-function kEventUserDay(waId, eventName, day) {
-  return `metrics:event:${eventName}:user:${waId}:day:${day}`;
+function kEventUserDay(userRef, eventName, day) {
+  return `metrics:event:${eventName}:user:${userRef}:day:${day}`;
 }
-function kEventUserMonth(waId, eventName, month) {
-  return `metrics:event:${eventName}:user:${waId}:month:${month}`;
+function kEventUserMonth(userRef, eventName, month) {
+  return `metrics:event:${eventName}:user:${userRef}:month:${month}`;
 }
 
-export async function incMetricEvent(eventName, { waId = "", by = 1, date = new Date() } = {}) {
+export async function incMetricEvent(eventName, { userId = "", waId = "", by = 1, date = new Date() } = {}) {
   const normalizedEvent = normalizeMetricEventName(eventName);
   const inc = Number(by) || 1;
   if (!normalizedEvent) return { ok: false, error: "eventName required" };
@@ -111,7 +115,7 @@ export async function incMetricEvent(eventName, { waId = "", by = 1, date = new 
     redisIncrBy(keys.gm, inc),
   ];
 
-  const id = safeStr(waId);
+  const id = normalizeUserMetricRef(userId || waId);
   if (id) {
     keys.ud = kEventUserDay(id, normalizedEvent, day);
     keys.um = kEventUserMonth(id, normalizedEvent, month);
@@ -139,7 +143,7 @@ export async function incMetricEvent(eventName, { waId = "", by = 1, date = new 
   }
   await Promise.allSettled(ttlJobs);
 
-  return { ok: true, eventName: normalizedEvent, waId: id || null, keys, values };
+  return { ok: true, eventName: normalizedEvent, userId: id || null, waId: id || null, keys, values };
 }
 
 export async function getGlobalMetricEvent(eventName, date = new Date()) {
@@ -160,11 +164,11 @@ export async function getGlobalMetricEvent(eventName, date = new Date()) {
   };
 }
 
-export async function getUserMetricEvent(eventName, waId, date = new Date()) {
+export async function getUserMetricEvent(eventName, userRef, date = new Date()) {
   const normalizedEvent = normalizeMetricEventName(eventName);
-  const id = safeStr(waId);
+  const id = normalizeUserMetricRef(userRef);
   if (!normalizedEvent) return { ok: false, error: "eventName required" };
-  if (!id) return { ok: false, error: "waId required" };
+  if (!id) return { ok: false, error: "userId required" };
   const { day, month } = getDayKeyParts(date);
   const [d, m] = await Promise.all([
     redisGet(kEventUserDay(id, normalizedEvent, day)),
@@ -173,6 +177,8 @@ export async function getUserMetricEvent(eventName, waId, date = new Date()) {
   return {
     ok: true,
     eventName: normalizedEvent,
+    userId: id,
+    userId: id,
     waId: id,
     day,
     month,
@@ -228,8 +234,8 @@ export async function getFeedbackMetricsOverview(date = new Date()) {
  * - Global (day/month)
  * - Por usuário (day/month)
  */
-export async function incDescriptionMetrics(waId, by = 1, date = new Date()) {
-  const id = safeStr(waId);
+export async function incDescriptionMetrics(userRef, by = 1, date = new Date()) {
+  const id = normalizeUserMetricRef(userRef);
   const inc = Number(by) || 1;
   if (!id) return { ok: true, skipped: true };
 
@@ -282,10 +288,10 @@ export async function getGlobalDescriptionMetrics(date = new Date()) {
 /**
  * Lê contadores por usuário
  */
-export async function getUserDescriptionMetrics(waId, date = new Date()) {
-  const id = safeStr(waId);
+export async function getUserDescriptionMetrics(userRef, date = new Date()) {
+  const id = normalizeUserMetricRef(userRef);
   const { day, month } = getDayKeyParts(date);
-  if (!id) return { ok: false, error: "waId required" };
+  if (!id) return { ok: false, error: "userId required" };
 
   const [d, m] = await Promise.all([
     redisGet(kUserDay(id, day)),
@@ -441,9 +447,9 @@ export async function getGlobalDaysRange({ start, end } = {}) {
 /**
  * Série diária por usuário (últimos N dias).
  */
-export async function getUserLastNDays(waId, n = 30, endDate = new Date()) {
-  const id = safeStr(waId);
-  if (!id) return { ok: false, error: "waId required" };
+export async function getUserLastNDays(userRef, n = 30, endDate = new Date()) {
+  const id = normalizeUserMetricRef(userRef);
+  if (!id) return { ok: false, error: "userId required" };
 
   const days = clampInt(n, 1, 365, 30);
   const end = new Date(endDate.getTime());
@@ -463,15 +469,15 @@ export async function getUserLastNDays(waId, n = 30, endDate = new Date()) {
     values.push(Number(v || 0));
   }
 
-  return { ok: true, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ day: l, count: values[i] })) };
+  return { ok: true, userId: id, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ day: l, count: values[i] })) };
 }
 
 /**
  * Série mensal por usuário (últimos N meses).
  */
-export async function getUserLastNMonths(waId, n = 12, endDate = new Date()) {
-  const id = safeStr(waId);
-  if (!id) return { ok: false, error: "waId required" };
+export async function getUserLastNMonths(userRef, n = 12, endDate = new Date()) {
+  const id = normalizeUserMetricRef(userRef);
+  if (!id) return { ok: false, error: "userId required" };
 
   const months = clampInt(n, 1, 36, 12);
   const end = new Date(endDate.getTime());
@@ -492,15 +498,15 @@ export async function getUserLastNMonths(waId, n = 12, endDate = new Date()) {
     values.push(Number(v || 0));
   }
 
-  return { ok: true, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ month: l, count: values[i] })) };
+  return { ok: true, userId: id, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ month: l, count: values[i] })) };
 }
 
 /**
  * Série diária por usuário por intervalo personalizado (inclusive).
  */
-export async function getUserDaysRange({ waId, start, end } = {}) {
-  const id = safeStr(waId);
-  if (!id) return { ok: false, error: "waId required" };
+export async function getUserDaysRange({ userId = "", waId = "", start, end } = {}) {
+  const id = normalizeUserMetricRef(userId || waId);
+  if (!id) return { ok: false, error: "userId required" };
 
   const s = safeStr(start);
   const e = safeStr(end);
@@ -527,7 +533,7 @@ export async function getUserDaysRange({ waId, start, end } = {}) {
     values.push(Number(v || 0));
   }
 
-  return { ok: true, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ day: l, count: values[i] })) };
+  return { ok: true, userId: id, waId: id, start: labels[0], end: labels[labels.length - 1], points: labels.map((l, i) => ({ day: l, count: values[i] })) };
 }
 
 // -----------------------------
@@ -536,9 +542,9 @@ export async function getUserDaysRange({ waId, start, end } = {}) {
 // - Útil para “resetar como se nunca tivesse escrito” em número de teste
 // -----------------------------
 
-export async function resetUserDescriptionMetrics(waId, { days = 120, months = 18, endDate = new Date() } = {}) {
-  const id = safeStr(waId);
-  if (!id) return { ok: false, error: 'waId required' };
+export async function resetUserDescriptionMetrics(userRef, { days = 120, months = 18, endDate = new Date() } = {}) {
+  const id = normalizeUserMetricRef(userRef);
+  if (!id) return { ok: false, error: 'userId required' };
 
   const dN = clampInt(days, 1, 400, 120);
   const mN = clampInt(months, 1, 48, 18);
@@ -575,5 +581,5 @@ export async function resetUserDescriptionMetrics(waId, { days = 120, months = 1
     }
   }
 
-  return { ok: true, waId: id, deleted: delCount, ranges: { days: { start: fmtYmd(startDay), end: dayEnd, count: dN }, months: { start: fmtYm(startMonth), end: fmtYm(endMonth), count: mN } } };
+  return { ok: true, userId: id, waId: id, deleted: delCount, ranges: { days: { start: fmtYmd(startDay), end: dayEnd, count: dN }, months: { start: fmtYm(startMonth), end: fmtYm(endMonth), count: mN } } };
 }
