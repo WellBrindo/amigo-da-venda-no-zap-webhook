@@ -570,8 +570,22 @@ export async function resetUserDescriptionMetrics(userRef, { days = 120, months 
     monthKeys.push(kUserMonth(id, m));
   }
 
+  const eventDayKeys = [];
+  const eventMonthKeys = [];
+  for (const eventName of FEEDBACK_EVENTS) {
+    const normalizedEvent = normalizeMetricEventName(eventName);
+    for (let i = 0; i < dN; i++) {
+      const d = fmtYmd(addDays(startDay, i));
+      eventDayKeys.push(kEventUserDay(id, normalizedEvent, d));
+    }
+    for (let i = 0; i < mN; i++) {
+      const m = fmtYm(addMonths(startMonth, i));
+      eventMonthKeys.push(kEventUserMonth(id, normalizedEvent, m));
+    }
+  }
+
   let delCount = 0;
-  const all = [...dayKeys, ...monthKeys];
+  const all = [...dayKeys, ...monthKeys, ...eventDayKeys, ...eventMonthKeys];
   for (const k of all) {
     try {
       await redisDel(k);
