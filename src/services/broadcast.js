@@ -21,7 +21,17 @@ import {
   redisExpire,
 } from "./redis.js";
 
-import { listUsers, getUserPlan, getUserStatus, getActivityMeta, setActivityMeta, getGrowthMeta, markAdOfDaySent } from "./state.js";
+import {
+  listUsers,
+  getUserPlan,
+  getUserStatus,
+  getActivityMeta,
+  setActivityMeta,
+  getPostAdIdleMeta,
+  markPostAdIdleReminderSent,
+  getGrowthMeta,
+  markAdOfDaySent,
+} from "./state.js";
 import { listWindow24hActive, nowMs, getLastInboundTs } from "./window24h.js";
 import { sendWhatsAppText } from "./meta/whatsapp.js";
 import { getCopyText } from "./copy.js";
@@ -436,6 +446,35 @@ async function sendCopyMessage(waId, key, vars = {}) {
   return true;
 }
 
+async function maybeSendPostAdIdleReminder(waId, nowTs) {
+  const status = await getUserStatus(waId).catch(() => "");
+  if (!(status === "TRIAL" || status === "ACTIVE")) return { sent: false };
+
+  const postAdIdle = await getPostAdIdleMeta(waId).catch(() => ({}));
+  const idleState = String(postAdIdle?.postAdIdleState || "").trim();
+  if (!idleState) return { sent: false };
+
+  const armedAt = String(postAdIdle?.postAdIdleArmedAt || "").trim();
+  if (!armedAt) return { sent: false };
+
+  const armedMs = new Date(armedAt).getTime();
+  if (!Number.isFinite(armedMs)) return { sent: false };
+  if (nowTs - armedMs < IDLE_REMINDER_DELAY_MS) return { sent: false };
+
+  const activityMeta = await getActivityMeta(waId).catch(() => ({}));
+  const lastInboundAt = String(activityMeta?.lastInboundAt || "").trim();
+  const lastInboundMs = lastInboundAt ? new Date(lastInboundAt).getTime() : NaN;
+  if (Number.isFinite(lastInboundMs) && lastInboundMs > armedMs) return { sent: false, skipped: "user-interacted-after-arm" };
+
+  const reminderSentAt = String(postAdIdle?.postAdIdleReminderSentAt || "").trim();
+  const reminderSentMs = reminderSentAt ? new Date(reminderSentAt).getTime() : NaN;
+  if (Number.isFinite(reminderSentMs) && reminderSentMs >= armedMs) return { sent: false };
+
+  await sendCopyMessage(waId, "FLOW_RETENTION_SIGNOFF");
+  await markPostAdIdleReminderSent(waId, new Date(nowTs).toISOString()).catch(() => ({}));
+  return { sent: true, type: "post_ad_idle", idleState };
+}
+
 async function maybeSendIdleReminder(waId, nowTs) {
   const status = await getUserStatus(waId).catch(() => "");
   if (!isIdleEligibleStatus(status)) return { sent: false };
@@ -487,11 +526,20 @@ export async function runLifecycleAutomationTick({ limit = 5000, tsMs = nowMs() 
   const activeWaIds = await listWindow24hActive(tsMs, Number(limit || 5000)).catch(() => []);
   const list = Array.isArray(activeWaIds) ? activeWaIds.map((x) => String(x || "").trim()).filter(Boolean) : [];
 
+  let postAdIdleSent = 0;
   let idleSent = 0;
   let dailyAdSent = 0;
   let errors = 0;
 
   for (const waId of list) {
+    try {
+      const postAdIdle = await maybeSendPostAdIdleReminder(waId, tsMs);
+      if (postAdIdle?.sent) postAdIdleSent += 1;
+    } catch (err) {
+      errors += 1;
+      await recordError("automation_post_ad_idle", waId, err?.message || err).catch(() => 0);
+    }
+
     try {
       const idle = await maybeSendIdleReminder(waId, tsMs);
       if (idle?.sent) idleSent += 1;
@@ -509,7 +557,7 @@ export async function runLifecycleAutomationTick({ limit = 5000, tsMs = nowMs() 
     }
   }
 
-  return { ok: true, activeWindow: list.length, idleSent, dailyAdSent, errors };
+  return { ok: true, activeWindow: list.length, postAdIdleSent, idleSent, dailyAdSent, errors };
 }
 
 let automationTimer = null;
