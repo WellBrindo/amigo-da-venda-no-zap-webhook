@@ -2355,10 +2355,6 @@ async function msgReferralInvite(waId) {
   });
 }
 
-async function msgPostAdGroupsTip(waId) {
-  return await getCopyText("FLOW_POST_AD_GROUPS_TIP", { waId });
-}
-
 
 async function msgHabitNudge(waId, count) {
   return await getCopyText("FLOW_HABIT_NUDGE", { waId, vars: { count } });
@@ -3931,10 +3927,6 @@ async function buildPostAdGrowthMessages({ waId, adsCreatedTotal }) {
 
   const growthMeta = await getGrowthMeta(waId);
   const messages = [];
-
-  if (count <= 2) {
-    messages.push(await msgPostAdGroupsTip(waId));
-  }
 
   if (shouldShowProgressMilestone(count)) {
     messages.push(await msgProgressMilestone(waId, count));
