@@ -76,6 +76,11 @@ import {
   listAdminRoleDefinitions,
   listAdminPermissionDefinitions,
 } from "../services/adminAccess.js";
+import {
+  getInternalUserIdByWaId,
+  getUserIdentifiers,
+  getPreferredOutboundRecipient,
+} from "../services/identity.js";
 
 
 function escapeHtml(s) {
@@ -320,14 +325,36 @@ function renderSidebar(activePath){
 }
 
 
-function requireWaId(req) {
+async function resolveAdminUserRef(rawValue) {
+  const raw = String(rawValue || "").trim();
+  if (!raw) return "";
+  if (/^usr_\d+$/i.test(raw)) return raw;
+  const mapped = await getInternalUserIdByWaId(raw).catch(() => "");
+  return String(mapped || raw).trim();
+}
+
+async function requireUserRef(req) {
+  const directUserId = String(req.query?.userId || "").trim();
+  if (directUserId) return await resolveAdminUserRef(directUserId);
+
   const waId = String(req.query?.waId || "").trim();
-  if (!waId) {
-    const err = new Error("waId required (ex: ?waId=5511...)");
-    err.statusCode = 400;
-    throw err;
-  }
-  return waId;
+  if (waId) return await resolveAdminUserRef(waId);
+
+  const err = new Error("userId or waId required (ex: ?userId=usr_000001 or ?waId=5511...)");
+  err.statusCode = 400;
+  throw err;
+}
+
+async function requireBodyUserRef(req) {
+  const directUserId = String(req.body?.userId || "").trim();
+  if (directUserId) return await resolveAdminUserRef(directUserId);
+
+  const waId = String(req.body?.waId || "").trim();
+  if (waId) return await resolveAdminUserRef(waId);
+
+  const err = new Error("userId or waId required");
+  err.statusCode = 400;
+  throw err;
 }
 
 const GLOBAL_SETTINGS_PREFIX = "cfg:global:";
@@ -3711,19 +3738,19 @@ router.get("/", async (req, res) => {
 
       const idsRaw = await listUsers();
       const ids = Array.isArray(idsRaw) ? idsRaw.slice() : [];
-      ids.sort(); // ordenação simples por waId
+      ids.sort();
 
       const slice = ids.slice(offset, offset + limit);
-
       const now = nowMs();
 
       const items = await mapLimit(
         slice,
         20,
-        async (waId) => {
-          const [snap, lastInboundTsRaw] = await Promise.all([
-            getUserSnapshot(waId),
-            getLastInboundTs(waId),
+        async (userId) => {
+          const [snap, lastInboundTsRaw, identifiers] = await Promise.all([
+            getUserSnapshot(userId),
+            getLastInboundTs(userId),
+            getUserIdentifiers(userId).catch(() => null),
           ]);
 
           const lastInboundTs = Number(lastInboundTsRaw) || 0;
@@ -3731,7 +3758,9 @@ router.get("/", async (req, res) => {
           const windowExpiresAt = lastInboundTs ? lastInboundTs + 24 * 60 * 60 * 1000 : 0;
 
           return {
-            waId,
+            userId,
+            waId: identifiers?.waId || snap.waId || "",
+            bsuid: identifiers?.bsuid || "",
             fullName: snap.fullName || "",
             plan: snap.plan || "",
             status: snap.status || "",
@@ -3756,18 +3785,21 @@ router.get("/", async (req, res) => {
 
   router.get("/users/snapshot", async (req, res) => {
     try {
-      const waId = String(req.query?.waId || "").trim();
-      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
-
-      const snap = await getUserSnapshot(waId);
+      const userId = await requireUserRef(req);
+      const [snap, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
       const now = nowMs();
-      const lastInboundTs = await getLastInboundTs(waId);
+      const lastInboundTs = await getLastInboundTs(userId);
       const inWindow = lastInboundTs ? now - Number(lastInboundTs) < 24 * 60 * 60 * 1000 : false;
       const windowExpiresAt = lastInboundTs ? Number(lastInboundTs) + 24 * 60 * 60 * 1000 : 0;
 
       return res.status(200).json({
         ok: true,
-        waId,
+        userId,
+        waId: identifiers?.waId || snap.waId || "",
+        bsuid: identifiers?.bsuid || "",
         inWindow,
         lastInboundTs: Number(lastInboundTs) || 0,
         windowExpiresAt,
@@ -3780,18 +3812,21 @@ router.get("/", async (req, res) => {
 
   router.get("/users/details", async (req, res) => {
     try {
-      const waId = String(req.query?.waId || "").trim();
-      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
-
-      const snap = await getUserSnapshot(waId);
+      const userId = await requireUserRef(req);
+      const [snap, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
       const now = nowMs();
-      const lastInboundTs = await getLastInboundTs(waId);
+      const lastInboundTs = await getLastInboundTs(userId);
       const inWindow = lastInboundTs ? now - Number(lastInboundTs) < 24 * 60 * 60 * 1000 : false;
       const windowExpiresAt = lastInboundTs ? Number(lastInboundTs) + 24 * 60 * 60 * 1000 : 0;
 
       return res.status(200).json({
         ok: true,
-        waId,
+        userId,
+        waId: identifiers?.waId || snap.waId || "",
+        bsuid: identifiers?.bsuid || "",
         inWindow,
         lastInboundTs: Number(lastInboundTs) || 0,
         windowExpiresAt,
@@ -3804,45 +3839,50 @@ router.get("/", async (req, res) => {
 
 router.post("/users/status", async (req, res) => {
     try {
-      const waId = String(req.body?.waId || "").trim();
+      const userId = await requireBodyUserRef(req);
       const status = String(req.body?.status || "").trim();
-      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
       if (!status) return res.status(400).json({ ok: false, error: "status required" });
-      const beforeUser = await getUserSnapshot(waId);
-      await setUserStatus(waId, status);
-      const user = await getUserSnapshot(waId);
+      const [beforeUser, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
+      await setUserStatus(userId, status);
+      const user = await getUserSnapshot(userId);
       await safeRecordAdminAudit(req, {
         module: "users",
         action: "SET_USER_STATUS",
-        waId,
-        targetId: waId,
-        summary: `Alterou o status do usuário ${waId} para ${status}.`,
+        waId: identifiers?.waId || beforeUser?.waId || "",
+        targetId: userId,
+        summary: `Alterou o status do usuário ${userId} para ${status}.`,
         before: buildAuditUserSnapshot(beforeUser),
         after: buildAuditUserSnapshot(user),
-        meta: { status },
+        meta: { status, userId },
       });
-      return res.json({ ok: true, waId, status, user });
+      return res.json({ ok: true, userId, waId: identifiers?.waId || user.waId || "", status, user });
     } catch (err) {
-      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+      return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
   });
 
   router.get("/users/clear-lastprompt", async (req, res) => {
     try {
-      const waId = requireWaId(req);
-      const beforeUser = await getUserSnapshot(waId);
-      await clearLastPrompt(waId);
-      const user = await getUserSnapshot(waId);
+      const userId = await requireUserRef(req);
+      const [beforeUser, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
+      await clearLastPrompt(userId);
+      const user = await getUserSnapshot(userId);
       await safeRecordAdminAudit(req, {
         module: "users",
         action: "CLEAR_LAST_PROMPT",
-        waId,
-        targetId: waId,
-        summary: `Limpou o último prompt salvo do usuário ${waId}.`,
+        waId: identifiers?.waId || beforeUser?.waId || "",
+        targetId: userId,
+        summary: `Limpou o último prompt salvo do usuário ${userId}.`,
         before: { lastPrompt: limitText(beforeUser?.lastPrompt || "", 500) },
         after: { lastPrompt: limitText(user?.lastPrompt || "", 500) },
       });
-      return res.json({ ok: true, waId, action: "clearLastPrompt", user });
+      return res.json({ ok: true, userId, waId: identifiers?.waId || user.waId || "", action: "clearLastPrompt", user });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
@@ -4484,11 +4524,13 @@ async function toggle(code, active){
     try {
       const operation = String(req.body?.operation || "").trim().toUpperCase();
       const waIdsRaw = Array.isArray(req.body?.waIds) ? req.body.waIds : [];
-      const waIds = Array.from(new Set(waIdsRaw.map((value) => String(value || "").trim()).filter(Boolean)));
+      const userIds = Array.from(new Set((await Promise.all(
+        waIdsRaw.map((value) => resolveAdminUserRef(String(value || "").trim()))
+      )).filter(Boolean)));
       const value = String(req.body?.value || "").trim();
 
       if (!operation) return res.status(400).json({ ok: false, error: "operation required" });
-      if (!waIds.length) return res.status(400).json({ ok: false, error: "waIds required" });
+      if (!userIds.length) return res.status(400).json({ ok: false, error: "waIds required" });
 
       const plans = await listPlans({ includeInactive: true });
       const planMap = buildPlanMap(plans);
@@ -4505,66 +4547,73 @@ async function toggle(code, active){
 
       const results = [];
 
-      for (const waId of waIds) {
+      for (const userId of userIds) {
         try {
-          const beforeUser = await getUserSnapshot(waId);
+          const [beforeUser, identifiers] = await Promise.all([
+            getUserSnapshot(userId),
+            getUserIdentifiers(userId).catch(() => null),
+          ]);
           let summary = "";
-          let meta = { operation };
+          let meta = { operation, userId };
 
           if (operation === "SET_STATUS") {
-            await setUserStatus(waId, normalizedStatus);
-            summary = `Alterou o status do usuário ${waId} para ${normalizedStatus}.`;
-            meta = { operation, status: normalizedStatus };
+            await setUserStatus(userId, normalizedStatus);
+            summary = `Alterou o status do usuário ${userId} para ${normalizedStatus}.`;
+            meta = { ...meta, status: normalizedStatus };
           } else if (operation === "BLOCK_USERS") {
-            await setUserStatus(waId, "BLOCKED");
-            summary = `Bloqueou o usuário ${waId}.`;
+            await setUserStatus(userId, "BLOCKED");
+            summary = `Bloqueou o usuário ${userId}.`;
           } else if (operation === "UNBLOCK_TO_TRIAL") {
-            await resetUserToTrial(waId);
-            summary = `Desbloqueou o usuário ${waId} retornando para TRIAL.`;
+            await resetUserToTrial(userId);
+            summary = `Desbloqueou o usuário ${userId} retornando para TRIAL.`;
           } else if (operation === "SET_PLAN") {
-            await setUserPlan(waId, normalizedPlan);
-            summary = `Alterou o plano do usuário ${waId} para ${normalizedPlan}.`;
-            meta = { operation, plan: normalizedPlan };
+            await setUserPlan(userId, normalizedPlan);
+            summary = `Alterou o plano do usuário ${userId} para ${normalizedPlan}.`;
+            meta = { ...meta, plan: normalizedPlan };
           } else if (operation === "CLEAR_PLAN") {
-            await setUserPlan(waId, "");
-            summary = `Removeu o plano salvo do usuário ${waId}.`;
+            await setUserPlan(userId, "");
+            summary = `Removeu o plano salvo do usuário ${userId}.`;
           } else if (operation === "RESET_TRIAL") {
-            await resetUserToTrial(waId);
-            summary = `Resetou o usuário ${waId} para o estado de trial.`;
+            await resetUserToTrial(userId);
+            summary = `Resetou o usuário ${userId} para o estado de trial.`;
           } else if (operation === "CLEAR_QUOTA") {
-            await setUserQuotaUsed(waId, 0);
-            summary = `Zerou o uso mensal do usuário ${waId}.`;
+            await setUserQuotaUsed(userId, 0);
+            summary = `Zerou o uso mensal do usuário ${userId}.`;
           } else if (operation === "CLEAR_TRIAL_USED") {
-            await setUserTrialUsed(waId, 0);
-            summary = `Zerou o uso de trial do usuário ${waId}.`;
+            await setUserTrialUsed(userId, 0);
+            summary = `Zerou o uso de trial do usuário ${userId}.`;
           } else {
             return res.status(400).json({ ok: false, error: "unsupported operation" });
           }
 
-          const afterUser = await getUserSnapshot(waId);
+          const afterUser = await getUserSnapshot(userId);
           await safeRecordAdminAudit(req, {
             module: "bulk",
             action: operation,
-            waId,
-            targetId: waId,
+            waId: identifiers?.waId || beforeUser?.waId || "",
+            targetId: userId,
             summary,
             before: buildAuditUserSnapshot(beforeUser),
             after: buildAuditUserSnapshot(afterUser),
             meta,
           });
 
-          results.push({ ok: true, waId, before: buildAuditUserSnapshot(beforeUser), after: buildAuditUserSnapshot(afterUser) });
+          results.push({
+            ok: true,
+            userId,
+            waId: identifiers?.waId || afterUser?.waId || "",
+            status: String(afterUser?.status || ""),
+            plan: String(afterUser?.plan || ""),
+          });
         } catch (err) {
-          results.push({ ok: false, waId, error: String(err?.message || err) });
+          results.push({ ok: false, userId, error: String(err?.message || err) });
         }
       }
 
       return res.status(200).json({
         ok: true,
         operation,
-        requested: waIds.length,
-        successCount: results.filter((item) => item.ok).length,
-        errorCount: results.filter((item) => !item.ok).length,
+        count: results.length,
         results,
       });
     } catch (e) {
@@ -5862,32 +5911,34 @@ async function toggle(code, active){
 
   router.post("/feedback/review-status", async (req, res) => {
     try {
-      const waId = String(req.body?.waId || "").trim();
+      const userId = await requireBodyUserRef(req);
       const status = String(req.body?.status || "").trim().toUpperCase();
-      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
       if (!["PENDING_REVIEW", "APPROVED", "REJECTED", "PUBLISHED", "INTERNAL_ONLY"].includes(status)) {
         return res.status(400).json({ ok: false, error: "invalid status" });
       }
-      const beforeUser = await getUserSnapshot(waId);
+      const [beforeUser, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
       const beforeStatus = String(beforeUser?.growthMeta?.testimonialStatus || "").trim().toUpperCase();
-      await setTestimonialReviewStatus(waId, status);
+      await setTestimonialReviewStatus(userId, status);
       if (status !== beforeStatus) {
-        if (status === 'APPROVED') await incMetricEvent('testimonial_review_approved', { waId });
-        if (status === 'REJECTED') await incMetricEvent('testimonial_review_rejected', { waId });
-        if (status === 'PUBLISHED') await incMetricEvent('testimonial_review_published', { waId });
+        if (status === 'APPROVED') await incMetricEvent('testimonial_review_approved', { userId });
+        if (status === 'REJECTED') await incMetricEvent('testimonial_review_rejected', { userId });
+        if (status === 'PUBLISHED') await incMetricEvent('testimonial_review_published', { userId });
       }
-      const user = await getUserSnapshot(waId);
+      const user = await getUserSnapshot(userId);
       await safeRecordAdminAudit(req, {
         module: "feedback",
         action: "SET_TESTIMONIAL_STATUS",
-        waId,
-        targetId: waId,
-        summary: `Atualizou o status do depoimento de ${waId} para ${status}.`,
+        waId: identifiers?.waId || beforeUser?.waId || "",
+        targetId: userId,
+        summary: `Atualizou o status do depoimento de ${userId} para ${status}.`,
         before: buildAuditUserSnapshot(beforeUser),
         after: buildAuditUserSnapshot(user),
-        meta: { status },
+        meta: { status, userId },
       });
-      return res.json({ ok: true, waId, status, user });
+      return res.json({ ok: true, userId, waId: identifiers?.waId || user.waId || "", status, user });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: String(err?.message || err) });
     }
@@ -6484,39 +6535,41 @@ async function toggle(code, active){
 
   router.post("/copy/set-user", async (req, res) => {
     const key = String(req.body?.key || "").trim();
-    const waId = String(req.body?.waId || "").trim();
+    const userId = await requireBodyUserRef(req);
     const value = String(req.body?.value || "");
-    if (!key || !waId) {
-      return res.status(400).json({ ok: false, error: "key and waId required" });
+    if (!key) {
+      return res.status(400).json({ ok: false, error: "key required" });
     }
-    await setCopyUser(waId, key, value);
+    const identifiers = await getUserIdentifiers(userId).catch(() => null);
+    await setCopyUser(userId, key, value);
     await safeRecordAdminAudit(req, {
       module: "copy",
       action: "SET_COPY_USER",
-      waId,
+      waId: identifiers?.waId || "",
       targetId: key,
-      summary: `Atualizou o texto ${key} para o usuário ${waId}.`,
-      after: { key, waId, valueLength: value.length },
+      summary: `Atualizou o texto ${key} para o usuário ${userId}.`,
+      after: { key, userId, valueLength: value.length },
     });
-    res.redirect(`/admin/copy-ui?waId=${encodeURIComponent(waId)}`);
+    res.redirect(`/admin/copy-ui?userId=${encodeURIComponent(userId)}&waId=${encodeURIComponent(identifiers?.waId || "")}`);
   });
 
   router.post("/copy/del-user", async (req, res) => {
     const key = String(req.body?.key || "").trim();
-    const waId = String(req.body?.waId || "").trim();
-    if (!key || !waId) {
-      return res.status(400).json({ ok: false, error: "key and waId required" });
+    const userId = await requireBodyUserRef(req);
+    if (!key) {
+      return res.status(400).json({ ok: false, error: "key required" });
     }
-    await delCopyUser(waId, key);
+    const identifiers = await getUserIdentifiers(userId).catch(() => null);
+    await delCopyUser(userId, key);
     await safeRecordAdminAudit(req, {
       module: "copy",
       action: "DEL_COPY_USER",
-      waId,
+      waId: identifiers?.waId || "",
       targetId: key,
-      summary: `Resetou o texto ${key} do usuário ${waId}.`,
-      after: { key, waId, reset: true },
+      summary: `Resetou o texto ${key} do usuário ${userId}.`,
+      after: { key, userId, reset: true },
     });
-    res.redirect(`/admin/copy-ui?waId=${encodeURIComponent(waId)}`);
+    res.redirect(`/admin/copy-ui?userId=${encodeURIComponent(userId)}&waId=${encodeURIComponent(identifiers?.waId || "")}`);
   });
 
 
@@ -7522,24 +7575,26 @@ async function toggle(code, active){
 
   // APIs (JSON)
   router.get("/api/finance/asaas/events", async (req, res) => {
-    const waId = String(req.query?.waId || "").trim() || null;
+    const userId = await resolveAdminUserRef(String(req.query?.userId || req.query?.waId || "").trim());
     const limit = Number(req.query?.limit || 50);
     const offset = Number(req.query?.offset || 0);
-    const data = await listAsaasEvents({ waId, limit, offset });
+    const data = await listAsaasEvents({ userId, limit, offset });
     return res.json(data);
   });
 
   router.get("/api/finance/asaas/user", async (req, res) => {
     try {
-      const waId = requireWaId(req);
-      const user = await getUserSnapshot(waId);
+      const userId = await requireUserRef(req);
+      const [user, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
 
       let subscription = null;
       if (user.asaasSubscriptionId) {
         try {
           subscription = await getSubscription(user.asaasSubscriptionId);
         } catch (e) {
-          // não falha a página se o Asaas não encontrar a assinatura
           subscription = null;
         }
       }
@@ -7548,7 +7603,7 @@ async function toggle(code, active){
         ? await listPayments({ customerId: user.asaasCustomerId, limit: 20, offset: 0 })
         : (user.asaasSubscriptionId ? await listPayments({ subscriptionId: user.asaasSubscriptionId, limit: 20, offset: 0 }) : { data: [] });
 
-      return res.json({ ok: true, user, subscription, payments });
+      return res.json({ ok: true, userId, waId: identifiers?.waId || user.waId || "", user, subscription, payments });
     } catch (e) {
       const msg = String(e?.message || e || "Erro").slice(0, 300);
       return res.status(Number(e?.statusCode || 500)).json({ ok: false, error: msg });
@@ -7558,11 +7613,12 @@ async function toggle(code, active){
   router.post("/api/finance/asaas/cancel-subscription", async (req, res) => {
     try {
       const subscriptionId = String(req.body?.subscriptionId || "").trim();
-      const waId = String(req.body?.waId || "").trim();
+      const userId = await resolveAdminUserRef(String(req.body?.userId || req.body?.waId || "").trim());
+      const identifiers = userId ? await getUserIdentifiers(userId).catch(() => null) : null;
 
       let subId = subscriptionId;
-      if (!subId && waId) {
-        const u = await getUserSnapshot(waId);
+      if (!subId && userId) {
+        const u = await getUserSnapshot(userId);
         subId = String(u.asaasSubscriptionId || "").trim();
       }
 
@@ -7574,16 +7630,16 @@ async function toggle(code, active){
       await safeRecordAdminAudit(req, {
         module: "finance",
         action: "CANCEL_ASAAS_SUBSCRIPTION",
-        waId: waId || "",
+        waId: identifiers?.waId || "",
         targetId: subId,
         summary: `Solicitou o cancelamento da assinatura ${subId}.`,
         after: { canceled: true, response: out },
-        meta: { waId: waId || "" },
+        meta: { userId: userId || "", waId: identifiers?.waId || "" },
       });
-      return res.json({ ok: true, canceled: out });
+      return res.json({ ok: true, canceled: out, userId, waId: identifiers?.waId || "" });
     } catch (e) {
       const msg = String(e?.message || e || "Erro").slice(0, 300);
-      return res.status(500).json({ ok: false, error: msg });
+      return res.status(Number(e?.statusCode || 500)).json({ ok: false, error: msg });
     }
   });
 
@@ -7944,27 +8000,28 @@ router.get("/window24h-ui", async (req, res) => {
   // -----------------------------
   router.get("/state-test/reset-trial", async (req, res) => {
     try {
-      const waId = requireWaId(req);
-      const beforeUser = await getUserSnapshot(waId);
-      await setUserStatus(waId, "TRIAL");
-      await setUserPlan(waId, "");
-      await setUserQuotaUsed(waId, 0);
-      await setUserTrialUsed(waId, 0);
+      const userId = await requireUserRef(req);
+      const [beforeUser, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
+      await setUserStatus(userId, "TRIAL");
+      await setUserPlan(userId, "");
+      await setUserQuotaUsed(userId, 0);
+      await setUserTrialUsed(userId, 0);
+      await clearLastPrompt(userId);
 
-      // ✅ V16.4.6: Upstash REST não aceita SET com valor vazio de forma confiável
-      await clearLastPrompt(waId);
-
-      const user = await getUserSnapshot(waId);
+      const user = await getUserSnapshot(userId);
       await safeRecordAdminAudit(req, {
         module: "state",
         action: "RESET_USER_TRIAL",
-        waId,
-        targetId: waId,
-        summary: `Resetou o usuário ${waId} para TRIAL.`,
+        waId: identifiers?.waId || beforeUser?.waId || "",
+        targetId: userId,
+        summary: `Resetou o usuário ${userId} para TRIAL.`,
         before: buildAuditUserSnapshot(beforeUser),
         after: buildAuditUserSnapshot(user),
       });
-      return res.json({ ok: true, action: "reset-trial", waId, user });
+      return res.json({ ok: true, action: "reset-trial", userId, waId: identifiers?.waId || user.waId || "", user });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
@@ -7973,41 +8030,43 @@ router.get("/window24h-ui", async (req, res) => {
   // 🧹 Reset TOTAL (número de teste): remove estado, métricas, janela 24h e overrides de copy
   router.get('/state-test/reset-user', async (req, res) => {
     try {
-      const waId = requireWaId(req);
-      const beforeUser = await getUserSnapshot(waId);
+      const userId = await requireUserRef(req);
+      const [beforeUser, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
 
-      // 1) Estado (user:*) + remove do users:index
-      const st = await resetUserAsNew(waId);
+      const st = await resetUserAsNew(userId);
 
-      // 2) Janela 24h (zset + last inbound ts) — best-effort
-      const w = await clear24hWindowForUser(waId).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+      const w = identifiers?.waId
+        ? await clear24hWindowForUser(identifiers.waId).catch((err) => ({ ok: false, error: String(err?.message || err) }))
+        : { ok: false, skipped: true, reason: "missing_waId_alias" };
 
-      // 3) Métricas (user day/month) — best-effort
-      const m = await resetUserDescriptionMetrics(waId, { days: 120, months: 18 }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+      const m = await resetUserDescriptionMetrics(userId, { days: 120, months: 18 }).catch((err) => ({ ok: false, error: String(err?.message || err) }));
 
-      // 4) Copy overrides por usuário — best-effort
       let copyDeleted = 0;
       let copyKeys = [];
       try {
         copyKeys = await listCopyKeys();
         for (const k of (copyKeys || [])) {
-          await delCopyUser(waId, k).catch(() => null);
+          await delCopyUser(userId, k).catch(() => null);
           copyDeleted++;
         }
       } catch (err) {
         // ignore (best-effort)
       }
 
-      const afterUser = await getUserSnapshot(waId);
+      const afterUser = await getUserSnapshot(userId);
       await safeRecordAdminAudit(req, {
         module: "state",
         action: "RESET_USER_TOTAL",
-        waId,
-        targetId: waId,
-        summary: `Executou reset total do usuário ${waId}.`,
+        waId: identifiers?.waId || beforeUser?.waId || "",
+        targetId: userId,
+        summary: `Executou reset total do usuário ${userId}.`,
         before: buildAuditUserSnapshot(beforeUser),
         after: buildAuditUserSnapshot(afterUser),
         meta: {
+          userId,
           state: st,
           window24h: w,
           metrics: m,
@@ -8017,7 +8076,8 @@ router.get("/window24h-ui", async (req, res) => {
       return res.json({
         ok: true,
         action: 'reset-user-total',
-        waId,
+        userId,
+        waId: identifiers?.waId || beforeUser?.waId || "",
         state: st,
         window24h: w,
         metrics: m,
@@ -8031,10 +8091,13 @@ router.get("/window24h-ui", async (req, res) => {
 
   router.get("/state-test/set-lastprompt-empty", async (req, res) => {
     try {
-      const waId = requireWaId(req);
-      await setLastPrompt(waId, "");
-      const user = await getUserSnapshot(waId);
-      return res.json({ ok: true, action: "set-lastprompt-empty", waId, user });
+      const userId = await requireUserRef(req);
+      await setLastPrompt(userId, "");
+      const [user, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
+      return res.json({ ok: true, action: "set-lastprompt-empty", userId, waId: identifiers?.waId || user.waId || "", user });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
@@ -8042,9 +8105,12 @@ router.get("/window24h-ui", async (req, res) => {
 
   router.get("/state-test/get", async (req, res) => {
     try {
-      const waId = requireWaId(req);
-      const user = await getUserSnapshot(waId);
-      return res.json({ ok: true, waId, user });
+      const userId = await requireUserRef(req);
+      const [user, identifiers] = await Promise.all([
+        getUserSnapshot(userId),
+        getUserIdentifiers(userId).catch(() => null),
+      ]);
+      return res.json({ ok: true, userId, waId: identifiers?.waId || user.waId || "", user });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
@@ -8052,14 +8118,19 @@ router.get("/window24h-ui", async (req, res) => {
 
   router.get("/window24h/touch", async (req, res) => {
     try {
-      const waId = requireWaId(req);
-      await touch24hWindow(waId, nowMs());
-      const ts = await getLastInboundTs(waId);
+      const userId = await requireUserRef(req);
+      const identifiers = await getUserIdentifiers(userId).catch(() => null);
+      if (!identifiers?.waId) {
+        return res.status(400).json({ ok: false, error: "waId alias not found for user" });
+      }
+      await touch24hWindow(identifiers.waId, nowMs());
+      const ts = await getLastInboundTs(identifiers.waId);
       return res.json({
         ok: true,
         action: "touch24hWindow",
         user: {
-          waId,
+          userId,
+          waId: identifiers.waId,
           lastInboundAtMs: ts,
           windowEndsAtMs: ts ? ts + 24 * 60 * 60 * 1000 : null,
         },
@@ -8076,10 +8147,11 @@ router.get("/window24h-ui", async (req, res) => {
 
   router.get("/send-test", async (req, res) => {
     try {
-      const waId = requireWaId(req);
+      const userId = await requireUserRef(req);
       const text = String(req.query.text || "oi");
-      const meta = await sendWhatsAppText({ to: waId, text });
-      return res.json({ ok: true, sentTo: waId, text, meta });
+      const recipient = await getPreferredOutboundRecipient(userId);
+      const meta = await sendWhatsAppText({ recipient, text });
+      return res.json({ ok: true, userId, sentTo: recipient?.recipient || "", text, meta });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
     }
