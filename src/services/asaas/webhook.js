@@ -16,14 +16,22 @@ import {
 import { getCopyText } from "../copy.js";
 import { sendWhatsAppText } from "../meta/whatsapp.js";
 import { recordAsaasEvent } from "./ledger.js";
+import { getPreferredOutboundRecipient } from "../identity.js";
 /**
  * Webhook handler do Asaas
- * externalReference = waId
+ * externalReference = internalUserId (compatível com legado por alias)
  */
 
-async function sendCopyText(waId, key, vars = {}, errorTag = "ASAAS_WEBHOOK_SEND_ERROR") {
-  const text = await getCopyText(key, { waId, ...vars });
-  await sendWhatsAppText({ to: waId, text }).catch((err) => {
+async function sendCopyText(userId, key, vars = {}, errorTag = "ASAAS_WEBHOOK_SEND_ERROR") {
+  const text = await getCopyText(key, { waId: userId, userId, ...vars });
+  const recipient = await getPreferredOutboundRecipient(userId);
+
+  if (!recipient?.recipient) {
+    console.error(`[${errorTag}] Missing outbound recipient`, { userId, key });
+    return;
+  }
+
+  await sendWhatsAppText({ recipient, text }).catch((err) => {
     console.error(`[${errorTag}]`, err?.message || err);
   });
 }
@@ -34,20 +42,20 @@ export async function handleAsaasWebhookEvent(body) {
     const payment = body?.payment;
     const subscription = body?.subscription;
 
-    const waId =
+    const userId =
       payment?.externalReference ||
       subscription?.externalReference ||
       null;
 
-    if (!waId) {
+    if (!userId) {
       console.log("[ASAAS_WEBHOOK] Evento sem externalReference ignorado.");
       return { ok: false, reason: "no_external_reference" };
     }
 
-    await ensureUserExists(waId);
+    await ensureUserExists(userId);
 
     // Ledger (Admin: histórico / reconciliação)
-    await recordAsaasEvent({ event, waId, payment, subscription, source: "webhook" });
+    await recordAsaasEvent({ event, waId: userId, payment, subscription, source: "webhook" });
 
     // ==============================
     // PAGAMENTO CONFIRMADO
@@ -56,61 +64,61 @@ export async function handleAsaasWebhookEvent(body) {
       event === "PAYMENT_RECEIVED" ||
       event === "PAYMENT_CONFIRMED"
     ) {
-      const plan = await getUserPlan(waId);
+      const plan = await getUserPlan(userId);
 
       if (!plan) {
         console.log(
           "[ASAAS_WEBHOOK_WARNING] Payment confirmed but plan missing",
-          { waId, event }
+          { userId, event }
         );
       }
 
-      await resetUserQuotaUsed(waId);
-      await resetUserTrialUsed(waId);
+      await resetUserQuotaUsed(userId);
+      await resetUserTrialUsed(userId);
 
       const [billingCityState, billingAddress] = await Promise.all([
-        getBillingCityState(waId),
-        getBillingAddress(waId),
+        getBillingCityState(userId),
+        getBillingAddress(userId),
       ]);
 
       if (!billingCityState) {
-        await setPrevStatus(waId, "ACTIVE");
-        await setUserStatus(waId, "WAIT_BILLING_CITY_STATE");
+        await setPrevStatus(userId, "ACTIVE");
+        await setUserStatus(userId, "WAIT_BILLING_CITY_STATE");
         await sendCopyText(
-          waId,
+          userId,
           "FLOW_ASK_BILLING_CITY_STATE",
           {},
           "ASAAS_WEBHOOK_SEND_CITY_ERROR"
         );
 
-        console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando cidade/UF:", { waId, event, plan: plan || "NONE" });
+        console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando cidade/UF:", { userId, event, plan: plan || "NONE" });
         return { ok: true, statusSetTo: "WAIT_BILLING_CITY_STATE" };
       }
 
       if (!billingAddress) {
-        await setPrevStatus(waId, "ACTIVE");
-        await setUserStatus(waId, "WAIT_BILLING_ADDRESS");
+        await setPrevStatus(userId, "ACTIVE");
+        await setUserStatus(userId, "WAIT_BILLING_ADDRESS");
         await sendCopyText(
-          waId,
+          userId,
           "FLOW_ASK_BILLING_ADDRESS",
           {},
           "ASAAS_WEBHOOK_SEND_ADDRESS_ERROR"
         );
 
-        console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando endereço:", { waId, event, plan: plan || "NONE" });
+        console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando endereço:", { userId, event, plan: plan || "NONE" });
         return { ok: true, statusSetTo: "WAIT_BILLING_ADDRESS" };
       }
 
-      await setUserStatus(waId, "ACTIVE");
+      await setUserStatus(userId, "ACTIVE");
       await sendCopyText(
-        waId,
+        userId,
         "FLOW_PLAN_ACTIVATED_WELCOME",
         {},
         "ASAAS_WEBHOOK_SEND_ACTIVE_WELCOME_ERROR"
       );
 
       console.log("[ASAAS_WEBHOOK] Usuário ativado:", {
-        waId,
+        userId,
         event,
         plan: plan || "NONE",
       });
@@ -125,16 +133,16 @@ export async function handleAsaasWebhookEvent(body) {
       event === "PAYMENT_CREDIT_CARD_CAPTURE_REFUSED" ||
       event === "PAYMENT_REPROVED_BY_RISK_ANALYSIS"
     ) {
-      await setUserStatus(waId, "WAIT_PAYMENT_RECOVERY");
+      await setUserStatus(userId, "WAIT_PAYMENT_RECOVERY");
       await sendCopyText(
-        waId,
+        userId,
         "FLOW_PAYMENT_RECOVERY",
         {},
         "ASAAS_WEBHOOK_SEND_PAYMENT_RECOVERY_ERROR"
       );
 
       console.log("[ASAAS_WEBHOOK] Falha no cartão / recuperação iniciada:", {
-        waId,
+        userId,
         event,
       });
 
@@ -145,10 +153,10 @@ export async function handleAsaasWebhookEvent(body) {
     // PAGAMENTO VENCIDO
     // ==============================
     if (event === "PAYMENT_OVERDUE") {
-      await setUserStatus(waId, "PAYMENT_PENDING");
+      await setUserStatus(userId, "PAYMENT_PENDING");
 
       console.log("[ASAAS_WEBHOOK] Pagamento vencido:", {
-        waId,
+        userId,
         event,
       });
 
@@ -159,10 +167,10 @@ export async function handleAsaasWebhookEvent(body) {
     // PAGAMENTO DELETADO
     // ==============================
     if (event === "PAYMENT_DELETED") {
-      await setUserStatus(waId, "BLOCKED");
+      await setUserStatus(userId, "BLOCKED");
 
       console.log("[ASAAS_WEBHOOK] Pagamento deletado:", {
-        waId,
+        userId,
         event,
       });
 
@@ -184,10 +192,10 @@ export async function handleAsaasWebhookEvent(body) {
       const nextDue = String(subscription?.nextDueDate || subscription?.nextPaymentDate || "").trim();
       if (nextDue) {
         // best-effort para ter data de renovação disponível no menu
-        await setCardValidUntil(waId, nextDue);
+        await setCardValidUntil(userId, nextDue);
       }
 
-      const validUntil = await getCardValidUntil(waId);
+      const validUntil = await getCardValidUntil(userId);
       if (validUntil) {
         const daysLeft = (() => {
           const m = String(validUntil).match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -202,7 +210,7 @@ export async function handleAsaasWebhookEvent(body) {
         // ainda válido => não altera status
         if (typeof daysLeft === "number" && daysLeft >= 0) {
           console.log("[ASAAS_WEBHOOK] Assinatura inativada, mas ainda válida até:", {
-            waId,
+            userId,
             event,
             validUntil,
             daysLeft,
@@ -212,10 +220,10 @@ export async function handleAsaasWebhookEvent(body) {
       }
 
       // Sem validade (ou expirado) => força reescolha de plano
-      await setUserStatus(waId, "WAIT_PLAN");
+      await setUserStatus(userId, "WAIT_PLAN");
 
       console.log("[ASAAS_WEBHOOK] Assinatura inativada (sem validade):", {
-        waId,
+        userId,
         event,
       });
 
@@ -223,7 +231,7 @@ export async function handleAsaasWebhookEvent(body) {
     }
 
     console.log("[ASAAS_WEBHOOK] Evento ignorado:", {
-      waId,
+      userId,
       event,
     });
 
