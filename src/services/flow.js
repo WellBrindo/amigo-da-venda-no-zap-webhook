@@ -2355,10 +2355,6 @@ async function msgReferralInvite(waId) {
   });
 }
 
-async function msgPostAdBenefit(waId) {
-  return await getCopyText("FLOW_POST_AD_BENEFIT", { waId });
-}
-
 async function msgPostAdGroupsTip(waId) {
   return await getCopyText("FLOW_POST_AD_GROUPS_TIP", { waId });
 }
@@ -3405,7 +3401,6 @@ async function handleInboundTextCore({ waId, text }) {
     }
 
     return replyMulti([
-      await msgPostAdBenefit(id),
       await msgRetentionSignoff(id),
     ]);
   }
@@ -4257,7 +4252,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   // Mantém o status atual e apenas orienta refinamentos
   const refineMsg = await msgRefinementPrompt(id, maxRefinements);
-  const followups = [await msgPostAdBenefit(id), refineMsg];
+  const followups = [refineMsg];
   const growthMessages = await buildPostAdGrowthMessages({ waId: id, adsCreatedTotal });
 
   const currentGrowthMeta = await getGrowthMeta(id);
