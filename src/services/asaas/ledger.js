@@ -9,10 +9,14 @@ import { redisLPush, redisLTrim, redisLRange, redisSIsMember, redisSAdd } from "
 const KEY_EVENT_IDS = "asaas:event_ids"; // SET
 const KEY_EVENTS_GLOBAL = "asaas:events"; // LIST (JSON)
 
-const keyUserEvents = (waId) => `asaas:events:user:${waId}`;
+const keyUserEvents = (userId) => `asaas:events:user:${userId}`;
 
 function safeStr(v) {
   return String(v || "").trim();
+}
+
+function normalizeLedgerUserRef({ userId, waId }) {
+  return safeStr(userId || waId);
 }
 
 function pickPayment(p) {
@@ -53,15 +57,16 @@ function makeDedupKey({ event, payment, subscription }) {
   return `${ev}:generic:${Date.now()}`;
 }
 
-export async function recordAsaasEvent({ event, waId, payment, subscription, source = "webhook" }) {
-  const wa = safeStr(waId);
-  if (!wa) return { ok: false, reason: "no_waId" };
+export async function recordAsaasEvent({ event, userId, waId, payment, subscription, source = "webhook" }) {
+  const userRef = normalizeLedgerUserRef({ userId, waId });
+  if (!userRef) return { ok: false, reason: "no_userId" };
 
   const entry = {
     ts: new Date().toISOString(),
     source: safeStr(source) || "webhook",
     event: safeStr(event),
-    waId: wa,
+    userId: userRef,
+    waId: safeStr(waId),
     payment: pickPayment(payment),
     subscription: pickSubscription(subscription),
   };
@@ -76,20 +81,21 @@ export async function recordAsaasEvent({ event, waId, payment, subscription, sou
   await redisLPush(KEY_EVENTS_GLOBAL, json);
   await redisLTrim(KEY_EVENTS_GLOBAL, 0, 1999);
 
-  const userKey = keyUserEvents(wa);
+  const userKey = keyUserEvents(userRef);
   await redisLPush(userKey, json);
   await redisLTrim(userKey, 0, 499);
 
   return { ok: true };
 }
 
-export async function listAsaasEvents({ waId = "", offset = 0, limit = 50 } = {}) {
+export async function listAsaasEvents({ userId = "", waId = "", offset = 0, limit = 50 } = {}) {
   const off = Math.max(0, Number(offset) || 0);
   const lim = Math.min(200, Math.max(1, Number(limit) || 50));
   const start = off;
   const stop = off + lim - 1;
 
-  const key = waId ? keyUserEvents(String(waId).trim()) : KEY_EVENTS_GLOBAL;
+  const userRef = normalizeLedgerUserRef({ userId, waId });
+  const key = userRef ? keyUserEvents(userRef) : KEY_EVENTS_GLOBAL;
   const rows = await redisLRange(key, start, stop);
 
   const items = [];
