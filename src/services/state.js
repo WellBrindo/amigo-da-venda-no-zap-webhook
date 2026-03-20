@@ -1476,15 +1476,10 @@ export async function resetUserAsNew(waId) {
   // best-effort: apaga todas as chaves conhecidas
   await Promise.allSettled(keys.map((k) => redisDel(k)));
 
-  // ✅ Garante defaults mínimos IMEDIATAMENTE (evita "Sem plano" após reset)
-  await indexUser(id);
-  await redisSet(keyStatus(id), "TRIAL");
-  await redisSet(keyTemplateMode(id), "FIXED");
-  await redisSet(keyTemplatePrompted(id), "0");
-  await redisSet(keyTrialUsed(id), "0");
-  await redisSet(keyQuotaUsed(id), "0");
+  // remove do índice para que o usuário só volte a existir quando reentrar no fluxo
+  await redisSRem(USERS_INDEX_KEY, id).catch(() => null);
 
-  return { ok: true, waId: id, deletedKeys: keys.length };
+  return { ok: true, userId: id, waId: id, deletedKeys: keys.length };
 }
 
 // ===================== SNAPSHOT =====================
