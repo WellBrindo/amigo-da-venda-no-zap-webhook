@@ -84,6 +84,8 @@ import {
   getActivityMeta,
   setLastInboundAt,
   setFloodMeta,
+  armPostAdIdleReminder,
+  clearPostAdIdleReminder,
   getGrowthMeta,
   setGrowthMeta,
   markUserAdCreated,
@@ -2989,6 +2991,7 @@ export async function handleInboundText({ waId, text }) {
   if (!id || !inbound) return noReply();
 
   await ensureUserExists(id);
+  await clearPostAdIdleReminder(id);
 
   const currentStatus = await getUserStatus(id);
   const activity = await trackInboundActivity({ waId: id, status: currentStatus });
@@ -4255,7 +4258,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     await setUserStatus(id, ST.WAIT_FEEDBACK_RESPONSE);
     growthMessages.push(await msgFeedbackAsk(id));
   } else {
-    growthMessages.push(await msgRetentionSignoff(id));
+    await armPostAdIdleReminder(id, "REFINE_OR_OK");
   }
 
   return replyMulti([formattedAd, ...followups, ...growthMessages]);
