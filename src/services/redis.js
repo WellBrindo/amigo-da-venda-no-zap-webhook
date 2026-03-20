@@ -203,3 +203,46 @@ export async function redisZRangeByScore(key, min, max, limit = 1000) {
     )}/LIMIT/0/${encodeURIComponent(String(limit))}`
   );
 }
+
+// -----------------
+// Identity Keys
+// -----------------
+
+function requireKeyPart(name, value) {
+  const part = String(value ?? "").trim();
+  if (!part) throw new Error(`redis key part "${name}" is required`);
+  return part;
+}
+
+export function redisUserSequenceKey() {
+  return "seq:user";
+}
+
+export function redisUserKey(userId, suffix = "") {
+  const uid = requireKeyPart("userId", userId);
+  const tail = String(suffix ?? "").trim();
+  return tail ? `user:${uid}:${tail}` : `user:${uid}`;
+}
+
+export function redisUserIdentifiersKey(userId) {
+  return redisUserKey(userId, "identifiers");
+}
+
+export function redisAliasKey(kind, value) {
+  const k = requireKeyPart("kind", kind).toLowerCase();
+  const v = requireKeyPart("value", value);
+  return `alias:${k}:${v}`;
+}
+
+export function redisAliasWaIdKey(waId) {
+  return redisAliasKey("waid", waId);
+}
+
+export function redisAliasBsuidKey(bsuid) {
+  return redisAliasKey("bsuid", bsuid);
+}
+
+export async function redisNextUserSequence() {
+  return redisIncrBy(redisUserSequenceKey(), 1);
+}
+
