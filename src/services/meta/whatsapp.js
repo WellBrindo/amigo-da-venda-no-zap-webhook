@@ -6,16 +6,28 @@ function assertMetaEnv() {
   if (!PHONE_NUMBER_ID) throw new Error("Missing PHONE_NUMBER_ID");
 }
 
-export async function sendWhatsAppText({ to, text }) {
+function normalizeRecipientInput(input) {
+  if (!input) return null;
+  if (typeof input === "string") return input;
+  if (typeof input !== "object") return null;
+  if (input.recipient) return input.recipient;
+  if (input.deliveryId) return input.deliveryId;
+  if (input.waId) return input.waId;
+  return null;
+}
+
+export async function sendWhatsAppText({ to, recipient, text }) {
   assertMetaEnv();
-  if (!to) throw new Error("Missing recipient 'to'");
+
+  const finalTo = normalizeRecipientInput(recipient ?? to);
+  if (!finalTo) throw new Error("Missing recipient 'to'");
   if (!text) throw new Error("Missing 'text'");
 
   const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
 
   const payload = {
     messaging_product: "whatsapp",
-    to: String(to),
+    to: String(finalTo),
     type: "text",
     text: { body: String(text) },
   };
