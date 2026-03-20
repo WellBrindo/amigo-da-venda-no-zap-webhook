@@ -9,6 +9,7 @@
 import {
   redisGet,
   redisSet,
+  redisDel,
   redisUserIdentifiersKey,
   redisAliasWaIdKey,
   redisAliasBsuidKey,
@@ -180,6 +181,20 @@ export async function getUserIdentifiers(internalUserId) {
   const userId = safeStr(internalUserId);
   if (!userId) return null;
   return readIdentifiersRecord(userId);
+}
+
+export async function deleteIdentityForUser(internalUserId) {
+  const userId = safeStr(internalUserId);
+  if (!userId) throw new Error("internalUserId required");
+
+  const identifiers = await getUserIdentifiers(userId);
+  const jobs = [redisDel(redisUserIdentifiersKey(userId))];
+
+  if (identifiers?.waId) jobs.push(redisDel(redisAliasWaIdKey(identifiers.waId)));
+  if (identifiers?.bsuid) jobs.push(redisDel(redisAliasBsuidKey(identifiers.bsuid)));
+
+  await Promise.allSettled(jobs);
+  return { ok: true, userId, waId: identifiers?.waId || null, bsuid: identifiers?.bsuid || null };
 }
 
 export async function linkWaIdToUser(internalUserId, waId) {
