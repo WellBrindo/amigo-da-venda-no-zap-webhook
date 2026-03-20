@@ -15,6 +15,7 @@
  * Regras:
  * - Nunca logar CPF/CNPJ.
  * - Sem gambiarras: fluxo por status + funções pequenas e claras.
+ * - O identificador recebido aqui é tratado como referência canônica interna do usuário.
  */
 
 import { generateAdText } from "./openai/generate.js";
@@ -2984,8 +2985,8 @@ async function trackInboundActivity({ waId, status }) {
   };
 }
 
-export async function handleInboundText({ waId, text }) {
-  const id = cleanText(waId);
+export async function handleInboundText({ waId, userId, text }) {
+  const id = cleanText(userId || waId);
   const inbound = cleanText(text);
 
   if (!id || !inbound) return noReply();
@@ -2995,7 +2996,7 @@ export async function handleInboundText({ waId, text }) {
 
   const currentStatus = await getUserStatus(id);
   const activity = await trackInboundActivity({ waId: id, status: currentStatus });
-  const outcome = await handleInboundTextCore({ waId: id, text: inbound });
+  const outcome = await handleInboundTextCore({ userId: id, text: inbound });
 
   const prefixes = [];
   if (activity.shouldWarnFlood) {
@@ -3008,8 +3009,8 @@ export async function handleInboundText({ waId, text }) {
   return prependReplies(outcome, prefixes);
 }
 
-async function handleInboundTextCore({ waId, text }) {
-  const id = cleanText(waId);
+async function handleInboundTextCore({ waId, userId, text }) {
+  const id = cleanText(userId || waId);
   const inbound = cleanText(text);
 
   if (!id || !inbound) return noReply();
@@ -3080,7 +3081,7 @@ async function handleInboundTextCore({ waId, text }) {
       } else {
         await setUserStatus(id, ST.WAIT_PRODUCT);
       }
-      return await handleInboundTextCore({ waId: id, text: inbound });
+      return await handleInboundTextCore({ userId: id, text: inbound });
     }
 
     if (choice === "1") {
