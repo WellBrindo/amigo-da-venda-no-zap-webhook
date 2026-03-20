@@ -5,6 +5,7 @@ import { Router } from "express";
 import { touch24hWindow } from "../services/window24h.js";
 import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { handleInboundText } from "../services/flow.js";
+import { resolveOrCreateUserFromInbound } from "../services/identity.js";
 import { processPendingForWaId } from "../services/broadcast.js";
 import { redisGet, redisSet, redisExpire } from "../services/redis.js";
 
@@ -51,8 +52,18 @@ export function webhookRouter() {
           const messages = Array.isArray(value.messages) ? value.messages : [];
 
           for (const msg of messages) {
-            const waId = msg?.from || value?.contacts?.[0]?.wa_id || "";
-            if (!waId) continue;
+            const rawWaId = String(msg?.from || value?.contacts?.[0]?.wa_id || "").trim();
+            const identity = await resolveOrCreateUserFromInbound({
+              value,
+              message: msg,
+              messages: [msg],
+              waId: rawWaId || null,
+            });
+            const internalUserId = String(identity?.internalUserId || "").trim();
+            const inboundWaId = String(identity?.inbound?.waId || rawWaId || "").trim();
+            const inboundBsuid = String(identity?.inbound?.bsuid || "").trim();
+            const deliveryId = String(identity?.inbound?.deliveryId || inboundWaId || inboundBsuid || "").trim();
+            if (!internalUserId || !deliveryId) continue;
             // ✅ Deduplicação (Meta pode reenviar o mesmo message.id)
             const messageId = String(msg?.id || "").trim();
             if (messageId) {
@@ -67,7 +78,9 @@ export function webhookRouter() {
                   JSON.stringify({
                     level: "warn",
                     tag: "wa_dedupe_failed",
-                    waId: String(waId),
+                    waId: inboundWaId || null,
+                    bsuid: inboundBsuid || null,
+                    internalUserId,
                     messageId,
                     error: String(err?.message || err),
                   })
@@ -76,18 +89,24 @@ export function webhookRouter() {
             }
 
             // 1) marca janela 24h
-            await touch24hWindow(String(waId));
+            if (inboundWaId) {
+              await touch24hWindow(inboundWaId);
+            }
 
             // ✅ 1.1) processa campanhas pendentes (padronizado em broadcast.js)
             // (não interfere no fluxo: envia mensagens adicionais se houver)
             try {
-              await processPendingForWaId(String(waId));
+              if (inboundWaId) {
+                await processPendingForWaId(inboundWaId);
+              }
             } catch (err) {
               console.warn(
                 JSON.stringify({
                   level: "warn",
                   tag: "process_pending_campaigns_failed",
-                  waId: String(waId),
+                  waId: inboundWaId || null,
+                  bsuid: inboundBsuid || null,
+                  internalUserId,
                   error: String(err?.message || err),
                 })
               );
@@ -101,7 +120,7 @@ export function webhookRouter() {
             if (!inboundText) continue;
 
             // 3) roteia para o motor de fluxo
-            const r = await handleInboundText({ waId: String(waId), text: inboundText });
+            const r = await handleInboundText({ waId: internalUserId, text: inboundText });
 
             // 4) responde se necessário (suporta múltiplas mensagens)
             if (r?.shouldReply) {
@@ -114,13 +133,15 @@ export function webhookRouter() {
                 if (!msgText) continue;
 
                 try {
-                  await sendWhatsAppText({ to: String(waId), text: msgText });
+                  await sendWhatsAppText({ to: deliveryId, text: msgText });
                 } catch (err) {
                   console.warn(
                     JSON.stringify({
                       level: "warn",
                       tag: "send_whatsapp_reply_failed",
-                      waId: String(waId),
+                      waId: inboundWaId || null,
+                    bsuid: inboundBsuid || null,
+                    internalUserId,
                       error: String(err?.message || err),
                     })
                   );
