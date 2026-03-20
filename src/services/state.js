@@ -14,6 +14,7 @@ import {
   redisSMembers,
   redisSRem,
   redisType,
+  redisUserKey,
 } from "./redis.js";
 
 /**
@@ -25,76 +26,80 @@ import {
  * - Snapshot do admin NUNCA deve expor documento completo.
  *
  * Chaves:
- * - user:{waId}:status           => TRIAL | ACTIVE | PAYMENT_PENDING | BLOCKED
- * - user:{waId}:plan             => plano (ex: DE_VEZ_EM_QUANDO)
- * - user:{waId}:quotaUsed        => uso no mês (ACTIVE)
- * - user:{waId}:trialUsed        => uso no trial (TRIAL)
- * - user:{waId}:lastPrompt       => última descrição enviada (para "alterações")
- * - user:{waId}:templateMode     => FIXED | FREE
- * - user:{waId}:fullName         => nome completo
- * - user:{waId}:docType          => CPF | CNPJ
- * - user:{waId}:docLast4         => últimos 4 dígitos
- * - user:{waId}:paymentMethod    => CARD | PIX
- * - user:{waId}:asaasCustomerId  => id do cliente no Asaas (cus_...)
- * - user:{waId}:asaasSubscriptionId => id assinatura (quando existir)
+ * - user:{internalUserId}:status  => TRIAL | ACTIVE | PAYMENT_PENDING | BLOCKED
+ * - user:{internalUserId}:plan    => plano (ex: DE_VEZ_EM_QUANDO)
+ * - user:{internalUserId}:quotaUsed => uso no mês (ACTIVE)
+ * - user:{internalUserId}:trialUsed => uso no trial (TRIAL)
+ * - user:{internalUserId}:lastPrompt => última descrição enviada (para "alterações")
+ * - user:{internalUserId}:templateMode => FIXED | FREE
+ * - user:{internalUserId}:fullName => nome completo
+ * - user:{internalUserId}:docType => CPF | CNPJ
+ * - user:{internalUserId}:docLast4 => últimos 4 dígitos
+ * - user:{internalUserId}:paymentMethod => CARD | PIX
+ * - user:{internalUserId}:asaasCustomerId => id do cliente no Asaas (cus_...)
+ * - user:{internalUserId}:asaasSubscriptionId => id assinatura (quando existir)
  *
  * Índice:
- * - users:index (SET) => lista de waIds para o admin
+ * - users:index (SET) => lista de internalUserIds/aliases em transição para o admin
  */
 
 // ===================== Helpers =====================
 const USERS_INDEX_KEY = "users:index";
 
-const keyStatus = (waId) => `user:${waId}:status`;
-const keyPlan = (waId) => `user:${waId}:plan`;
-const keyQuotaUsed = (waId) => `user:${waId}:quotaUsed`;
-const keyTrialUsed = (waId) => `user:${waId}:trialUsed`;
-const keyLastPrompt = (waId) => `user:${waId}:lastPrompt`;
-const keyTemplateMode = (waId) => `user:${waId}:templateMode`;
-// ✅ controle: pergunta de template (FIXO/LIVRE) só na 1ª descrição
-const keyTemplatePrompted = (waId) => `user:${waId}:templatePrompted`;
+function normalizeUserRef(userRef) {
+  return safeStr(userRef);
+}
 
-const keyFullName = (waId) => `user:${waId}:fullName`;
+const keyStatus = (userId) => redisUserKey(userId, "status");
+const keyPlan = (userId) => redisUserKey(userId, "plan");
+const keyQuotaUsed = (userId) => redisUserKey(userId, "quotaUsed");
+const keyTrialUsed = (userId) => redisUserKey(userId, "trialUsed");
+const keyLastPrompt = (userId) => redisUserKey(userId, "lastPrompt");
+const keyTemplateMode = (userId) => redisUserKey(userId, "templateMode");
+// ✅ controle: pergunta de template (FIXO/LIVRE) só na 1ª descrição
+const keyTemplatePrompted = (userId) => redisUserKey(userId, "templatePrompted");
+
+const keyFullName = (userId) => redisUserKey(userId, "fullName");
 
 // ✅ doc (MASCARADO)
-const keyDocType = (waId) => `user:${waId}:docType`;
-const keyDocLast4 = (waId) => `user:${waId}:docLast4`;
+const keyDocType = (userId) => redisUserKey(userId, "docType");
+const keyDocLast4 = (userId) => redisUserKey(userId, "docLast4");
 
 // ⚠️ legado (não usar mais, mas migrar se existir)
-const keyDocLegacy = (waId) => `user:${waId}:docDigits`;
+const keyDocLegacy = (userId) => redisUserKey(userId, "docDigits");
 
-const keyPaymentMethod = (waId) => `user:${waId}:paymentMethod`;
+const keyPaymentMethod = (userId) => redisUserKey(userId, "paymentMethod");
 
 // ✅ Dados fiscais para emissão (sem CPF completo)
-const keyBillingCityState = (waId) => `user:${waId}:billingCityState`;
-const keyBillingAddress = (waId) => `user:${waId}:billingAddress`;
+const keyBillingCityState = (userId) => redisUserKey(userId, "billingCityState");
+const keyBillingAddress = (userId) => redisUserKey(userId, "billingAddress");
 
-const keyAsaasCustomerId = (waId) => `user:${waId}:asaasCustomerId`;
-const keyAsaasSubscriptionId = (waId) => `user:${waId}:asaasSubscriptionId`;
+const keyAsaasCustomerId = (userId) => redisUserKey(userId, "asaasCustomerId");
+const keyAsaasSubscriptionId = (userId) => redisUserKey(userId, "asaasSubscriptionId");
 
 
 // ===================== MENU (bot) =====================
-const keyMenuPrevStatus = (waId) => `user:${waId}:menuPrevStatus`;
-const keyMenuEditContext = (waId) => `user:${waId}:menuEditContext`;
+const keyMenuPrevStatus = (userId) => redisUserKey(userId, "menuPrevStatus");
+const keyMenuEditContext = (userId) => redisUserKey(userId, "menuEditContext");
 
 // ===================== CARD (assinatura) =====================
 // Data (YYYY-MM-DD) até quando o usuário mantém acesso após cancelar recorrência.
-const keyCardValidUntil = (waId) => `user:${waId}:cardValidUntil`;
+const keyCardValidUntil = (userId) => redisUserKey(userId, "cardValidUntil");
 // Timestamp ISO de quando o usuário cancelou (auditoria leve).
-const keyCardCanceledAt = (waId) => `user:${waId}:cardCanceledAt`;
+const keyCardCanceledAt = (userId) => redisUserKey(userId, "cardCanceledAt");
 // ===================== BIZ PROFILE (auto preenchimento) =====================
 // Perfil salvo de dados da empresa (nome/atendimento/local/horário/whatsapp etc)
-const keyBizProfile = (waId) => `user:${waId}:bizProfile`;
+const keyBizProfile = (userId) => redisUserKey(userId, "bizProfile");
 // Perfil pendente (sugestão detectada) aguardando confirmação do usuário
-const keyPendingBizProfile = (waId) => `user:${waId}:pendingBizProfile`;
+const keyPendingBizProfile = (userId) => redisUserKey(userId, "pendingBizProfile");
 // Sessão do anúncio atual (complemento estruturado / intake de categoria)
-const keyCurrentAdSession = (waId) => `user:${waId}:currentAdSession`;
+const keyCurrentAdSession = (userId) => redisUserKey(userId, "currentAdSession");
 // Status anterior (para estados transitórios como escolha de template / salvar perfil)
-const keyPrevStatus = (waId) => `user:${waId}:prevStatus`;
+const keyPrevStatus = (userId) => redisUserKey(userId, "prevStatus");
 // Metadados operacionais leves (inatividade / flood)
-const keyActivityMeta = (waId) => `user:${waId}:activityMeta`;
+const keyActivityMeta = (userId) => redisUserKey(userId, "activityMeta");
 // Metadados de engajamento/recorrência (progresso / feedback / indicação / anúncio do dia)
-const keyGrowthMeta = (waId) => `user:${waId}:growthMeta`;
+const keyGrowthMeta = (userId) => redisUserKey(userId, "growthMeta");
 
 
 function safeStr(v) {
@@ -474,8 +479,8 @@ function maskDocFromParts(docType, docLast4) {
 
 // ✅ AGORA É EXPORTADA (para window24h.js importar corretamente)
 // ✅ V16.4.1: migração segura do índice users:index quando legado estiver como STRING (ou outro tipo)
-export async function indexUser(waId) {
-  const id = safeStr(waId);
+export async function indexUser(userRef) {
+  const id = normalizeUserRef(userRef);
   if (!id) return false;
 
   // Detecta tipo do índice antes de usar SADD (evita WRONGTYPE)
@@ -489,7 +494,7 @@ export async function indexUser(waId) {
         level: "warn",
         tag: "users_index_type_check_failed",
         key: USERS_INDEX_KEY,
-        waId: id,
+        userRef: id,
         error: safeStr(err?.message || err),
       })
     );
@@ -508,7 +513,7 @@ export async function indexUser(waId) {
         action: "del_and_recreate_as_set",
         key: USERS_INDEX_KEY,
         previousType: t,
-        waId: id,
+        userRef: id,
       })
     );
     await redisDel(USERS_INDEX_KEY);
@@ -519,9 +524,9 @@ export async function indexUser(waId) {
 }
 
 // ===================== Ensure =====================
-export async function ensureUserExists(waId) {
-  const id = safeStr(waId);
-  if (!id) throw new Error("waId required");
+export async function ensureUserExists(userRef) {
+  const id = normalizeUserRef(userRef);
+  if (!id) throw new Error("userRef required");
 
   await indexUser(id);
 
@@ -559,6 +564,10 @@ export async function ensureUserExists(waId) {
 export async function listUsers() {
   const ids = await redisSMembers(USERS_INDEX_KEY);
   return Array.isArray(ids) ? ids : [];
+}
+
+export async function listUserIds() {
+  return listUsers();
 }
 
 // ===================== Status / Plan =====================
@@ -678,8 +687,8 @@ export async function clearLastPrompt(waId) {
 
 
 // ===================== Last Ad (for refinements) =====================
-function keyLastAd(waId) {
-  return `user:${waId}:lastAd`;
+function keyLastAd(userId) {
+  return redisUserKey(userId, "lastAd");
 }
 
 export async function getLastAd(waId) {
@@ -708,8 +717,8 @@ export async function clearLastAd(waId) {
 }
 
 // ===================== Refinement Count =====================
-function keyRefineCount(waId) {
-  return `user:${waId}:refineCount`;
+function keyRefineCount(userId) {
+  return redisUserKey(userId, "refineCount");
 }
 
 export async function getRefineCount(waId) {
@@ -1431,7 +1440,7 @@ export async function resetUserToTrial(waId) {
 // - Não mexe em métricas/copy/window24h (isso é feito por módulos específicos)
 export async function resetUserAsNew(waId) {
   const id = safeStr(waId);
-  if (!id) throw new Error("waId required");
+  if (!id) throw new Error("userRef required");
 
   const keys = [
     keyStatus(id),
@@ -1531,6 +1540,7 @@ export async function getUserSnapshot(waId) {
   ]);
 
   return {
+    userId: waId,
     waId,
     status,
     plan,
