@@ -80,6 +80,7 @@ import {
   getInternalUserIdByWaId,
   getUserIdentifiers,
   getPreferredOutboundRecipient,
+  deleteIdentityForUser,
 } from "../services/identity.js";
 
 
@@ -8027,7 +8028,7 @@ router.get("/window24h-ui", async (req, res) => {
     }
   });
 
-  // 🧹 Reset TOTAL (número de teste): remove estado, métricas, janela 24h e overrides de copy
+  // 🧹 Reset TOTAL (número de teste): remove estado, identidade, métricas, janela 24h e overrides de copy
   router.get('/state-test/reset-user', async (req, res) => {
     try {
       const userId = await requireUserRef(req);
@@ -8037,6 +8038,7 @@ router.get("/window24h-ui", async (req, res) => {
       ]);
 
       const st = await resetUserAsNew(userId);
+      const identity = await deleteIdentityForUser(userId).catch((err) => ({ ok: false, error: String(err?.message || err) }));
 
       const w = identifiers?.waId
         ? await clear24hWindowForUser(identifiers.waId).catch((err) => ({ ok: false, error: String(err?.message || err) }))
@@ -8051,12 +8053,15 @@ router.get("/window24h-ui", async (req, res) => {
         for (const k of (copyKeys || [])) {
           await delCopyUser(userId, k).catch(() => null);
           copyDeleted++;
+          if (identifiers?.waId && identifiers.waId !== userId) {
+            await delCopyUser(identifiers.waId, k).catch(() => null);
+            copyDeleted++;
+          }
         }
       } catch (err) {
         // ignore (best-effort)
       }
 
-      const afterUser = await getUserSnapshot(userId);
       await safeRecordAdminAudit(req, {
         module: "state",
         action: "RESET_USER_TOTAL",
@@ -8064,10 +8069,11 @@ router.get("/window24h-ui", async (req, res) => {
         targetId: userId,
         summary: `Executou reset total do usuário ${userId}.`,
         before: buildAuditUserSnapshot(beforeUser),
-        after: buildAuditUserSnapshot(afterUser),
+        after: { reset: true },
         meta: {
           userId,
           state: st,
+          identity,
           window24h: w,
           metrics: m,
           copyDeleted,
@@ -8079,10 +8085,11 @@ router.get("/window24h-ui", async (req, res) => {
         userId,
         waId: identifiers?.waId || beforeUser?.waId || "",
         state: st,
+        identity,
         window24h: w,
         metrics: m,
         copy: { ok: true, keys: copyKeys?.length || 0, deleted: copyDeleted },
-        note: 'Após esse reset, o usuário volta a ser “novo”. O snapshot (Consultar) recria defaults (TRIAL/FIXED).',
+        note: 'Reset TOTAL concluído. O usuário só será recriado quando voltar a interagir com o sistema.',
       });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
