@@ -49,6 +49,17 @@ import {
   getSystemAlertsCount,
 } from "../services/plans.js";
 
+import {
+  listCoupons,
+  getCoupon,
+  upsertCoupon,
+  setCouponActive,
+  deleteCoupon,
+  listCouponReservations,
+  listCouponReportRows,
+  getCouponUsageSummary,
+} from "../services/coupons.js";
+
 import { createCampaignAndDispatch, listCampaigns, getCampaign } from "../services/broadcast.js";
 
 import {
@@ -280,6 +291,7 @@ function renderSidebar(activePath){
         ${item("/admin/dashboard", "Dashboard", "📈")}
         ${item("/admin/executive-ui", "Dashboard Executivo", "🧠")}
         ${item("/admin/plans", "Planos", "💳")}
+        ${item("/admin/coupons", "Cupons", "🏷️")}
       </details>
 
       <details open>
@@ -307,6 +319,7 @@ function renderSidebar(activePath){
       <details ${reportsOpen ? "open" : ""}>
         <summary>📑 Relatórios <span>▾</span></summary>
         ${item("/admin/reports-ui", "Relatórios e Exportação", "📑")}
+        ${item("/admin/coupon-report-ui", "Relatório de Cupons", "🏷️")}
       </details>
 
       <details ${systemOpen ? "open" : ""}>
@@ -550,9 +563,9 @@ function adminHasPermission(session, permission) {
 function getAdminRequiredPermission(pathname) {
   const path = String(pathname || "").trim();
   if (!path || path === "/" || path.startsWith("/dashboard") || path.startsWith("/executive")) return "dashboard.view";
-  if (path.startsWith("/reports") || path.startsWith("/export")) return "reports.view";
+  if (path.startsWith("/reports") || path.startsWith("/export") || path.startsWith("/coupon-report")) return "reports.view";
   if (path.startsWith("/users") || path.startsWith("/crm") || path.startsWith("/bulk") || path.startsWith("/window24h") || path.startsWith("/feedback")) return "users.manage";
-  if (path.startsWith("/plans") || path.startsWith("/health-plans")) return "plans.manage";
+  if (path.startsWith("/plans") || path.startsWith("/health-plans") || path.startsWith("/coupons")) return "plans.manage";
   if (path.startsWith("/finance") || path.startsWith("/api/finance") || path.startsWith("/asaas-test") || path.startsWith("/api/asaas")) return "finance.view";
   if (path.startsWith("/broadcast") || path.startsWith("/campaigns")) return "marketing.manage";
   if (path.startsWith("/copy")) return "copy.manage";
@@ -1220,6 +1233,180 @@ async function buildExportAuditRows() {
     before: JSON.stringify(item?.before || {}),
     after: JSON.stringify(item?.after || {}),
     meta: JSON.stringify(item?.meta || {}),
+  }));
+}
+
+function normalizeAdminBool(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return !!fallback;
+  if (typeof value === "boolean") return value;
+  const text = String(value).trim().toLowerCase();
+  return ["1", "true", "on", "yes", "sim"].includes(text);
+}
+
+function normalizeAdminInt(value, fallback = 0, { min = null, max = null } = {}) {
+  let out = Number.isFinite(Number(value)) ? Math.trunc(Number(value)) : Math.trunc(Number(fallback) || 0);
+  if (Number.isFinite(min)) out = Math.max(Number(min), out);
+  if (Number.isFinite(max)) out = Math.min(Number(max), out);
+  return out;
+}
+
+function parseAdminList(value) {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(value.map((item) => String(item || "").trim()).filter(Boolean)));
+  }
+  const text = String(value || "").trim();
+  if (!text) return [];
+  return Array.from(new Set(text.split(/[\n,;]+/).map((item) => String(item || "").trim()).filter(Boolean)));
+}
+
+function normalizeAdminCouponCode(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function parseAdminDateMs(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function formatDateTimeLabel(value) {
+  const n = Number(value || 0);
+  if (!n) return "";
+  try {
+    return new Date(n).toLocaleString("pt-BR");
+  } catch (_) {
+    return String(value || "");
+  }
+}
+
+function formatCouponCycles(cycles) {
+  const list = Array.isArray(cycles) ? cycles : [];
+  if (!list.length) return "Todos";
+  return list.map((cycle) => cycle === "annual" ? "Anual" : cycle === "monthly" ? "Mensal" : String(cycle || "")).join(", ");
+}
+
+function formatCouponPlans(plans) {
+  const list = Array.isArray(plans) ? plans : [];
+  return list.length ? list.join(", ") : "Todos";
+}
+
+function formatCouponDiscount(coupon) {
+  const type = String(coupon?.discountType || "").trim();
+  const value = Number(coupon?.discountValue || 0);
+  const cap = Number(coupon?.discountCap || 0);
+  if (type === "percent") {
+    return cap > 0 ? `${value}% (teto ${formatMoneyCents(cap)})` : `${value}%`;
+  }
+  return formatMoneyCents(value);
+}
+
+function buildCouponFormInput(input = {}) {
+  return {
+    couponCode: normalizeAdminCouponCode(input.couponCode || input.code),
+    name: String(input.name || "").trim(),
+    description: String(input.description || "").trim(),
+    active: normalizeAdminBool(input.active, true),
+    discountType: String(input.discountType || "percent").trim().toLowerCase() === "fixed" ? "fixed" : "percent",
+    discountValue: normalizeAdminInt(input.discountValue, 0, { min: 0 }),
+    discountCap: normalizeAdminInt(input.discountCap, 0, { min: 0 }),
+    eligiblePlanCodes: parseAdminList(input.eligiblePlanCodes || input.eligiblePlans || input.planCodes),
+    eligibleBillingCycles: parseAdminList(input.eligibleBillingCycles || input.eligibleCycles || input.billingCycles)
+      .map((cycle) => String(cycle || "").trim().toLowerCase())
+      .filter((cycle) => cycle === "monthly" || cycle === "annual"),
+    validFrom: parseAdminDateMs(input.validFrom),
+    validUntil: parseAdminDateMs(input.validUntil),
+    maxUsesTotal: normalizeAdminInt(input.maxUsesTotal, 0, { min: 0 }),
+    maxUsesPerUser: normalizeAdminInt(input.maxUsesPerUser, 0, { min: 0 }),
+    firstPurchaseOnly: normalizeAdminBool(input.firstPurchaseOnly, false),
+    onlyWithoutActivePlan: normalizeAdminBool(input.onlyWithoutActivePlan, false),
+    appliesTo: String(input.appliesTo || "first_charge_only").trim() === "entire_subscription" ? "entire_subscription" : "first_charge_only",
+  };
+}
+
+async function buildCouponReportData(query = {}) {
+  const [coupons, rows, reservations] = await Promise.all([
+    listCoupons({ includeInactive: true, includeDeleted: false }).catch(() => []),
+    listCouponReportRows({
+      limit: normalizeAdminInt(query.limit, 1000, { min: 1, max: 5000 }),
+      couponCode: normalizeAdminCouponCode(query.couponCode || ""),
+      internalUserId: String(query.userId || query.internalUserId || "").trim(),
+      status: String(query.status || "").trim(),
+      planCode: String(query.planCode || "").trim().toUpperCase(),
+      billingCycle: String(query.billingCycle || "").trim().toLowerCase(),
+    }).catch(() => []),
+    listCouponReservations({
+      limit: normalizeAdminInt(query.limit, 1000, { min: 1, max: 5000 }),
+      couponCode: normalizeAdminCouponCode(query.couponCode || ""),
+      internalUserId: String(query.userId || query.internalUserId || "").trim(),
+      status: String(query.status || "").trim(),
+    }).catch(() => []),
+  ]);
+
+  const couponList = Array.isArray(coupons) ? coupons : [];
+  const reportRows = Array.isArray(rows) ? rows : [];
+  const reservationRows = Array.isArray(reservations) ? reservations : [];
+
+  const summary = {
+    totalCoupons: couponList.length,
+    totalRows: reportRows.length,
+    totalReservations: reservationRows.length,
+    totalOriginalCents: 0,
+    totalDiscountCents: 0,
+    totalFinalCents: 0,
+    byStatus: {},
+    byCycle: {},
+    byPlan: {},
+  };
+
+  for (const row of reportRows) {
+    const status = String(row?.status || "").trim() || "unknown";
+    const cycle = String(row?.billingCycle || "").trim() || "unknown";
+    const planCode = String(row?.planCode || "").trim() || "unknown";
+    summary.byStatus[status] = (summary.byStatus[status] || 0) + 1;
+    summary.byCycle[cycle] = (summary.byCycle[cycle] || 0) + 1;
+    summary.byPlan[planCode] = (summary.byPlan[planCode] || 0) + 1;
+    summary.totalOriginalCents += Number(row?.originalCents || row?.basePriceCents || 0);
+    summary.totalDiscountCents += Number(row?.discountCents || row?.discountAmountCents || 0);
+    summary.totalFinalCents += Number(row?.finalCents || row?.finalPriceCents || 0);
+  }
+
+  const couponCards = [];
+  for (const coupon of couponList) {
+    const usage = await getCouponUsageSummary(normalizeAdminCouponCode(coupon?.couponCode || coupon?.code || "")).catch(() => null);
+    couponCards.push({
+      coupon,
+      usage,
+    });
+  }
+
+  return {
+    ok: true,
+    ts: Date.now(),
+    summary,
+    coupons: couponCards,
+    rows: reportRows,
+    reservations: reservationRows,
+  };
+}
+
+async function buildExportCouponRows(query = {}) {
+  const data = await buildCouponReportData(query);
+  return (Array.isArray(data.rows) ? data.rows : []).map((row) => ({
+    couponCode: String(row?.couponCode || ""),
+    internalUserId: String(row?.internalUserId || ""),
+    reservationId: String(row?.reservationId || row?.id || ""),
+    status: String(row?.status || ""),
+    planCode: String(row?.planCode || ""),
+    billingCycle: String(row?.billingCycle || ""),
+    appliesTo: String(row?.appliesTo || ""),
+    originalCents: Number(row?.originalCents || row?.basePriceCents || 0),
+    discountCents: Number(row?.discountCents || row?.discountAmountCents || 0),
+    finalCents: Number(row?.finalCents || row?.finalPriceCents || 0),
+    paymentId: String(row?.paymentId || ""),
+    subscriptionId: String(row?.subscriptionId || ""),
+    ts: String(row?.ts || row?.createdAt || row?.updatedAt || ""),
+    meta: JSON.stringify(row?.meta || {}),
   }));
 }
 
@@ -5550,6 +5737,136 @@ async function toggle(code, active){
     }
   });
 
+
+  router.get("/export/coupons", async (req, res) => {
+    try {
+      const format = normalizeExportFormat(req.query?.format);
+      const rows = await buildExportCouponRows(req.query || {});
+      if (format === "json") {
+        return sendExport(res, "amigo_cupons", "json", { ok: true, exportedAt: new Date().toISOString(), count: rows.length, items: rows });
+      }
+      return sendExport(res, "amigo_cupons", format, rows, { title: "Relatório de Cupons" });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/coupon-report/data", async (req, res) => {
+    try {
+      const data = await buildCouponReportData(req.query || {});
+      return res.json(data);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/coupon-report-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad" style="margin-bottom:14px;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">🏷️ Relatório de Cupons</h3>
+            <div class="muted">Visão consolidada de cupons, reservas, status, impacto financeiro e exportação.</div>
+          </div>
+          <div class="row">
+            <a class="pill" href="/admin/coupons">Produto → Cupons</a>
+            <a class="pill" href="/admin/reports-ui">Central de Relatórios</a>
+            <button type="button" class="primary" id="couponReportReloadBtn">Atualizar</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid cols3">
+        <div class="kpi"><div class="t">Cupons cadastrados</div><div class="v" id="crTotalCoupons">—</div><div class="muted">Base ativa + inativa</div></div>
+        <div class="kpi"><div class="t">Reservas registradas</div><div class="v" id="crTotalReservations">—</div><div class="muted">Inclui reservas e usos</div></div>
+        <div class="kpi"><div class="t">Desconto concedido</div><div class="v" id="crDiscount">—</div><div class="muted" id="crRevenue">—</div></div>
+      </div>
+
+      <div class="card pad" style="margin-top:14px;">
+        <div class="row" style="justify-content:space-between;">
+          <h4 style="margin:0;">Exportações rápidas</h4>
+          <span class="muted">CSV, Excel, PDF ou JSON</span>
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <a class="pill" href="/admin/export/coupons?format=csv">CSV</a>
+          <a class="pill" href="/admin/export/coupons?format=excel">Excel</a>
+          <a class="pill" href="/admin/export/coupons?format=pdf">PDF</a>
+          <a class="pill" href="/admin/export/coupons?format=json">JSON</a>
+        </div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Resumo por cupom</h4><span class="muted">Uso e elegibilidade</span></div>
+          <div class="hr"></div>
+          <div style="overflow:auto;"><table><thead><tr><th>Código</th><th>Nome</th><th>Ativo</th><th>Desconto</th><th>Ciclos</th><th>Planos</th><th>Reservas</th><th>Confirmados</th></tr></thead><tbody id="couponSummaryRows"><tr><td colspan="8" class="muted">Carregando...</td></tr></tbody></table></div>
+        </div>
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Eventos recentes</h4><span class="muted">Últimas movimentações</span></div>
+          <div class="hr"></div>
+          <div style="overflow:auto;"><table><thead><tr><th>Data</th><th>Cupom</th><th>Status</th><th>Plano</th><th>Ciclo</th><th>Desconto</th><th>Valor Final</th></tr></thead><tbody id="couponReportRows"><tr><td colspan="7" class="muted">Carregando...</td></tr></tbody></table></div>
+        </div>
+      </div>
+
+      <script>
+        function moneyCents(v){
+          try{
+            return new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format((Number(v||0))/100);
+          }catch(_){
+            return 'R$ ' + (((Number(v||0))/100).toFixed(2));
+          }
+        }
+        function esc(s){
+          return String(s ?? '').replace(/[&<>"']/g, (m)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+        }
+        async function loadCouponReport(){
+          const r = await fetch('/admin/coupon-report/data');
+          const j = await r.json().catch(()=>({ ok:false, rows:[], coupons:[], summary:{} }));
+          const summary = j.summary || {};
+          document.getElementById('crTotalCoupons').textContent = String(summary.totalCoupons || 0);
+          document.getElementById('crTotalReservations').textContent = String(summary.totalReservations || 0);
+          document.getElementById('crDiscount').textContent = moneyCents(summary.totalDiscountCents || 0);
+          document.getElementById('crRevenue').textContent = 'Valor final: ' + moneyCents(summary.totalFinalCents || 0);
+
+          const couponRows = Array.isArray(j.coupons) ? j.coupons : [];
+          document.getElementById('couponSummaryRows').innerHTML = couponRows.length ? couponRows.map((item)=>{
+            const coupon = item.coupon || {};
+            const usage = item.usage || {};
+            return '<tr>'
+              + '<td><code>' + esc(coupon.couponCode || coupon.code || '') + '</code></td>'
+              + '<td>' + esc(coupon.name || '') + '</td>'
+              + '<td>' + (coupon.active ? '✅' : '❌') + '</td>'
+              + '<td>' + esc(coupon.discountType === 'percent' ? ((coupon.discountValue||0) + '%' + ((coupon.discountCap||0) ? ' (teto ' + moneyCents(coupon.discountCap||0) + ')' : '')) : moneyCents(coupon.discountValue||0)) + '</td>'
+              + '<td>' + esc((coupon.eligibleBillingCycles||[]).join(', ') || 'Todos') + '</td>'
+              + '<td>' + esc((coupon.eligiblePlanCodes||[]).join(', ') || 'Todos') + '</td>'
+              + '<td>' + esc(String(usage.totalReservations || 0)) + '</td>'
+              + '<td>' + esc(String(usage.confirmedReservations || 0)) + '</td>'
+              + '</tr>';
+          }).join('') : '<tr><td colspan="8" class="muted">Nenhum cupom encontrado.</td></tr>';
+
+          const reportRows = Array.isArray(j.rows) ? j.rows : [];
+          document.getElementById('couponReportRows').innerHTML = reportRows.length ? reportRows.slice(0, 80).map((row)=>{
+            return '<tr>'
+              + '<td>' + esc(row.ts || row.createdAt || '') + '</td>'
+              + '<td><code>' + esc(row.couponCode || '') + '</code></td>'
+              + '<td>' + esc(row.status || '') + '</td>'
+              + '<td>' + esc(row.planCode || '') + '</td>'
+              + '<td>' + esc(row.billingCycle || '') + '</td>'
+              + '<td>' + esc(moneyCents(row.discountCents || row.discountAmountCents || 0)) + '</td>'
+              + '<td>' + esc(moneyCents(row.finalCents || row.finalPriceCents || 0)) + '</td>'
+              + '</tr>';
+          }).join('') : '<tr><td colspan="7" class="muted">Nenhum evento de cupom encontrado.</td></tr>';
+        }
+        document.getElementById('couponReportReloadBtn').addEventListener('click', loadCouponReport);
+        loadCouponReport();
+      </script>
+    `;
+    const html = layoutBase({ title: "Relatório de Cupons", activePath: "/admin/coupon-report-ui", content: inner });
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
   router.get("/reports-ui", async (req, res) => {
     const inner = `
       <div class="card pad" style="margin-bottom:14px;">
@@ -5563,6 +5880,7 @@ async function toggle(code, active){
             <a class="pill" href="/admin/finance-saas-ui">Financeiro SaaS</a>
             <a class="pill" href="/admin/audit-ui">Auditoria</a>
             <a class="pill" href="/admin/inconsistencies-ui">Inconsistências</a>
+            <a class="pill" href="/admin/coupon-report-ui">Relatório de Cupons</a>
             <button type="button" class="primary" id="reportsReloadBtn">Atualizar</button>
           </div>
         </div>
@@ -5626,6 +5944,19 @@ async function toggle(code, active){
                 <a class="pill" href="/admin/export/executive?format=excel">Excel</a>
                 <a class="pill" href="/admin/export/executive?format=pdf">PDF</a>
                 <a class="pill" href="/admin/export/executive?format=json">JSON</a>
+              </div>
+            </div>
+            <div class="card pad">
+              <b>Relatório de Cupons</b>
+              <div class="muted" style="margin:6px 0 10px 0;">Uso de cupons, reservas, confirmações, falhas e impacto financeiro.</div>
+              <div class="row" style="margin-bottom:10px;">
+                <a class="pill" href="/admin/coupon-report-ui">Abrir relatório</a>
+              </div>
+              <div class="row">
+                <a class="pill" href="/admin/export/coupons?format=csv">CSV</a>
+                <a class="pill" href="/admin/export/coupons?format=excel">Excel</a>
+                <a class="pill" href="/admin/export/coupons?format=pdf">PDF</a>
+                <a class="pill" href="/admin/export/coupons?format=json">JSON</a>
               </div>
             </div>
             <div class="card pad">
