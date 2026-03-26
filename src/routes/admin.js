@@ -72,6 +72,7 @@ import {
   delCopyGlobal,
   setCopyUser,
   delCopyUser,
+  DEFAULT_COPY,
 } from "../services/copy.js";
 import { listPayments, getSubscription, cancelSubscription } from "../services/asaas/client.js";
 import { listAsaasEvents } from "../services/asaas/ledger.js";
@@ -7233,7 +7234,15 @@ router.post("/coupons/:code/delete", async (req, res) => {
   // ===================== Textos do Bot (Copy) =====================
   // ✅ V16.6.0 — Editor de mensagens (global + por usuário)
   router.get("/copy-ui", async (req, res) => {
-    const waId = String(req.query?.waId || "").trim();
+    const requestedUserId = String(req.query?.userId || "").trim();
+    const requestedWaId = String(req.query?.waId || "").trim();
+    const copyUserId = requestedUserId
+      ? await resolveAdminUserRef(requestedUserId)
+      : requestedWaId
+        ? await resolveAdminUserRef(requestedWaId)
+        : "";
+    const identifiers = copyUserId ? await getUserIdentifiers(copyUserId).catch(() => null) : null;
+    const waId = String(identifiers?.waId || requestedWaId || "").trim();
     const groups = groupCatalog();
 
     // Pré-carrega valores (evita várias requisições na UI)
@@ -7241,11 +7250,10 @@ router.post("/coupons/:code/delete", async (req, res) => {
     const rows = await Promise.all(
       catalogFlat.map(async (row) => {
         const key = row.key;
-        const resolved = await getCopyResolved(key, { waId: waId || null });
+        const resolved = await getCopyResolved(key, { waId: copyUserId || null });
         const rawGlobal = await getCopyRawGlobal(key);
-        const rawUser = waId ? await getCopyRawUser(waId, key) : null;
-
-        const defaultText = (resolved.source === "DEFAULT") ? resolved.text : (await getCopyResolved(key, { waId: null })).text;
+        const rawUser = copyUserId ? await getCopyRawUser(copyUserId, key) : null;
+        const defaultText = String(DEFAULT_COPY[String(key || "").trim().toUpperCase()] ?? "");
 
         return {
           category: row.category,
@@ -7253,10 +7261,11 @@ router.post("/coupons/:code/delete", async (req, res) => {
           label: row.label || key,
           resolvedText: resolved.text,
           resolvedSource: resolved.source,
+          defaultText,
           globalText: rawGlobal !== null && rawGlobal !== undefined && String(rawGlobal) !== "" ? String(rawGlobal) : defaultText,
           hasGlobalOverride: rawGlobal !== null && rawGlobal !== undefined && String(rawGlobal) !== "",
-          userText: waId ? (rawUser !== null && rawUser !== undefined && String(rawUser) !== "" ? String(rawUser) : "") : "",
-          hasUserOverride: waId ? (rawUser !== null && rawUser !== undefined && String(rawUser) !== "") : false,
+          userText: copyUserId ? (rawUser !== null && rawUser !== undefined && String(rawUser) !== "" ? String(rawUser) : "") : "",
+          hasUserOverride: copyUserId ? (rawUser !== null && rawUser !== undefined && String(rawUser) !== "") : false,
         };
       })
     );
@@ -7277,8 +7286,9 @@ router.post("/coupons/:code/delete", async (req, res) => {
 
         <form method="GET" action="/admin/copy-ui" class="row" style="gap:8px; align-items:flex-end; margin:0; flex-wrap:wrap; justify-content:flex-end;">
           <div>
-            <div class="muted" style="font-size:12px; margin-bottom:6px;">waId (opcional)</div>
-            <input name="waId" value="${escapeHtml(waId)}" placeholder="5511..." style="min-width:220px;" />
+            <div class="muted" style="font-size:12px; margin-bottom:6px;">waId ou userId (opcional)</div>
+            <input name="waId" value="${escapeHtml(waId || copyUserId)}" placeholder="5511... ou usr_000001" style="min-width:220px;" />
+            ${copyUserId ? `<input type="hidden" name="userId" value="${escapeHtml(copyUserId)}" />` : ""}
           </div>
           <button class="primary" type="submit">Carregar</button>
           <a class="btn" href="/admin/copy-ui">Limpar</a>
@@ -7358,9 +7368,10 @@ router.post("/coupons/:code/delete", async (req, res) => {
 
                       ${waId ? `
                         <div style="flex:1;">
-                          <div class="muted" style="font-size:12px; margin-bottom:6px;">Usuário (${escapeHtml(waId)})</div>
+                          <div class="muted" style="font-size:12px; margin-bottom:6px;">Usuário (${escapeHtml(waId || copyUserId)})${copyUserId && waId ? ` · <code>${escapeHtml(copyUserId)}</code>` : ""}</div>
                           <form method="POST" action="/admin/copy/set-user" style="margin:0;">
                             <input type="hidden" name="key" value="${escapeHtml(it.key)}" />
+                            <input type="hidden" name="userId" value="${escapeHtml(copyUserId)}" />
                             <input type="hidden" name="waId" value="${escapeHtml(waId)}" />
                             <textarea name="value" style="min-height:120px;" placeholder="(opcional) override só para este usuário…">${escapeHtml(it.userText)}</textarea>
                             <div class="row" style="justify-content:space-between; margin-top:8px;">
@@ -7381,7 +7392,7 @@ router.post("/coupons/:code/delete", async (req, res) => {
                       <summary class="muted">Ver texto resolvido (o que o usuário recebe)</summary>
                       <pre style="white-space:pre-wrap; margin-top:10px;">${escapeHtml(it.resolvedText)}</pre>
                       <div class="muted" style="font-size:12px; margin-top:6px;">
-                        Dica: você pode usar variáveis como {{planName}}, {{planPrice}} em textos dinâmicos.
+                        Dica: placeholders como {{count}}, {{planName}} e {{planPrice}} são preservados no editor e só são resolvidos na execução do fluxo.
                       </div>
                     </details>
 
