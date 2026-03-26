@@ -94,15 +94,42 @@ import {
   markFeedbackAnswered,
   markTestimonialAsked,
   markReferralAsked,
+  getCheckoutDraft,
+  setCheckoutDraft,
+  clearCheckoutDraft,
+  getSelectedPlanCode,
+  setSelectedPlanCode,
+  clearSelectedPlanCode,
+  getSelectedBillingCycle,
+  setSelectedBillingCycle,
+  clearSelectedBillingCycle,
+  getSelectedCouponCode,
+  setSelectedCouponCode,
+  clearSelectedCouponCode,
+  getPricingQuote as getStoredPricingQuote,
+  setPricingQuote,
+  clearPricingQuote,
+  getCouponReservationId,
+  setCouponReservationId,
+  clearCouponReservationId,
+  setCouponReservationCreatedAt,
+  clearCouponReservationCreatedAt,
+  getCheckoutCouponStatus,
+  setCheckoutCouponStatus,
+  clearCheckoutCouponStatus,
+  resetCheckoutCouponState,
 } from "./state.js";
 
 import { getMenuPlans, getPlan, getPlanByChoice, renderPlansMenu } from "./Plans.js";
+import { getPlanBillingOption } from "./plans.js";
 import { validateDoc } from "./brDoc.js";
+import { buildPricingQuote, summarizePricingQuote } from "./pricing.js";
+import { createCouponReservation, releaseCouponReservation } from "./coupons.js";
 
 import {
   findCustomerByExternalReference,
   createCustomer,
-  createPixPayment,
+  createAsaasCheckoutFromQuote,
   createRecurringCardPaymentLink,
   getSubscription,
   cancelSubscription,
@@ -143,6 +170,9 @@ const ST = Object.freeze({
   WAIT_PRODUCT: "WAIT_PRODUCT",
 
   WAIT_PLAN: "WAIT_PLAN",
+  WAIT_BILLING_CYCLE: "WAIT_BILLING_CYCLE",
+  WAIT_COUPON_CODE: "WAIT_COUPON_CODE",
+  WAIT_CHECKOUT_CONFIRMATION: "WAIT_CHECKOUT_CONFIRMATION",
   WAIT_UPGRADE_CHOICE: "WAIT_UPGRADE_CHOICE",
   WAIT_PAYMENT_METHOD: "WAIT_PAYMENT_METHOD",
   WAIT_PAYMENT_RECOVERY: "WAIT_PAYMENT_RECOVERY",
@@ -202,6 +232,52 @@ function normalizeChoice(t) {
   if (s === "2" || s.startsWith("2 ")) return "2";
   if (s === "3" || s.startsWith("3 ")) return "3";
   return "";
+}
+
+function normalizeBillingCycleChoice(t) {
+  const c = normalizeChoice(t);
+  if (c === "1") return "monthly";
+  if (c === "2") return "annual";
+  return "";
+}
+
+function wantsNoCouponCommand(t) {
+  const s = upper(t);
+  return s === "SEM CUPOM" || s === "SEM" || s === "NAO TENHO CUPOM" || s === "NÃO TENHO CUPOM" || s === "SEM DESCONTO";
+}
+
+function wantsConfirmCheckoutCommand(t) {
+  const s = upper(t);
+  return s === "CONFIRMAR" || s === "CONTINUAR" || s === "SEGUIR" || s === "FECHAR" || s === "PAGAR";
+}
+
+function wantsChangePlanCommand(t) {
+  const s = upper(t);
+  return s === "PLANO" || s === "TROCAR PLANO" || s === "ALTERAR PLANO";
+}
+
+function wantsChangeBillingCycleCommand(t) {
+  const s = upper(t);
+  return s === "CICLO" || s === "TROCAR CICLO" || s === "ALTERAR CICLO" || s === "MENSAL/ANUAL";
+}
+
+function wantsChangeCouponCommand(t) {
+  const s = upper(t);
+  return s === "CUPOM" || s === "TROCAR CUPOM" || s === "ALTERAR CUPOM" || s === "REMOVER CUPOM";
+}
+
+function billingCycleHumanLabel(value) {
+  const cycle = String(value || "").trim().toLowerCase();
+  return cycle === "annual" ? "anual" : "mensal";
+}
+
+function asaasSubscriptionCycleFromBillingCycle(value) {
+  const cycle = String(value || "").trim().toLowerCase();
+  return cycle === "annual" ? "YEARLY" : "MONTHLY";
+}
+
+function formatMoneyTextFromCents(cents) {
+  return `R$ ${String(moneyBRFromCents(cents)).replace('.', ',')}`;
 }
 
 function wantsTemplateCommand(t) {
@@ -383,6 +459,9 @@ function isTransientFlowStatus(status) {
   return new Set([
     ST.WAIT_NAME,
     ST.WAIT_PLAN,
+    ST.WAIT_BILLING_CYCLE,
+    ST.WAIT_COUPON_CODE,
+    ST.WAIT_CHECKOUT_CONFIRMATION,
     ST.WAIT_UPGRADE_CHOICE,
     ST.WAIT_PAYMENT_METHOD,
     ST.WAIT_PAYMENT_RECOVERY,
@@ -2228,6 +2307,196 @@ ${userText}`);
   return sections.join("\n\n");
 }
 
+async function clearCheckoutQuoteState(waId, { releaseReservation = false, reason = "", meta = {} } = {}) {
+  const reservationId = await getCouponReservationId(waId);
+
+  if (releaseReservation && reservationId) {
+    try {
+      await releaseCouponReservation(reservationId, {
+        reason: reason || "checkout_selection_changed",
+        meta: { ...meta, source: "flow" },
+      });
+    } catch {}
+  }
+
+  await Promise.all([
+    clearCheckoutDraft(waId),
+    clearSelectedCouponCode(waId),
+    clearPricingQuote(waId),
+    clearCouponReservationId(waId),
+    clearCouponReservationCreatedAt(waId),
+    clearCheckoutCouponStatus(waId),
+  ]);
+}
+
+async function getSelectedCheckoutPlan(waId) {
+  const selectedPlanCode = (await getSelectedPlanCode(waId)) || (await getUserPlan(waId));
+  if (!selectedPlanCode) return null;
+  return await getPlan(selectedPlanCode);
+}
+
+async function getCurrentCheckoutSelection(waId) {
+  const planCode = (await getSelectedPlanCode(waId)) || (await getUserPlan(waId)) || "";
+  const billingCycle = (await getSelectedBillingCycle(waId)) || "monthly";
+  const couponCode = await getSelectedCouponCode(waId);
+  const plan = planCode ? await getPlan(planCode) : null;
+  return { planCode, billingCycle, couponCode, plan };
+}
+
+function translatePricingFailure(code, fallback = "") {
+  const map = {
+    plan_code_required: "Escolha um plano para continuar.",
+    plan_not_found: "Não encontrei esse plano. Vamos escolher novamente.",
+    billing_cycle_not_available: "Esse ciclo não está disponível para o plano escolhido.",
+    coupon_code_required: "Digite um cupom válido ou responda *SEM CUPOM*.",
+    coupon_not_found: "Não encontrei esse cupom.",
+    coupon_inactive: "Esse cupom está inativo no momento.",
+    coupon_not_started: "Esse cupom ainda não começou a valer.",
+    coupon_expired: "Esse cupom expirou.",
+    coupon_plan_not_allowed: "Esse cupom não vale para o plano escolhido.",
+    coupon_cycle_not_allowed: "Esse cupom não vale para esse ciclo de cobrança.",
+    coupon_total_limit_reached: "Esse cupom atingiu o limite total de usos.",
+    coupon_user_limit_reached: "Você já atingiu o limite de uso desse cupom.",
+    coupon_requires_no_active_plan: "Esse cupom vale apenas para quem não tem plano ativo.",
+    coupon_first_purchase_only: "Esse cupom vale apenas para a primeira contratação.",
+    coupon_duplicate_pending_reservation: "Já existe uma reserva pendente desse cupom para você.",
+  };
+  return map[String(code || "").trim()] || String(fallback || "").trim() || "Não foi possível validar o cupom agora.";
+}
+
+async function persistCheckoutQuoteState(waId, { planCode = "", billingCycle = "monthly", couponCode = "", quote = null, reservation = null } = {}) {
+  const normalizedPlanCode = String(planCode || "").trim().toUpperCase();
+  const normalizedBillingCycle = String(billingCycle || "monthly").trim().toLowerCase() === "annual" ? "annual" : "monthly";
+  const normalizedCouponCode = String(couponCode || "").trim().toUpperCase();
+  const reservationId = reservation?.reservationId || "";
+  const reservationCreatedAt = reservation?.reservedAt || new Date().toISOString();
+  const checkoutCouponStatus = normalizedCouponCode ? (reservationId ? "RESERVED" : "VALIDATED") : "NONE";
+  const summary = summarizePricingQuote(quote || {});
+
+  await setSelectedPlanCode(waId, normalizedPlanCode);
+  await setSelectedBillingCycle(waId, normalizedBillingCycle);
+  if (normalizedCouponCode) await setSelectedCouponCode(waId, normalizedCouponCode);
+  else await clearSelectedCouponCode(waId);
+
+  await setPricingQuote(waId, {
+    ...(quote || {}),
+    couponReservationId: reservationId,
+    couponReservationCreatedAt: reservationId ? reservationCreatedAt : "",
+    checkoutCouponStatus,
+  });
+
+  if (reservationId) {
+    await setCouponReservationId(waId, reservationId);
+    await setCouponReservationCreatedAt(waId, reservationCreatedAt);
+  } else {
+    await clearCouponReservationId(waId);
+    await clearCouponReservationCreatedAt(waId);
+  }
+
+  await setCheckoutCouponStatus(waId, checkoutCouponStatus);
+  await setCheckoutDraft(waId, {
+    planCode: normalizedPlanCode,
+    billingCycle: normalizedBillingCycle,
+    couponCode: normalizedCouponCode,
+    couponReservationId: reservationId,
+    couponReservationCreatedAt: reservationId ? reservationCreatedAt : "",
+    checkoutCouponStatus,
+    calculation: quote?.calculation || null,
+    chargeMode: quote?.chargeMode || "",
+    summary: summary?.summary || "",
+    planName: quote?.plan?.name || quote?.explanation?.planName || "",
+  });
+}
+
+async function prepareCheckoutQuote(waId, { planCode = "", billingCycle = "monthly", couponCode = "" } = {}) {
+  await clearCheckoutQuoteState(waId, {
+    releaseReservation: true,
+    reason: couponCode ? "checkout_coupon_replaced" : "checkout_quote_rebuilt",
+    meta: { planCode, billingCycle, couponCode },
+  });
+
+  const quote = await buildPricingQuote({
+    internalUserId: waId,
+    planCode,
+    billingCycle,
+    couponCode,
+  });
+
+  if (!quote?.ok || !quote?.valid) {
+    return { ok: false, quote };
+  }
+
+  let reservation = null;
+  if (couponCode) {
+    const reservationResult = await createCouponReservation({
+      internalUserId: waId,
+      couponCode,
+      planCode,
+      billingCycle,
+      basePriceCents: Number(quote?.calculation?.basePriceCents || 0),
+      selectionSnapshot: {
+        planCode,
+        billingCycle,
+        couponCode,
+        quoteSummary: summarizePricingQuote(quote).summary,
+        chargeMode: quote?.chargeMode || "",
+      },
+      meta: { source: "flow" },
+    });
+
+    if (!reservationResult?.ok || !reservationResult?.reservation) {
+      return { ok: false, quote: reservationResult || quote };
+    }
+
+    reservation = reservationResult.reservation;
+  }
+
+  await persistCheckoutQuoteState(waId, {
+    planCode,
+    billingCycle,
+    couponCode,
+    quote,
+    reservation,
+  });
+
+  return { ok: true, quote, reservation };
+}
+
+async function ensureCheckoutQuoteForPayment(waId) {
+  const selection = await getCurrentCheckoutSelection(waId);
+  if (!selection.planCode) {
+    return { ok: false, code: "plan_missing" };
+  }
+
+  const storedQuote = await getStoredPricingQuote(waId);
+  if (storedQuote?.planCode === String(selection.planCode || "").toUpperCase()
+      && storedQuote?.billingCycle === String(selection.billingCycle || "monthly").toLowerCase()
+      && String(storedQuote?.couponCode || "").toUpperCase() === String(selection.couponCode || "").toUpperCase()) {
+    return { ok: true, quote: storedQuote, plan: selection.plan };
+  }
+
+  const quote = await buildPricingQuote({
+    internalUserId: waId,
+    planCode: selection.planCode,
+    billingCycle: selection.billingCycle,
+    couponCode: selection.couponCode,
+  });
+
+  if (!quote?.ok || !quote?.valid) {
+    return { ok: false, quote, plan: selection.plan };
+  }
+
+  await persistCheckoutQuoteState(waId, {
+    planCode: selection.planCode,
+    billingCycle: selection.billingCycle,
+    couponCode: selection.couponCode,
+    quote,
+    reservation: selection.couponCode ? { reservationId: await getCouponReservationId(waId), reservedAt: new Date().toISOString() } : null,
+  });
+
+  return { ok: true, quote, plan: selection.plan };
+}
+
 // -------------------- Copy / Mensagens --------------------
 async function msgAskName(waId){
   return withMenuHint(waId, await getCopyText("FLOW_ASK_NAME", { waId }));
@@ -2278,17 +2547,93 @@ async function msgPlansOnly() {
   return lines.join("\n");
 }
 
-async function msgAskPaymentMethod(waId, plan){
-  return withMenuHint(waId, await getCopyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", {
+async function msgAskPaymentMethod(waId, plan, quote = null){
+  const effectivePlan = plan || await getSelectedCheckoutPlan(waId);
+  const effectiveQuote = quote || await getStoredPricingQuote(waId);
+  const billingCycle = effectiveQuote?.billingCycle || (await getSelectedBillingCycle(waId)) || "monthly";
+  const finalPriceCents = Number(effectiveQuote?.calculation?.finalPriceCents || 0);
+  const planPrice = finalPriceCents > 0
+    ? moneyBRFromCents(finalPriceCents)
+    : effectivePlan?.priceCents
+      ? moneyBRFromCents(effectivePlan.priceCents)
+      : "";
+
+  const base = await getCopyText("FLOW_ASK_PAYMENT_METHOD_WITH_PLAN", {
     waId,
     vars: {
-      planName: plan?.name || "",
-      planPrice: plan?.priceCents ? moneyBRFromCents(plan.priceCents) : "",
+      planName: effectivePlan?.name || effectiveQuote?.explanation?.planName || "",
+      planPrice,
     },
-  }));
+  });
+
+  const lines = [base];
+  if (effectiveQuote?.explanation?.description) {
+    lines.push(
+      "",
+      `Resumo: ${effectiveQuote.explanation.description}.`,
+      `Ciclo selecionado: *${billingCycleHumanLabel(billingCycle)}*.`,
+    );
+  }
+
+  return withMenuHint(waId, lines.filter(Boolean).join("\n"));
+}
+
+async function msgAskBillingCycle(waId, plan) {
+  const monthly = getPlanBillingOption(plan, "monthly");
+  const annual = getPlanBillingOption(plan, "annual");
+  const lines = [
+    `Perfeito! Você escolheu o plano *${plan?.name || ""}*.`,
+    "",
+    "Agora escolha o ciclo de cobrança:",
+    "",
+    monthly ? `1️⃣ *Mensal* — ${formatMoneyTextFromCents(monthly.priceCents || 0)}` : "1️⃣ *Mensal*",
+    annual ? `2️⃣ *Anual* — ${formatMoneyTextFromCents(annual.priceCents || 0)}` : "2️⃣ *Anual*",
+    "",
+    "Responda com *1* para mensal ou *2* para anual.",
+  ];
+  return withMenuHint(waId, lines.join("\n"));
+}
+
+async function msgAskCouponCode(waId, plan, billingCycle) {
+  const label = billingCycleHumanLabel(billingCycle);
+  const option = getPlanBillingOption(plan, billingCycle);
+  const priceText = option ? formatMoneyTextFromCents(option.priceCents || 0) : "";
+  const lines = [
+    `Ótimo! Seguiremos com o plano *${plan?.name || ""}* no ciclo *${label}*.`,
+    priceText ? `Valor base desta contratação: *${priceText}*.` : "",
+    "",
+    "Se você tiver um cupom de desconto, envie agora.",
+    "Se preferir continuar sem cupom, responda *SEM CUPOM*.",
+  ].filter(Boolean);
+  return withMenuHint(waId, lines.join("\n"));
+}
+
+async function msgCouponInvalid(waId, pricingResult) {
+  const message = translatePricingFailure(pricingResult?.code, pricingResult?.reason);
+  return withMenuHint(waId, `${message}\n\nEnvie outro cupom ou responda *SEM CUPOM* para continuar.`);
+}
+
+async function msgCheckoutSummary(waId, quote) {
+  const summary = summarizePricingQuote(quote || {});
+  const lines = [
+    "*Resumo da sua contratação*",
+    "",
+    summary.planName ? `Plano: *${summary.planName}*` : "",
+    summary.billingCycleLabel ? `Ciclo: *${summary.billingCycleLabel}*` : "",
+    summary.originalLabel ? `Valor original: *${summary.originalLabel}*` : "",
+    summary.discountLabel && summary.discountLabel !== "R$ 0,00" ? `Desconto: *${summary.discountLabel}*` : "",
+    summary.finalLabel ? `Valor final: *${summary.finalLabel}*` : "",
+    summary.appliesToLabel ? `Aplicação do desconto: *${summary.appliesToLabel}*` : "",
+    summary.couponCode ? `Cupom: *${summary.couponCode}*` : "Cupom: *sem cupom*",
+    "",
+    "Responda *CONFIRMAR* para seguir.",
+    "Se quiser alterar algo, responda *PLANO*, *CICLO* ou *CUPOM*.",
+  ].filter(Boolean);
+  return withMenuHint(waId, lines.join("\n"));
 }
 
 async function msgAskDoc(waId){
+
   return withMenuHint(waId, await getCopyText("FLOW_ASK_DOC", { waId }));
 }
 
@@ -2870,8 +3215,9 @@ async function msgMenuMySubscription(waId) {
   return await msgMenuSubscription(waId);
 }
 async function createCurrentPlanPayment(waId) {
-  const planCode = await getUserPlan(waId);
-  const plan = (await getMenuPlans()).find((p) => p.code === planCode) || null;
+  const selection = await getCurrentCheckoutSelection(waId);
+  const planCode = selection.planCode || await getUserPlan(waId);
+  const plan = selection.plan || (planCode ? await getPlan(planCode) : null);
   if (!plan) {
     await setUserStatus(waId, ST.WAIT_PLAN);
     return await msgPlansOnly();
@@ -2889,13 +3235,36 @@ async function createCurrentPlanPayment(waId) {
     return await msgAskDoc(waId);
   }
 
+  const quoteResult = await ensureCheckoutQuoteForPayment(waId);
+  if (!quoteResult?.ok || !quoteResult?.quote) {
+    const pricingFailure = quoteResult?.quote || {};
+    const couponCode = await getSelectedCouponCode(waId);
+    if (couponCode) {
+      await setUserStatus(waId, ST.WAIT_COUPON_CODE);
+      return await msgCouponInvalid(waId, pricingFailure);
+    }
+    await setUserStatus(waId, ST.WAIT_PLAN);
+    return await msgPlansOnly();
+  }
+
+  const quote = quoteResult.quote;
+  const billingCycle = quote?.billingCycle || selection.billingCycle || "monthly";
+  const finalValue = (Number(quote?.calculation?.finalPriceCents || 0) / 100) || (Number(plan.priceCents) || 0) / 100;
+  const planCodeLabel = quote?.planCode || plan.code;
+  const billingLabel = billingCycleHumanLabel(billingCycle);
+  const quoteSummary = quote?.explanation?.description ? `Resumo: ${quote.explanation.description}.` : "";
+  const externalReference = waId;
+  const dueDate = todayISO();
+
   if (pm === "PIX") {
-    const pay = await createPixPayment({
+    const pay = await createAsaasCheckoutFromQuote({
       customerId,
-      value: (Number(plan.priceCents) || 0) / 100,
-      description: `Amigo das Vendas - Plano ${plan.code} (PIX mensal)`,
-      externalReference: waId,
-      dueDate: todayISO(),
+      quote,
+      paymentMethod: "pix",
+      externalReference,
+      dueDate,
+      description: `Amigo das Vendas - Plano ${planCodeLabel} (${billingLabel} via PIX)`,
+      name: `Plano ${plan.name} (${billingLabel})`,
     });
 
     await setUserStatus(waId, ST.PAYMENT_PENDING);
@@ -2905,39 +3274,57 @@ async function createCurrentPlanPayment(waId) {
       await getCopyText("FLOW_PLAN_VALUE_REINFORCEMENT", { waId }),
       "",
       "✅ Pronto! Gerei sua cobrança via *PIX*.",
+      quoteSummary,
       "",
       url ? `Pague por aqui: ${url}` : "Pague pelo link dentro do Asaas.",
       "",
       "Assim que o pagamento for confirmado, seu plano ativa automaticamente. 🚀",
       "",
       "Se quiser mudar a forma de pagamento agora, responda *MUDAR PAGAMENTO*.",
-    ];
+    ].filter(Boolean);
     return lines.join("\n");
   }
 
-  const link = await createRecurringCardPaymentLink({
-    name: `Assinatura ${plan.name}`,
-    description: `Amigo das Vendas - Plano ${plan.code} (Cartão recorrente)`,
-    value: (Number(plan.priceCents) || 0) / 100,
-    externalReference: waId,
-    subscriptionCycle: "MONTHLY",
-  });
+  try {
+    const link = await createAsaasCheckoutFromQuote({
+      quote,
+      paymentMethod: "credit_card",
+      externalReference,
+      description: `Amigo das Vendas - Plano ${planCodeLabel} (${billingLabel} no cartão)`,
+      name: `Assinatura ${plan.name} (${billingLabel})`,
+    });
 
-  await setUserStatus(waId, ST.PAYMENT_PENDING);
+    await setUserStatus(waId, ST.PAYMENT_PENDING);
 
-  const url = link?.url || link?.paymentLink || link?.link || "";
-  const lines = [
-    await getCopyText("FLOW_PLAN_VALUE_REINFORCEMENT", { waId }),
-    "",
-    "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).",
-    "",
-    url ? `Finalize por aqui: ${url}` : "Finalize pelo link no Asaas.",
-    "",
-    "Assim que confirmar, seu plano ativa automaticamente. 🚀",
-    "",
-    "Se quiser mudar a forma de pagamento agora, responda *MUDAR PAGAMENTO*.",
-  ];
-  return lines.join("\n");
+    const url = link?.url || link?.paymentLink || link?.link || "";
+    const lines = [
+      await getCopyText("FLOW_PLAN_VALUE_REINFORCEMENT", { waId }),
+      "",
+      "✅ Pronto! Agora é só concluir no *Cartão* (assinatura).",
+      quoteSummary,
+      "",
+      url ? `Finalize por aqui: ${url}` : "Finalize pelo link no Asaas.",
+      "",
+      "Assim que confirmar, seu plano ativa automaticamente. 🚀",
+      "",
+      "Se quiser mudar a forma de pagamento agora, responda *MUDAR PAGAMENTO*.",
+    ].filter(Boolean);
+    return lines.join("\n");
+  } catch (err) {
+    if (err?.code === "recurring_first_charge_discount_not_supported") {
+      await setUserStatus(waId, ST.WAIT_PAYMENT_METHOD);
+      const lines = [
+        "⚠️ Esse cupom gera um desconto válido apenas para a primeira cobrança.",
+        "No fluxo atual, esse tipo de desconto não pode ser finalizado no *Cartão* recorrente.",
+        "",
+        "Para continuar com esse desconto, responda *1* e finalize via *PIX*.",
+        "Se preferir manter o cartão, responda *MUDAR PAGAMENTO* e escolha outra forma.",
+      ].filter(Boolean);
+      return lines.join("\n");
+    }
+
+    throw err;
+  }
 }
 
 // -------------------- Core --------------------
@@ -3729,10 +4116,17 @@ async function handleInboundTextCore({ waId, userId, text }) {
     const plan = await getPlanByChoice(choice);
     if (!plan) return reply(await msgPlansOnly());
 
+    await clearCheckoutQuoteState(id, {
+      releaseReservation: true,
+      reason: "plan_changed",
+      meta: { nextPlanCode: plan.code },
+    });
+    await clearSelectedBillingCycle(id);
+    await setSelectedPlanCode(id, plan.code);
     await setUserPlan(id, plan.code);
-    await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
+    await setUserStatus(id, ST.WAIT_BILLING_CYCLE);
 
-    return reply(await msgAskPaymentMethod(id, plan));
+    return reply(await msgAskBillingCycle(id, plan));
   }
 
   // 4.1) Upgrade automático ao atingir limite
@@ -3748,9 +4142,16 @@ async function handleInboundTextCore({ waId, userId, text }) {
         return reply(await msgPlansOnly());
       }
 
+      await clearCheckoutQuoteState(id, {
+        releaseReservation: true,
+        reason: "upgrade_selection_changed",
+        meta: { nextPlanCode: suggestedUpgrade.code },
+      });
+      await clearSelectedBillingCycle(id);
+      await setSelectedPlanCode(id, suggestedUpgrade.code);
       await setUserPlan(id, suggestedUpgrade.code);
-      await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
-      return reply(await msgAskPaymentMethod(id, suggestedUpgrade));
+      await setUserStatus(id, ST.WAIT_BILLING_CYCLE);
+      return reply(await msgAskBillingCycle(id, suggestedUpgrade));
     }
 
     if (c === "2") {
@@ -3761,10 +4162,118 @@ async function handleInboundTextCore({ waId, userId, text }) {
     return reply(await msgUpgradeOffer(id));
   }
 
+  // 4.2) Escolha do ciclo de cobrança
+  if (status === ST.WAIT_BILLING_CYCLE) {
+    const billingCycle = normalizeBillingCycleChoice(inbound);
+    const plan = await getSelectedCheckoutPlan(id);
+
+    if (!plan) {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
+    }
+
+    if (!billingCycle) return reply(await msgAskBillingCycle(id, plan));
+
+    await clearCheckoutQuoteState(id, {
+      releaseReservation: true,
+      reason: "billing_cycle_changed",
+      meta: { planCode: plan.code, billingCycle },
+    });
+    await setSelectedBillingCycle(id, billingCycle);
+    await setUserStatus(id, ST.WAIT_COUPON_CODE);
+    return reply(await msgAskCouponCode(id, plan, billingCycle));
+  }
+
+  // 4.3) Cupom
+  if (status === ST.WAIT_COUPON_CODE) {
+    const selection = await getCurrentCheckoutSelection(id);
+    if (!selection.planCode || !selection.plan) {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
+    }
+
+    const billingCycle = selection.billingCycle || "monthly";
+
+    if (wantsNoCouponCommand(inbound)) {
+      const prepared = await prepareCheckoutQuote(id, {
+        planCode: selection.planCode,
+        billingCycle,
+        couponCode: "",
+      });
+      if (!prepared?.ok) {
+        return reply(await msgCouponInvalid(id, prepared?.quote));
+      }
+      await setUserStatus(id, ST.WAIT_CHECKOUT_CONFIRMATION);
+      return reply(await msgCheckoutSummary(id, prepared.quote));
+    }
+
+    const couponCode = cleanText(inbound).toUpperCase();
+    if (!couponCode) return reply(await msgAskCouponCode(id, selection.plan, billingCycle));
+
+    const prepared = await prepareCheckoutQuote(id, {
+      planCode: selection.planCode,
+      billingCycle,
+      couponCode,
+    });
+
+    if (!prepared?.ok) {
+      return reply(await msgCouponInvalid(id, prepared?.quote));
+    }
+
+    await setUserStatus(id, ST.WAIT_CHECKOUT_CONFIRMATION);
+    return reply(await msgCheckoutSummary(id, prepared.quote));
+  }
+
+  // 4.4) Confirmação do checkout
+  if (status === ST.WAIT_CHECKOUT_CONFIRMATION) {
+    const selection = await getCurrentCheckoutSelection(id);
+    const quote = await getStoredPricingQuote(id);
+    const plan = selection.plan || await getSelectedCheckoutPlan(id);
+
+    if (!selection.planCode || !plan || !quote) {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
+    }
+
+    if (wantsConfirmCheckoutCommand(inbound)) {
+      await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
+      return reply(await msgAskPaymentMethod(id, plan, quote));
+    }
+
+    if (wantsChangePlanCommand(inbound)) {
+      await clearCheckoutQuoteState(id, { releaseReservation: true, reason: "checkout_change_plan" });
+      await clearSelectedPlanCode(id);
+      await clearSelectedBillingCycle(id);
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
+    }
+
+    if (wantsChangeBillingCycleCommand(inbound)) {
+      await clearCheckoutQuoteState(id, { releaseReservation: true, reason: "checkout_change_cycle" });
+      await clearSelectedBillingCycle(id);
+      await setUserStatus(id, ST.WAIT_BILLING_CYCLE);
+      return reply(await msgAskBillingCycle(id, plan));
+    }
+
+    if (wantsChangeCouponCommand(inbound)) {
+      await clearCheckoutQuoteState(id, { releaseReservation: true, reason: "checkout_change_coupon" });
+      await setUserStatus(id, ST.WAIT_COUPON_CODE);
+      return reply(await msgAskCouponCode(id, plan, selection.billingCycle || "monthly"));
+    }
+
+    return reply(await msgCheckoutSummary(id, quote));
+  }
+
   // 5) Forma de pagamento
   if (status === ST.WAIT_PAYMENT_METHOD) {
     const c = normalizeChoice(inbound);
     if (c !== "1" && c !== "2") return reply(await getCopyText("FLOW_INVALID_PAYMENT_METHOD", { waId: id }));
+
+    const quote = await getStoredPricingQuote(id);
+    if (!quote?.planCode || !quote?.billingCycle) {
+      await setUserStatus(id, ST.WAIT_PLAN);
+      return reply(await msgPlansOnly());
+    }
 
     const pm = c === "1" ? "CARD" : "PIX";
     await setPaymentMethod(id, pm);
@@ -3785,8 +4294,8 @@ async function handleInboundTextCore({ waId, userId, text }) {
 
     await setUserDocMasked(id, v.type, v.last4);
 
-    const planCode = await getUserPlan(id);
-    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
+    const planCode = (await getSelectedPlanCode(id)) || (await getUserPlan(id));
+    const plan = planCode ? await getPlan(planCode) : null;
     if (!plan) {
       await setUserStatus(id, ST.WAIT_PLAN);
       return reply(await msgPlansOnly());
@@ -3859,9 +4368,14 @@ async function handleInboundTextCore({ waId, userId, text }) {
       return reply(await msgAskPaymentMethod(id, plan));
     }
 
-    const planCode = await getUserPlan(id);
-    const plan = (await getMenuPlans()).find((p) => p.code === planCode);
-    const planTxt = plan ? `Plano: *${plan.name}*.` : "";
+    const quote = await getStoredPricingQuote(id);
+    const planCode = (await getSelectedPlanCode(id)) || (await getUserPlan(id));
+    const plan = planCode ? await getPlan(planCode) : null;
+    const planTxt = quote?.explanation?.description
+      ? `${quote.explanation.description}.`
+      : plan
+        ? `Plano: *${plan.name}*.`
+        : "";
     return reply(await getCopyText("FLOW_PAYMENT_PENDING", { waId: id, vars: { planTxt } }));
   }
 
