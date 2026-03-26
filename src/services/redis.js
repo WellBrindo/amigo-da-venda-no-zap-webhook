@@ -246,3 +246,81 @@ export async function redisNextUserSequence() {
   return redisIncrBy(redisUserSequenceKey(), 1);
 }
 
+function normalizeCouponCode(code) {
+  return requireKeyPart("couponCode", code).toUpperCase();
+}
+
+export function redisCouponIndexKey() {
+  return "idx:coupon";
+}
+
+export function redisCouponCodeKey(couponCode) {
+  const code = normalizeCouponCode(couponCode);
+  return `coupon:${code}`;
+}
+
+export function redisCouponStatusIndexKey(status) {
+  const s = requireKeyPart("status", status).toLowerCase();
+  return `idx:coupon:status:${s}`;
+}
+
+export function redisCouponReservationSequenceKey() {
+  return "seq:couponReservation";
+}
+
+export function redisCouponReservationKey(reservationId) {
+  const rid = requireKeyPart("reservationId", reservationId);
+  return `couponReservation:${rid}`;
+}
+
+export function redisCouponReservationPendingIndexKey() {
+  return "idx:couponReservation:pending";
+}
+
+export function redisCouponReservationStatusIndexKey(status) {
+  const s = requireKeyPart("status", status).toLowerCase();
+  return `idx:couponReservation:status:${s}`;
+}
+
+export function redisCouponReservationUserIndexKey(userId) {
+  const uid = requireKeyPart("userId", userId);
+  return `idx:user:${uid}:couponReservation`;
+}
+
+export function redisCouponReservationCouponIndexKey(couponCode) {
+  const code = normalizeCouponCode(couponCode);
+  return `idx:coupon:${code}:reservation`;
+}
+
+export function redisCouponRedemptionUserIndexKey(userId) {
+  const uid = requireKeyPart("userId", userId);
+  return `idx:user:${uid}:couponRedemption`;
+}
+
+export function redisCouponRedemptionCouponIndexKey(couponCode) {
+  const code = normalizeCouponCode(couponCode);
+  return `idx:coupon:${code}:redemption`;
+}
+
+export function redisCouponAuditListKey(couponCode) {
+  const code = normalizeCouponCode(couponCode);
+  return `audit:coupon:${code}`;
+}
+
+export function redisCouponUserAuditListKey(userId) {
+  const uid = requireKeyPart("userId", userId);
+  return `audit:user:${uid}:coupon`;
+}
+
+export function redisCouponReportIndexKey() {
+  return "idx:report:coupon";
+}
+
+export function redisCouponReportKey(reportId) {
+  const rid = requireKeyPart("reportId", reportId);
+  return `report:coupon:${rid}`;
+}
+
+export async function redisNextCouponReservationSequence() {
+  return redisIncrBy(redisCouponReservationSequenceKey(), 1);
+}
