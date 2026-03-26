@@ -11,16 +11,110 @@ import {
   getBillingCityState,
   getBillingAddress,
   setPrevStatus,
+  getCouponReservationId,
+  getPricingQuote as getStoredPricingQuote,
+  resetCheckoutCouponState,
 } from "../state.js";
 
 import { getCopyText } from "../copy.js";
 import { sendWhatsAppText } from "../meta/whatsapp.js";
 import { recordAsaasEvent } from "./ledger.js";
 import { getPreferredOutboundRecipient } from "../identity.js";
+import {
+  confirmCouponReservation,
+  releaseCouponReservation,
+  failCouponReservation,
+  cancelCouponReservation,
+} from "../coupons.js";
+
 /**
  * Webhook handler do Asaas
  * externalReference = internalUserId (compatível com legado por alias)
  */
+
+function safeStr(value) {
+  return String(value ?? "").trim();
+}
+
+function normalizeCents(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+}
+
+function normalizeAppliesTo(value) {
+  const text = safeStr(value).toLowerCase();
+  return text === "entire_subscription" ? "entire_subscription" : "first_charge_only";
+}
+
+function pickQuoteForLedger(quote = {}, userId = "") {
+  if (!quote || typeof quote !== "object") return null;
+
+  const calculation = quote?.calculation && typeof quote.calculation === "object"
+    ? quote.calculation
+    : {};
+
+  const basePriceCents = normalizeCents(calculation.basePriceCents);
+  const discountAmountCents = normalizeCents(calculation.discountAmountCents);
+  const finalPriceCents = normalizeCents(calculation.finalPriceCents);
+
+  return {
+    internalUserId: safeStr(quote.internalUserId || userId),
+    planCode: safeStr(quote.planCode),
+    planName: safeStr(quote?.plan?.name || quote?.explanation?.planName),
+    billingCycle: safeStr(quote.billingCycle || quote?.explanation?.billingCycle),
+    chargeMode: safeStr(quote.chargeMode),
+    couponCode: safeStr(quote.couponCode || quote?.explanation?.couponCode),
+    appliesTo: normalizeAppliesTo(calculation.appliesTo || quote?.explanation?.appliesTo),
+    basePriceCents,
+    discountAmountCents,
+    finalPriceCents,
+  };
+}
+
+function buildCouponLedgerPayload(finalizeResult = {}, fallbackQuote = null) {
+  const reservation =
+    finalizeResult?.reservation ||
+    finalizeResult?.current ||
+    finalizeResult?.next ||
+    finalizeResult?.previous ||
+    null;
+
+  if (!reservation && !fallbackQuote) return null;
+
+  const quote = pickQuoteForLedger(fallbackQuote || {}, reservation?.internalUserId || "");
+  const basePriceCents = normalizeCents(reservation?.basePriceCents ?? quote?.basePriceCents);
+  const discountAmountCents = normalizeCents(
+    reservation?.discountAmountCents ?? quote?.discountAmountCents
+  );
+  const finalPriceCents = normalizeCents(reservation?.finalPriceCents ?? quote?.finalPriceCents);
+
+  return {
+    reservationId: safeStr(
+      reservation?.reservationId ||
+      reservation?.id ||
+      finalizeResult?.reservationId
+    ),
+    reservationStatus: safeStr(
+      reservation?.status ||
+      finalizeResult?.status
+    ),
+    couponCode: safeStr(reservation?.couponCode || quote?.couponCode),
+    planCode: safeStr(reservation?.planCode || quote?.planCode),
+    billingCycle: safeStr(reservation?.billingCycle || quote?.billingCycle),
+    appliesTo: normalizeAppliesTo(reservation?.appliesTo || quote?.appliesTo),
+    basePriceCents,
+    discountAmountCents,
+    finalPriceCents,
+  };
+}
+
+async function getQuoteSnapshotForLedger(userId) {
+  try {
+    return await getStoredPricingQuote(userId);
+  } catch {
+    return null;
+  }
+}
 
 async function sendCopyText(userId, key, vars = {}, errorTag = "ASAAS_WEBHOOK_SEND_ERROR") {
   const text = await getCopyText(key, { waId: userId, userId, ...vars });
@@ -36,11 +130,99 @@ async function sendCopyText(userId, key, vars = {}, errorTag = "ASAAS_WEBHOOK_SE
   });
 }
 
+async function finalizeCheckoutCouponOnWebhook(
+  userId,
+  {
+    mode = "",
+    reason = "",
+    paymentId = "",
+    subscriptionId = "",
+    event = "",
+    payment = null,
+    subscription = null,
+  } = {}
+) {
+  try {
+    const reservationId = await getCouponReservationId(userId);
+    if (!reservationId) {
+      return { ok: true, skipped: true, reason: "no_coupon_reservation" };
+    }
+
+    const payload = {
+      reason: safeStr(reason),
+      paymentId: safeStr(paymentId),
+      subscriptionId: safeStr(subscriptionId),
+      meta: {
+        source: "asaas_webhook",
+        event: safeStr(event),
+        paymentStatus: safeStr(payment?.status),
+        paymentBillingType: safeStr(payment?.billingType),
+        subscriptionStatus: safeStr(subscription?.status),
+      },
+    };
+
+    let result = null;
+
+    if (mode === "confirm") {
+      result = await confirmCouponReservation(reservationId, {
+        paymentId: payload.paymentId,
+        subscriptionId: payload.subscriptionId,
+        meta: payload.meta,
+      });
+    } else if (mode === "release") {
+      result = await releaseCouponReservation(reservationId, payload);
+    } else if (mode === "fail") {
+      result = await failCouponReservation(reservationId, payload);
+    } else if (mode === "cancel") {
+      result = await cancelCouponReservation(reservationId, payload);
+    } else {
+      return { ok: false, reason: "invalid_mode", mode };
+    }
+
+    await resetCheckoutCouponState(userId);
+    return result || { ok: true, reservationId };
+  } catch (err) {
+    console.error("[ASAAS_WEBHOOK_COUPON_FINALIZE_ERROR]", {
+      userId,
+      mode,
+      event,
+      message: err?.message || String(err),
+    });
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
+async function recordWebhookLedger({
+  event = "",
+  userId = "",
+  payment = null,
+  subscription = null,
+  couponFinalize = null,
+  storedQuote = null,
+} = {}) {
+  const quoteSource = storedQuote || (await getQuoteSnapshotForLedger(userId));
+  const quoteForLedger = pickQuoteForLedger(quoteSource, userId);
+  const couponLedger = buildCouponLedgerPayload(couponFinalize, quoteForLedger);
+
+  await recordAsaasEvent({
+    event,
+    userId,
+    payment,
+    subscription,
+    source: "webhook",
+    quote: quoteForLedger,
+    couponLedger,
+  });
+}
+
 export async function handleAsaasWebhookEvent(body) {
   try {
     const event = body?.event;
     const payment = body?.payment;
     const subscription = body?.subscription;
+
+    const paymentId = safeStr(payment?.id);
+    const subscriptionId = safeStr(subscription?.id);
 
     const userId =
       payment?.externalReference ||
@@ -54,9 +236,6 @@ export async function handleAsaasWebhookEvent(body) {
 
     await ensureUserExists(userId);
 
-    // Ledger (Admin: histórico / reconciliação)
-    await recordAsaasEvent({ event, waId: userId, payment, subscription, source: "webhook" });
-
     // ==============================
     // PAGAMENTO CONFIRMADO
     // ==============================
@@ -64,6 +243,25 @@ export async function handleAsaasWebhookEvent(body) {
       event === "PAYMENT_RECEIVED" ||
       event === "PAYMENT_CONFIRMED"
     ) {
+      const storedQuote = await getQuoteSnapshotForLedger(userId);
+      const couponFinalize = await finalizeCheckoutCouponOnWebhook(userId, {
+        mode: "confirm",
+        paymentId,
+        subscriptionId,
+        event,
+        payment,
+        subscription,
+      });
+
+      await recordWebhookLedger({
+        event,
+        userId,
+        payment,
+        subscription,
+        couponFinalize,
+        storedQuote,
+      });
+
       const plan = await getUserPlan(userId);
 
       if (!plan) {
@@ -133,6 +331,26 @@ export async function handleAsaasWebhookEvent(body) {
       event === "PAYMENT_CREDIT_CARD_CAPTURE_REFUSED" ||
       event === "PAYMENT_REPROVED_BY_RISK_ANALYSIS"
     ) {
+      const storedQuote = await getQuoteSnapshotForLedger(userId);
+      const couponFinalize = await finalizeCheckoutCouponOnWebhook(userId, {
+        mode: "fail",
+        reason: "payment_card_failed",
+        paymentId,
+        subscriptionId,
+        event,
+        payment,
+        subscription,
+      });
+
+      await recordWebhookLedger({
+        event,
+        userId,
+        payment,
+        subscription,
+        couponFinalize,
+        storedQuote,
+      });
+
       await setUserStatus(userId, "WAIT_PAYMENT_RECOVERY");
       await sendCopyText(
         userId,
@@ -153,6 +371,26 @@ export async function handleAsaasWebhookEvent(body) {
     // PAGAMENTO VENCIDO
     // ==============================
     if (event === "PAYMENT_OVERDUE") {
+      const storedQuote = await getQuoteSnapshotForLedger(userId);
+      const couponFinalize = await finalizeCheckoutCouponOnWebhook(userId, {
+        mode: "release",
+        reason: "payment_overdue",
+        paymentId,
+        subscriptionId,
+        event,
+        payment,
+        subscription,
+      });
+
+      await recordWebhookLedger({
+        event,
+        userId,
+        payment,
+        subscription,
+        couponFinalize,
+        storedQuote,
+      });
+
       await setUserStatus(userId, "PAYMENT_PENDING");
 
       console.log("[ASAAS_WEBHOOK] Pagamento vencido:", {
@@ -167,6 +405,26 @@ export async function handleAsaasWebhookEvent(body) {
     // PAGAMENTO DELETADO
     // ==============================
     if (event === "PAYMENT_DELETED") {
+      const storedQuote = await getQuoteSnapshotForLedger(userId);
+      const couponFinalize = await finalizeCheckoutCouponOnWebhook(userId, {
+        mode: "cancel",
+        reason: "payment_deleted",
+        paymentId,
+        subscriptionId,
+        event,
+        payment,
+        subscription,
+      });
+
+      await recordWebhookLedger({
+        event,
+        userId,
+        payment,
+        subscription,
+        couponFinalize,
+        storedQuote,
+      });
+
       await setUserStatus(userId, "BLOCKED");
 
       console.log("[ASAAS_WEBHOOK] Pagamento deletado:", {
@@ -177,7 +435,6 @@ export async function handleAsaasWebhookEvent(body) {
       return { ok: true, statusSetTo: "BLOCKED" };
     }
 
-
     // ==============================
     // ASSINATURA CANCELADA / INATIVA
     // ==============================
@@ -186,6 +443,26 @@ export async function handleAsaasWebhookEvent(body) {
       event === "SUBSCRIPTION_EXPIRED" ||
       event === "SUBSCRIPTION_INACTIVATED"
     ) {
+      const storedQuote = await getQuoteSnapshotForLedger(userId);
+      const couponFinalize = await finalizeCheckoutCouponOnWebhook(userId, {
+        mode: "cancel",
+        reason: "subscription_inactivated",
+        paymentId,
+        subscriptionId,
+        event,
+        payment,
+        subscription,
+      });
+
+      await recordWebhookLedger({
+        event,
+        userId,
+        payment,
+        subscription,
+        couponFinalize,
+        storedQuote,
+      });
+
       // Regra do produto:
       // - Se o usuário cancelou a recorrência, ele mantém acesso até o fim do ciclo atual.
       // - Portanto, NÃO bloqueamos imediatamente se ainda existir validade futura.
@@ -229,6 +506,16 @@ export async function handleAsaasWebhookEvent(body) {
 
       return { ok: true, statusSetTo: "WAIT_PLAN" };
     }
+
+    // Ledger de eventos ignorados também é útil para reconciliação.
+    await recordWebhookLedger({
+      event,
+      userId,
+      payment,
+      subscription,
+      couponFinalize: null,
+      storedQuote: await getQuoteSnapshotForLedger(userId),
+    });
 
     console.log("[ASAAS_WEBHOOK] Evento ignorado:", {
       userId,
