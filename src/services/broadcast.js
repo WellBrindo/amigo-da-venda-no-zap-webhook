@@ -31,12 +31,18 @@ import {
   markPostAdIdleReminderSent,
   getGrowthMeta,
   markAdOfDaySent,
+  resetCheckoutCouponState,
 } from "./state.js";
 import { listWindow24hActive, nowMs, getLastInboundTs } from "./window24h.js";
 import { sendWhatsAppText } from "./meta/whatsapp.js";
 import { getCopyText } from "./copy.js";
 import { pushSystemAlert } from "./alerts.js";
 import { getInternalUserIdByWaId, getPreferredOutboundRecipient } from "./identity.js";
+import {
+  listExpiredPendingCouponReservations,
+  expireCouponReservation,
+  markCouponRemovedMessageSent,
+} from "./coupons.js";
 
 const CAMPAIGNS_LIST_KEY = "campaigns:list"; // LIST de campaignId (newest first)
 const PENDING_CAMPAIGNS_SET = "campaigns:pending:set"; // SET de campaignId com pendências
@@ -436,6 +442,12 @@ const DAILY_AD_TARGET_HOUR = 10;
 const DAILY_AD_MIN_REMAINING_MS = 30 * 60 * 1000;
 const DAILY_AD_MAX_REMAINING_MS = 6 * 60 * 60 * 1000;
 const IDLE_REMINDER_DELAY_MS = 5 * 60 * 1000;
+const COUPON_EXPIRATION_CHECK_LIMIT = 200;
+const COUPON_REMOVAL_MESSAGE_KEY = "FLOW_COUPON_REMOVED_TIMEOUT";
+const COUPON_REMOVAL_FALLBACK = [
+  "Seu cupom de desconto foi removido porque o pagamento não foi confirmado dentro do prazo.",
+  "Se quiser, você pode escolher novamente seu plano e aplicar um novo cupom válido na contratação.",
+].join("\n\n");
 
 function getTzParts(inputMs = nowMs(), timeZone = AUTOMATION_TZ) {
   const dtf = new Intl.DateTimeFormat("en-CA", {
@@ -483,6 +495,103 @@ async function sendCopyMessage(userId, key, vars = {}) {
   if (!recipient) return false;
   await sendWhatsAppText({ to: recipient, text: String(text) });
   return true;
+}
+
+function normalizeCopyResult(text, key = "") {
+  const value = safeStr(text);
+  if (!value) return "";
+  if (key && value === key) return "";
+  return value;
+}
+
+async function getCouponRemovalMessage(userId, reservation = null) {
+  const id = safeStr(userId);
+  const vars = {
+    couponCode: safeStr(reservation?.couponCode),
+    planCode: safeStr(reservation?.planCode),
+    billingCycle: safeStr(reservation?.billingCycle),
+  };
+
+  try {
+    const text = await getCopyText(COUPON_REMOVAL_MESSAGE_KEY, { waId: id, userId: id, vars });
+    return normalizeCopyResult(text, COUPON_REMOVAL_MESSAGE_KEY) || COUPON_REMOVAL_FALLBACK;
+  } catch (_) {
+    return COUPON_REMOVAL_FALLBACK;
+  }
+}
+
+async function processExpiredCouponReservations({ now = nowMs(), limit = COUPON_EXPIRATION_CHECK_LIMIT } = {}) {
+  const expired = await listExpiredPendingCouponReservations({ now, limit }).catch(() => []);
+  const rows = Array.isArray(expired) ? expired : [];
+
+  let expiredCount = 0;
+  let messageSentCount = 0;
+  let skippedMessageCount = 0;
+  let errors = 0;
+
+  for (const reservation of rows) {
+    const reservationId = safeStr(reservation?.reservationId || reservation?.id);
+    const userId = safeStr(reservation?.internalUserId);
+    if (!reservationId) continue;
+
+    try {
+      const result = await expireCouponReservation(reservationId, {
+        reason: "coupon_timeout_20h",
+        meta: { source: "broadcast_automation", timeoutHours: 20 },
+      });
+
+      const nextReservation = result?.reservation || reservation;
+      expiredCount += result?.ok ? 1 : 0;
+
+      if (userId) {
+        await resetCheckoutCouponState(userId).catch(() => ({}));
+      }
+
+      const alreadySent = Boolean(nextReservation?.messageSentAt || nextReservation?.meta?.couponRemovedMessageSent);
+      if (alreadySent) {
+        skippedMessageCount += 1;
+        continue;
+      }
+
+      const recipientInfo = userId ? await getRecipientForUser(userId) : null;
+      const recipient = safeStr(recipientInfo?.recipient);
+      if (!recipient) {
+        skippedMessageCount += 1;
+        await recordError("automation_coupon_expiration", userId || reservationId, "Missing outbound recipient for coupon expiration message").catch(() => 0);
+        continue;
+      }
+
+      const text = await getCouponRemovalMessage(userId, nextReservation);
+      if (!safeStr(text)) {
+        skippedMessageCount += 1;
+        await recordError("automation_coupon_expiration", userId || reservationId, "Coupon expiration message empty").catch(() => 0);
+        continue;
+      }
+
+      try {
+        await sendWhatsAppText({ to: recipient, text });
+        await markCouponRemovedMessageSent(reservationId, {
+          meta: { source: "broadcast_automation", timeoutHours: 20 },
+        }).catch(() => ({}));
+        messageSentCount += 1;
+      } catch (err) {
+        errors += 1;
+        await recordError("automation_coupon_expiration", userId || reservationId, err?.message || err).catch(() => 0);
+      }
+    } catch (err) {
+      errors += 1;
+      await recordError("automation_coupon_expiration", userId || reservationId, err?.message || err).catch(() => 0);
+    }
+  }
+
+  return {
+    ok: true,
+    expiredCount,
+    messageSentCount,
+    skippedMessageCount,
+    errors,
+    checked: rows.length,
+  };
 }
 
 async function maybeSendPostAdIdleReminder(userId, nowTs) {
@@ -563,6 +672,19 @@ async function maybeSendDailyAdNudge(userId, nowTs, waIdHint = "") {
 }
 
 export async function runLifecycleAutomationTick({ limit = 5000, tsMs = nowMs() } = {}) {
+  const couponAutomation = await processExpiredCouponReservations({
+    now: tsMs,
+    limit: COUPON_EXPIRATION_CHECK_LIMIT,
+  }).catch((err) => ({
+    ok: false,
+    expiredCount: 0,
+    messageSentCount: 0,
+    skippedMessageCount: 0,
+    errors: 1,
+    checked: 0,
+    error: err?.message || String(err),
+  }));
+
   const activeWaIds = await listWindow24hActive(tsMs, Number(limit || 5000)).catch(() => []);
   const activeList = Array.isArray(activeWaIds) ? activeWaIds.map((x) => String(x || "").trim()).filter(Boolean) : [];
 
@@ -608,7 +730,19 @@ export async function runLifecycleAutomationTick({ limit = 5000, tsMs = nowMs() 
     }
   }
 
-  return { ok: true, activeWindow: mapped.length, postAdIdleSent, idleSent, dailyAdSent, errors };
+  return {
+    ok: true,
+    activeWindow: mapped.length,
+    postAdIdleSent,
+    idleSent,
+    dailyAdSent,
+    errors,
+    couponExpirationsChecked: Number(couponAutomation?.checked || 0),
+    couponExpired: Number(couponAutomation?.expiredCount || 0),
+    couponRemovalMessagesSent: Number(couponAutomation?.messageSentCount || 0),
+    couponRemovalMessagesSkipped: Number(couponAutomation?.skippedMessageCount || 0),
+    couponErrors: Number(couponAutomation?.errors || 0),
+  };
 }
 
 let automationTimer = null;
