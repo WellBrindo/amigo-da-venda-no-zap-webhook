@@ -15,6 +15,26 @@ function isRetryable(status) {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
+function buildQualityGuard(mode) {
+  const modeLabel = mode === "FREE" ? "LIVRE" : "FIXO";
+
+  return [
+    `Validação obrigatória do modo ${modeLabel}: antes de responder, revise silenciosamente o texto final inteiro e só entregue a versão revisada.`,
+    "O usuário pode escrever de forma informal, resumida, com erros de digitação, abreviações, mistura de ideias ou frases incompletas.",
+    "Sua função é transformar essas informações em um anúncio claro, fluido, bem escrito, agradável de ler e adequado para divulgação.",
+    "Você pode reorganizar, reescrever e elevar o nível de formalidade do texto final quando isso melhorar a qualidade do anúncio.",
+    "Corrija gramática, concordância, pontuação, acentuação, clareza e fluidez somente na redação do anúncio final.",
+    "Nunca entregue palavras truncadas, frases quebradas, pedaços de palavras, trechos sem sentido, restos de frase ou linhas linguisticamente mutiladas.",
+    "Se uma frase estiver ruim ou estranha, reescreva naturalmente antes de responder.",
+    "Preserve fielmente o conteúdo real informado pelo usuário.",
+    "Preserve exatamente nomes próprios, nomes de empresas, marcas, nomes de produtos, slogans, expressões comerciais, termos em outros idiomas, regionalismos e grafias intencionais de identidade comercial.",
+    "Não traduza, não normalize e não tente corrigir nomes próprios, marcas, slogans ou expressões intencionais do usuário.",
+    "Nunca troque uma palavra só porque parece diferente do português padrão se ela puder ser nome comercial, marca, slogan, termo estrangeiro ou escolha estilística do usuário.",
+    "Você pode deixar o anúncio final mais profissional, mais organizado e mais vendedor do que a forma bruta escrita pelo usuário, mas sem inventar fatos e sem alterar a identidade textual essencial do conteúdo informado.",
+    "Retorne somente o anúncio final pronto para envio.",
+  ].join("\n");
+}
+
 export async function generateAdText({
   userText,
   mode = "FIXED",
@@ -26,16 +46,17 @@ export async function generateAdText({
   const clean = String(userText || "").trim();
   if (!clean) throw new Error("Missing userText");
 
+  const resolvedMode = String(mode || "FIXED").trim().toUpperCase() === "FREE" ? "FREE" : "FIXED";
   const resolvedSystemKey = String(systemKey || "").trim().toUpperCase();
 
   const systemFixed = await getCopyText("OPENAI_SYSTEM_FIXED");
-
   const systemFree = await getCopyText("OPENAI_SYSTEM_FREE");
 
   const explicitSystem = resolvedSystemKey ? await getCopyText(resolvedSystemKey) : "";
-  const system = explicitSystem || (mode === "FREE" ? systemFree : systemFixed);
+  const system = explicitSystem || (resolvedMode === "FREE" ? systemFree : systemFixed);
+  const qualityGuard = buildQualityGuard(resolvedMode);
 
-  const modeGuard = mode === "FREE"
+  const modeGuard = resolvedMode === "FREE"
     ? "Modo LIVRE: escolha a melhor estrutura para conversão, mantendo clareza, visual bonito e fidelidade às informações do usuário."
     : "Modo FIXO: mantenha estrutura consistente, bem organizada, visualmente bonita e focada em conversão no WhatsApp.";
 
@@ -44,6 +65,7 @@ export async function generateAdText({
     messages: [
       { role: "system", content: system },
       { role: "system", content: modeGuard },
+      { role: "system", content: qualityGuard },
       { role: "user", content: clean },
     ],
     max_tokens: Number(maxTokens),
