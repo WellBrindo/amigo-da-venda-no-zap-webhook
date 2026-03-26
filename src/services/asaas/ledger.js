@@ -3,6 +3,7 @@
 // - Não altera status do usuário (isso continua no webhook handler).
 // - Dedup por evento + id (payment/subscription)
 // - Capped lists (não cresce infinito)
+// - Pode registrar metadados financeiros do checkout/cupom, sem decidir elegibilidade.
 
 import { redisLPush, redisLTrim, redisLRange, redisSIsMember, redisSAdd } from "../redis.js";
 
@@ -15,8 +16,30 @@ function safeStr(v) {
   return String(v || "").trim();
 }
 
+function toNumber(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function normalizeLedgerUserRef({ userId, waId }) {
   return safeStr(userId || waId);
+}
+
+function normalizeCents(value) {
+  return Math.max(0, Math.trunc(toNumber(value, 0)));
+}
+
+function normalizeMoneyValue(value) {
+  return Math.max(0, Number(toNumber(value, 0).toFixed(2)));
+}
+
+function centsToValue(cents) {
+  return normalizeMoneyValue(toNumber(cents, 0) / 100);
+}
+
+function normalizeAppliesTo(value) {
+  const text = safeStr(value).toLowerCase();
+  return text === "entire_subscription" ? "entire_subscription" : "first_charge_only";
 }
 
 function pickPayment(p) {
@@ -47,6 +70,64 @@ function pickSubscription(s) {
   };
 }
 
+function pickQuote(quote) {
+  if (!quote || typeof quote !== "object") return null;
+
+  const calculation = quote.calculation && typeof quote.calculation === "object"
+    ? quote.calculation
+    : {};
+
+  const basePriceCents = normalizeCents(calculation.basePriceCents);
+  const discountAmountCents = normalizeCents(calculation.discountAmountCents);
+  const finalPriceCents = normalizeCents(calculation.finalPriceCents);
+
+  return {
+    internalUserId: safeStr(quote.internalUserId),
+    planCode: safeStr(quote.planCode),
+    planName: safeStr(quote.plan?.name || quote.explanation?.planName),
+    billingCycle: safeStr(quote.billingCycle || quote.explanation?.billingCycle),
+    chargeMode: safeStr(quote.chargeMode),
+    couponCode: safeStr(quote.couponCode || quote.explanation?.couponCode),
+    appliesTo: normalizeAppliesTo(calculation.appliesTo || quote.explanation?.appliesTo),
+    basePriceCents,
+    discountAmountCents,
+    finalPriceCents,
+    basePriceValue: centsToValue(basePriceCents),
+    discountAmountValue: centsToValue(discountAmountCents),
+    finalPriceValue: centsToValue(finalPriceCents),
+  };
+}
+
+function pickCouponLedger(couponLedger = {}, quote = null) {
+  if (!couponLedger || typeof couponLedger !== "object") couponLedger = {};
+  const quoteData = pickQuote(quote);
+
+  const basePriceCents = normalizeCents(
+    couponLedger.basePriceCents ?? quoteData?.basePriceCents
+  );
+  const discountAmountCents = normalizeCents(
+    couponLedger.discountAmountCents ?? quoteData?.discountAmountCents
+  );
+  const finalPriceCents = normalizeCents(
+    couponLedger.finalPriceCents ?? quoteData?.finalPriceCents
+  );
+
+  return {
+    reservationId: safeStr(couponLedger.reservationId),
+    reservationStatus: safeStr(couponLedger.reservationStatus),
+    couponCode: safeStr(couponLedger.couponCode || quoteData?.couponCode),
+    planCode: safeStr(couponLedger.planCode || quoteData?.planCode),
+    billingCycle: safeStr(couponLedger.billingCycle || quoteData?.billingCycle),
+    appliesTo: normalizeAppliesTo(couponLedger.appliesTo || quoteData?.appliesTo),
+    basePriceCents,
+    discountAmountCents,
+    finalPriceCents,
+    basePriceValue: centsToValue(basePriceCents),
+    discountAmountValue: centsToValue(discountAmountCents),
+    finalPriceValue: centsToValue(finalPriceCents),
+  };
+}
+
 function makeDedupKey({ event, payment, subscription }) {
   const ev = safeStr(event);
   const pid = safeStr(payment?.id);
@@ -57,7 +138,28 @@ function makeDedupKey({ event, payment, subscription }) {
   return `${ev}:generic:${Date.now()}`;
 }
 
-export async function recordAsaasEvent({ event, userId, waId, payment, subscription, source = "webhook" }) {
+function parseRows(rows) {
+  const items = [];
+  for (const r of rows || []) {
+    try {
+      items.push(JSON.parse(r));
+    } catch {
+      // ignora
+    }
+  }
+  return items;
+}
+
+export async function recordAsaasEvent({
+  event,
+  userId,
+  waId,
+  payment,
+  subscription,
+  source = "webhook",
+  quote = null,
+  couponLedger = null,
+}) {
   const userRef = normalizeLedgerUserRef({ userId, waId });
   if (!userRef) return { ok: false, reason: "no_userId" };
 
@@ -69,6 +171,8 @@ export async function recordAsaasEvent({ event, userId, waId, payment, subscript
     waId: safeStr(waId),
     payment: pickPayment(payment),
     subscription: pickSubscription(subscription),
+    quote: pickQuote(quote),
+    couponLedger: pickCouponLedger(couponLedger, quote),
   };
 
   const dedupKey = makeDedupKey({ event, payment, subscription });
@@ -88,6 +192,46 @@ export async function recordAsaasEvent({ event, userId, waId, payment, subscript
   return { ok: true };
 }
 
+export async function recordAsaasCouponLedger({
+  event,
+  userId,
+  waId,
+  payment = null,
+  subscription = null,
+  source = "coupon",
+  quote = null,
+  couponCode = "",
+  reservationId = "",
+  reservationStatus = "",
+  planCode = "",
+  billingCycle = "",
+  appliesTo = "",
+  basePriceCents = 0,
+  discountAmountCents = 0,
+  finalPriceCents = 0,
+}) {
+  return recordAsaasEvent({
+    event,
+    userId,
+    waId,
+    payment,
+    subscription,
+    source,
+    quote,
+    couponLedger: {
+      couponCode,
+      reservationId,
+      reservationStatus,
+      planCode,
+      billingCycle,
+      appliesTo,
+      basePriceCents,
+      discountAmountCents,
+      finalPriceCents,
+    },
+  });
+}
+
 export async function listAsaasEvents({ userId = "", waId = "", offset = 0, limit = 50 } = {}) {
   const off = Math.max(0, Number(offset) || 0);
   const lim = Math.min(200, Math.max(1, Number(limit) || 50));
@@ -98,14 +242,15 @@ export async function listAsaasEvents({ userId = "", waId = "", offset = 0, limi
   const key = userRef ? keyUserEvents(userRef) : KEY_EVENTS_GLOBAL;
   const rows = await redisLRange(key, start, stop);
 
-  const items = [];
-  for (const r of rows || []) {
-    try {
-      items.push(JSON.parse(r));
-    } catch {
-      // ignora
-    }
-  }
+  return { ok: true, items: parseRows(rows) };
+}
 
-  return { ok: true, items };
+export async function listAsaasCouponEvents({ userId = "", waId = "", offset = 0, limit = 50 } = {}) {
+  const result = await listAsaasEvents({ userId, waId, offset, limit });
+  if (!result?.ok) return result;
+
+  return {
+    ok: true,
+    items: (result.items || []).filter((item) => item?.couponLedger && typeof item.couponLedger === "object"),
+  };
 }
