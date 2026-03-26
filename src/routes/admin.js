@@ -4217,28 +4217,423 @@ async function toggle(code, active){
     }
   });
 
-  router.post("/plans/:code/active", async (req, res) => {
-    try {
-      const active = Boolean(req.body?.active);
-      const plan = await setPlanActive(req.params.code, active);
-      await safeRecordAdminAudit(req, {
-        module: "plans",
-        action: "SET_PLAN_ACTIVE",
-        targetId: String(plan?.code || req.params.code || "").trim(),
-        targetLabel: String(plan?.name || "").trim(),
-        summary: `${active ? "Ativou" : "Desativou"} o plano ${String(plan?.code || req.params.code || "").trim()}.`,
-        after: plan,
-        meta: { active },
-      });
-      return res.json({ ok: true, plan });
-    } catch (err) {
-      return res.status(400).json({ ok: false, error: err.message });
-    }
-  });
 
-  // -----------------------------
-  // ✅ Health Planos
-  // -----------------------------
+router.get("/coupons", async (req, res) => {
+  const [coupons, plans] = await Promise.all([
+    listCoupons({ includeInactive: true, includeDeleted: false }).catch(() => []),
+    listPlans({ includeInactive: true }).catch(() => []),
+  ]);
+
+  const planOptions = (Array.isArray(plans) ? plans : [])
+    .map((plan) => {
+      const code = escapeHtml(String(plan?.code || "").trim().toUpperCase());
+      const name = escapeHtml(String(plan?.name || "").trim());
+      return `<option value="${code}">${code}${name ? " · " + name : ""}</option>`;
+    })
+    .join("");
+
+  const rows = (Array.isArray(coupons) ? coupons : [])
+    .map((coupon) => {
+      const code = escapeHtml(String(coupon?.couponCode || "").trim().toUpperCase());
+      const name = escapeHtml(String(coupon?.name || "").trim());
+      const description = escapeHtml(String(coupon?.description || "").trim());
+      const active = Boolean(coupon?.active);
+      const discountType = escapeHtml(String(coupon?.discountType || ""));
+      const discountValue = escapeHtml(String(coupon?.discountValue || 0));
+      const discountCap = escapeHtml(String(coupon?.discountCap || 0));
+      const planCodes = escapeHtml((Array.isArray(coupon?.eligiblePlanCodes) ? coupon.eligiblePlanCodes : []).join(", "));
+      const billingCycles = escapeHtml((Array.isArray(coupon?.eligibleBillingCycles) ? coupon.eligibleBillingCycles : []).join(", "));
+      const validFrom = coupon?.validFrom ? formatDateTimeLabel(coupon.validFrom) : "";
+      const validUntil = coupon?.validUntil ? formatDateTimeLabel(coupon.validUntil) : "";
+      const maxUsesTotal = escapeHtml(String(coupon?.maxUsesTotal || 0));
+      const maxUsesPerUser = escapeHtml(String(coupon?.maxUsesPerUser || 0));
+      const firstPurchaseOnly = coupon?.firstPurchaseOnly ? "yes" : "no";
+      const onlyWithoutActivePlan = coupon?.onlyWithoutActivePlan ? "yes" : "no";
+      const appliesTo = escapeHtml(String(coupon?.appliesTo || "first_charge_only"));
+      return `<tr
+        data-coupon-code="${code}"
+        data-name="${name}"
+        data-description="${description}"
+        data-active="${active ? "1" : "0"}"
+        data-discount-type="${discountType}"
+        data-discount-value="${discountValue}"
+        data-discount-cap="${discountCap}"
+        data-plan-codes="${planCodes}"
+        data-billing-cycles="${billingCycles}"
+        data-valid-from="${escapeHtml(String(coupon?.validFrom || ""))}"
+        data-valid-until="${escapeHtml(String(coupon?.validUntil || ""))}"
+        data-max-uses-total="${maxUsesTotal}"
+        data-max-uses-per-user="${maxUsesPerUser}"
+        data-first-purchase-only="${coupon?.firstPurchaseOnly ? "1" : "0"}"
+        data-only-without-active-plan="${coupon?.onlyWithoutActivePlan ? "1" : "0"}"
+        data-applies-to="${appliesTo}"
+      >
+        <td><code>${code}</code></td>
+        <td>${name}</td>
+        <td>${active ? "✅" : "❌"}</td>
+        <td>${escapeHtml(formatCouponDiscount(coupon))}</td>
+        <td>${escapeHtml(formatCouponCycles(coupon?.eligibleBillingCycles))}</td>
+        <td>${escapeHtml(formatCouponPlans(coupon?.eligiblePlanCodes))}</td>
+        <td>${escapeHtml(firstPurchaseOnly)}</td>
+        <td>${escapeHtml(onlyWithoutActivePlan)}</td>
+        <td>${escapeHtml(appliesTo)}</td>
+        <td>${escapeHtml(validFrom)}${validFrom && validUntil ? " → " : ""}${escapeHtml(validUntil)}</td>
+        <td>
+          <button type="button" onclick="loadCouponRow(this)">Editar</button>
+          <button type="button" onclick="toggleCoupon('${code}', ${active ? "false" : "true"})">${active ? "Desativar" : "Ativar"}</button>
+          <button type="button" class="danger" onclick="removeCoupon('${code}')">Excluir</button>
+        </td>
+      </tr>`;
+    })
+    .join("");
+
+  const inner = `
+    <div class="card pad">
+      <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+        <div>
+          <h3 style="margin:0 0 6px 0;">🏷️ Cupons</h3>
+          <div class="muted">Cadastro, atualização, ativação, inativação e exclusão lógica dos cupons do produto.</div>
+        </div>
+        <div class="row">
+          <a class="pill" href="/admin/coupon-report-ui">Relatório de Cupons</a>
+          <a class="pill" href="/admin/reports-ui">Central de Relatórios</a>
+        </div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="grid cols2">
+        <div>
+          <label class="muted">Código do cupom</label>
+          <input id="couponCode" placeholder="Ex.: BEMVINDO10" style="width:100%;" />
+        </div>
+        <div>
+          <label class="muted">Nome interno</label>
+          <input id="couponName" placeholder="Ex.: Campanha Boas-vindas" style="width:100%;" />
+        </div>
+        <div style="grid-column:1 / -1;">
+          <label class="muted">Descrição interna</label>
+          <textarea id="couponDescription" style="min-height:90px;"></textarea>
+        </div>
+
+        <div>
+          <label class="muted">Tipo de desconto</label>
+          <select id="couponDiscountType" style="width:100%;">
+            <option value="percent">Percentual</option>
+            <option value="fixed">Valor fixo</option>
+          </select>
+        </div>
+        <div>
+          <label class="muted">Valor do desconto</label>
+          <input id="couponDiscountValue" type="number" min="0" step="1" placeholder="Ex.: 10 ou 2000" style="width:100%;" />
+        </div>
+        <div>
+          <label class="muted">Teto do desconto (centavos, opcional)</label>
+          <input id="couponDiscountCap" type="number" min="0" step="1" placeholder="Ex.: 5000" style="width:100%;" />
+        </div>
+        <div>
+          <label class="muted">Aplicação do desconto</label>
+          <select id="couponAppliesTo" style="width:100%;">
+            <option value="first_charge_only">Apenas na primeira cobrança</option>
+            <option value="entire_subscription">Em toda a assinatura</option>
+          </select>
+        </div>
+
+        <div style="grid-column:1 / -1;">
+          <label class="muted">Planos elegíveis (múltipla seleção + campo livre)</label>
+          <div class="row" style="align-items:flex-start;">
+            <select id="couponPlanOptions" multiple size="6" style="min-width:280px; flex:1;">${planOptions}</select>
+            <textarea id="couponEligiblePlanCodes" placeholder="Opcional: informe códigos separados por vírgula, ponto e vírgula ou nova linha." style="min-height:120px; flex:1;"></textarea>
+          </div>
+        </div>
+
+        <div style="grid-column:1 / -1;">
+          <label class="muted">Ciclos elegíveis</label>
+          <div class="row">
+            <label class="pill"><input id="couponCycleMonthly" type="checkbox" value="monthly" /> Mensal</label>
+            <label class="pill"><input id="couponCycleAnnual" type="checkbox" value="annual" /> Anual</label>
+          </div>
+        </div>
+
+        <div>
+          <label class="muted">Válido a partir de (ISO ou data/hora do navegador)</label>
+          <input id="couponValidFrom" type="datetime-local" style="width:100%;" />
+        </div>
+        <div>
+          <label class="muted">Válido até</label>
+          <input id="couponValidUntil" type="datetime-local" style="width:100%;" />
+        </div>
+        <div>
+          <label class="muted">Limite total de usos</label>
+          <input id="couponMaxUsesTotal" type="number" min="0" step="1" placeholder="0 = sem limite" style="width:100%;" />
+        </div>
+        <div>
+          <label class="muted">Limite de usos por usuário</label>
+          <input id="couponMaxUsesPerUser" type="number" min="0" step="1" placeholder="0 = sem limite" style="width:100%;" />
+        </div>
+
+        <div style="grid-column:1 / -1;">
+          <div class="row">
+            <label class="pill"><input id="couponActive" type="checkbox" checked /> Ativo</label>
+            <label class="pill"><input id="couponFirstPurchaseOnly" type="checkbox" /> Somente primeira contratação</label>
+            <label class="pill"><input id="couponOnlyWithoutActivePlan" type="checkbox" /> Somente sem plano ativo</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="hr"></div>
+
+      <div class="row">
+        <button type="button" class="primary" onclick="saveCoupon()">Criar / Atualizar</button>
+        <button type="button" onclick="resetCouponForm()">Limpar formulário</button>
+      </div>
+
+      <div class="hr"></div>
+
+      <div style="overflow:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Código</th>
+              <th>Nome</th>
+              <th>Ativo</th>
+              <th>Desconto</th>
+              <th>Ciclos</th>
+              <th>Planos</th>
+              <th>1ª contratação</th>
+              <th>Sem plano ativo</th>
+              <th>Aplicação</th>
+              <th>Validade</th>
+              <th>Ações</th>
+            </tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="11" class="muted">Nenhum cupom cadastrado.</td></tr>'}</tbody>
+        </table>
+      </div>
+
+      <div class="hr"></div>
+      <details>
+        <summary class="muted">Resposta da API</summary>
+        <pre id="couponMsg" style="white-space:pre-wrap;"></pre>
+      </details>
+    </div>
+
+    <script>
+      function q(id){ return document.getElementById(id); }
+      function toLocalDateTimeInputValue(value){
+        const raw = String(value || '').trim();
+        if(!raw) return '';
+        const dt = new Date(raw);
+        if(Number.isNaN(dt.getTime())) return '';
+        const yyyy = dt.getFullYear();
+        const mm = String(dt.getMonth()+1).padStart(2,'0');
+        const dd = String(dt.getDate()).padStart(2,'0');
+        const hh = String(dt.getHours()).padStart(2,'0');
+        const mi = String(dt.getMinutes()).padStart(2,'0');
+        return \`\${yyyy}-\${mm}-\${dd}T\${hh}:\${mi}\`;
+      }
+      function readSelectedPlanCodes(){
+        const values = new Set();
+        const textareaValues = String(q('couponEligiblePlanCodes').value || '')
+          .split(/[\n,;]+/)
+          .map((item)=>String(item || '').trim().toUpperCase())
+          .filter(Boolean);
+        textareaValues.forEach((v)=>values.add(v));
+
+        const selected = Array.from(q('couponPlanOptions').selectedOptions || [])
+          .map((opt)=>String(opt.value || '').trim().toUpperCase())
+          .filter(Boolean);
+        selected.forEach((v)=>values.add(v));
+        return Array.from(values);
+      }
+      function writeSelectedPlanCodes(list){
+        const values = Array.isArray(list) ? list.map((item)=>String(item || '').trim().toUpperCase()).filter(Boolean) : [];
+        q('couponEligiblePlanCodes').value = values.join(', ');
+        Array.from(q('couponPlanOptions').options || []).forEach((opt)=>{
+          opt.selected = values.includes(String(opt.value || '').trim().toUpperCase());
+        });
+      }
+      function readEligibleCycles(){
+        const out = [];
+        if(q('couponCycleMonthly').checked) out.push('monthly');
+        if(q('couponCycleAnnual').checked) out.push('annual');
+        return out;
+      }
+      function writeEligibleCycles(list){
+        const values = Array.isArray(list) ? list : [];
+        q('couponCycleMonthly').checked = values.includes('monthly');
+        q('couponCycleAnnual').checked = values.includes('annual');
+      }
+      function resetCouponForm(){
+        q('couponCode').value = '';
+        q('couponName').value = '';
+        q('couponDescription').value = '';
+        q('couponDiscountType').value = 'percent';
+        q('couponDiscountValue').value = '';
+        q('couponDiscountCap').value = '';
+        q('couponAppliesTo').value = 'first_charge_only';
+        q('couponValidFrom').value = '';
+        q('couponValidUntil').value = '';
+        q('couponMaxUsesTotal').value = '';
+        q('couponMaxUsesPerUser').value = '';
+        q('couponActive').checked = true;
+        q('couponFirstPurchaseOnly').checked = false;
+        q('couponOnlyWithoutActivePlan').checked = false;
+        writeEligibleCycles([]);
+        writeSelectedPlanCodes([]);
+        q('couponMsg').textContent = '';
+      }
+      function loadCouponRow(btn){
+        const tr = btn.closest('tr');
+        if(!tr) return;
+        q('couponCode').value = tr.dataset.couponCode || '';
+        q('couponName').value = tr.dataset.name || '';
+        q('couponDescription').value = tr.dataset.description || '';
+        q('couponDiscountType').value = tr.dataset.discountType || 'percent';
+        q('couponDiscountValue').value = tr.dataset.discountValue || '';
+        q('couponDiscountCap').value = tr.dataset.discountCap || '';
+        q('couponAppliesTo').value = tr.dataset.appliesTo || 'first_charge_only';
+        q('couponValidFrom').value = toLocalDateTimeInputValue(tr.dataset.validFrom || '');
+        q('couponValidUntil').value = toLocalDateTimeInputValue(tr.dataset.validUntil || '');
+        q('couponMaxUsesTotal').value = tr.dataset.maxUsesTotal || '';
+        q('couponMaxUsesPerUser').value = tr.dataset.maxUsesPerUser || '';
+        q('couponActive').checked = String(tr.dataset.active || '') === '1';
+        q('couponFirstPurchaseOnly').checked = String(tr.dataset.firstPurchaseOnly || '') === '1';
+        q('couponOnlyWithoutActivePlan').checked = String(tr.dataset.onlyWithoutActivePlan || '') === '1';
+        writeEligibleCycles(String(tr.dataset.billingCycles || '').split(',').map((item)=>item.trim()).filter(Boolean));
+        writeSelectedPlanCodes(String(tr.dataset.planCodes || '').split(',').map((item)=>item.trim()).filter(Boolean));
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+      async function saveCoupon(){
+        const body = {
+          couponCode: String(q('couponCode').value || '').trim().toUpperCase(),
+          name: String(q('couponName').value || '').trim(),
+          description: String(q('couponDescription').value || '').trim(),
+          active: !!q('couponActive').checked,
+          discountType: String(q('couponDiscountType').value || 'percent').trim(),
+          discountValue: Number(q('couponDiscountValue').value || 0),
+          discountCap: Number(q('couponDiscountCap').value || 0),
+          eligiblePlanCodes: readSelectedPlanCodes(),
+          eligibleBillingCycles: readEligibleCycles(),
+          validFrom: q('couponValidFrom').value || '',
+          validUntil: q('couponValidUntil').value || '',
+          maxUsesTotal: Number(q('couponMaxUsesTotal').value || 0),
+          maxUsesPerUser: Number(q('couponMaxUsesPerUser').value || 0),
+          firstPurchaseOnly: !!q('couponFirstPurchaseOnly').checked,
+          onlyWithoutActivePlan: !!q('couponOnlyWithoutActivePlan').checked,
+          appliesTo: String(q('couponAppliesTo').value || 'first_charge_only').trim(),
+        };
+        const r = await fetch('/admin/coupons', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const j = await r.json().catch(()=>({ ok:false, error:'Falha ao ler resposta' }));
+        q('couponMsg').textContent = JSON.stringify(j, null, 2);
+        if(j && j.ok) window.location.reload();
+      }
+      async function toggleCoupon(code, active){
+        const r = await fetch('/admin/coupons/' + encodeURIComponent(code) + '/active', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active: !!active }),
+        });
+        const j = await r.json().catch(()=>({ ok:false, error:'Falha ao ler resposta' }));
+        q('couponMsg').textContent = JSON.stringify(j, null, 2);
+        if(j && j.ok) window.location.reload();
+      }
+      async function removeCoupon(code){
+        if(!confirm('Tem certeza que deseja excluir logicamente o cupom ' + code + '?')) return;
+        const r = await fetch('/admin/coupons/' + encodeURIComponent(code) + '/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        const j = await r.json().catch(()=>({ ok:false, error:'Falha ao ler resposta' }));
+        q('couponMsg').textContent = JSON.stringify(j, null, 2);
+        if(j && j.ok) window.location.reload();
+      }
+    </script>
+  `;
+
+  const html = layoutBase({ title: "Cupons", activePath: "/admin/coupons", content: inner });
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  return res.status(200).send(html);
+});
+
+router.post("/coupons", async (req, res) => {
+  try {
+    const input = buildCouponFormInput(req.body || {});
+    if (!input.couponCode) {
+      return res.status(400).json({ ok: false, error: "couponCode required" });
+    }
+    const before = await getCoupon(input.couponCode).catch(() => null);
+    const coupon = await upsertCoupon(input);
+    await safeRecordAdminAudit(req, {
+      module: "coupons",
+      action: before ? "UPSERT_COUPON" : "CREATE_COUPON",
+      targetId: String(coupon?.couponCode || input.couponCode || "").trim(),
+      targetLabel: String(coupon?.name || "").trim(),
+      summary: before
+        ? `Atualizou o cupom ${String(coupon?.couponCode || input.couponCode || "").trim()}.`
+        : `Criou o cupom ${String(coupon?.couponCode || input.couponCode || "").trim()}.`,
+      before: before || {},
+      after: coupon,
+      meta: { couponCode: String(coupon?.couponCode || input.couponCode || "").trim() },
+    });
+    return res.json({ ok: true, coupon });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+router.post("/coupons/:code/active", async (req, res) => {
+  try {
+    const code = normalizeAdminCouponCode(req.params.code);
+    const active = normalizeAdminBool(req.body?.active, true);
+    const before = await getCoupon(code).catch(() => null);
+    const coupon = await setCouponActive(code, active);
+    await safeRecordAdminAudit(req, {
+      module: "coupons",
+      action: "SET_COUPON_ACTIVE",
+      targetId: String(coupon?.couponCode || code || "").trim(),
+      targetLabel: String(coupon?.name || "").trim(),
+      summary: `${active ? "Ativou" : "Desativou"} o cupom ${String(coupon?.couponCode || code || "").trim()}.`,
+      before: before || {},
+      after: coupon,
+      meta: { active },
+    });
+    return res.json({ ok: true, coupon });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+router.post("/coupons/:code/delete", async (req, res) => {
+  try {
+    const code = normalizeAdminCouponCode(req.params.code);
+    const before = await getCoupon(code).catch(() => null);
+    const coupon = await deleteCoupon(code);
+    await safeRecordAdminAudit(req, {
+      module: "coupons",
+      action: "DELETE_COUPON",
+      targetId: String(coupon?.couponCode || code || "").trim(),
+      targetLabel: String(coupon?.name || "").trim(),
+      summary: `Removeu logicamente o cupom ${String(coupon?.couponCode || code || "").trim()}.`,
+      before: before || {},
+      after: coupon || {},
+      meta: { deleted: true },
+    });
+    return res.json({ ok: true, coupon });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// -----------------------------
+// ✅ Health Planos
+// -----------------------------
+
   router.get("/health-plans", async (req, res) => {
     const h = await getPlansHealth({ includeInactive: true });
     return res.json({ ok: true, health: h });
