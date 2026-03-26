@@ -25,28 +25,37 @@ const DEFAULT_PLANS = [
     code: "DE_VEZ_EM_QUANDO",
     name: "De Vez em Quando",
     priceCents: 2490,
+    annualPriceCents: 29880,
     monthlyQuota: 20,
+    annualQuota: 240,
     active: true,
     maxRefinements: 2,
     description: "20 descrições/mês",
+    annualDescription: "240 descrições/ano",
   },
   {
     code: "SEMPRE_POR_PERTO",
     name: "Sempre por Perto",
     priceCents: 3490,
+    annualPriceCents: 41880,
     monthlyQuota: 60,
+    annualQuota: 720,
     active: true,
     maxRefinements: 2,
     description: "60 descrições/mês",
+    annualDescription: "720 descrições/ano",
   },
   {
     code: "MELHOR_AMIGO",
     name: "Melhor Amigo",
     priceCents: 4990,
+    annualPriceCents: 59880,
     monthlyQuota: 200,
+    annualQuota: 2400,
     active: true,
     maxRefinements: 2,
     description: "200 descrições/mês",
+    annualDescription: "2400 descrições/ano",
   },
 ];
 
@@ -136,6 +145,93 @@ function toInt(n, field) {
   return Math.trunc(v);
 }
 
+const BILLING_CYCLES = ["monthly", "annual"];
+
+function normalizeBillingCycle(value, { fallback = "monthly" } = {}) {
+  const normalized = safeStr(value).toLowerCase();
+  if (!normalized) return fallback;
+  if (!BILLING_CYCLES.includes(normalized)) {
+    throw new Error(`Invalid billingCycle. Use ${BILLING_CYCLES.join(" or ")}.`);
+  }
+  return normalized;
+}
+
+function normalizeBillingOption(input, cycle, defaults = {}) {
+  const billingCycle = normalizeBillingCycle(cycle);
+  const priceCents = toInt(input?.priceCents ?? defaults?.priceCents ?? 0, `${billingCycle}.priceCents`);
+  if (priceCents < 0) throw new Error(`${billingCycle}.priceCents must be >= 0`);
+
+  const quota = toInt(input?.quota ?? defaults?.quota ?? 0, `${billingCycle}.quota`);
+  if (quota < 0) throw new Error(`${billingCycle}.quota must be >= 0`);
+
+  const maxRefinements = toInt(
+    input?.maxRefinements ?? defaults?.maxRefinements ?? 2,
+    `${billingCycle}.maxRefinements`
+  );
+  if (maxRefinements < 0) throw new Error(`${billingCycle}.maxRefinements must be >= 0`);
+
+  const enabled = Boolean(input?.enabled ?? defaults?.enabled ?? true);
+  const description = safeStr(input?.description ?? defaults?.description);
+  const displayLabel = safeStr(input?.displayLabel ?? defaults?.displayLabel);
+
+  return {
+    billingCycle,
+    enabled,
+    priceCents,
+    quota,
+    maxRefinements,
+    description,
+    displayLabel,
+  };
+}
+
+function buildBillingOptions(input = {}) {
+  const monthlyDefaults = {
+    enabled: true,
+    priceCents: input?.priceCents ?? 0,
+    quota: input?.monthlyQuota ?? 0,
+    maxRefinements: input?.maxRefinements ?? 2,
+    description: input?.description ?? `${Number(input?.monthlyQuota || 0)} descrições/mês`,
+    displayLabel:
+      input?.monthlyDisplayLabel ??
+      `${formatBRLFromCents(input?.priceCents ?? 0)}/mês`,
+  };
+
+  const annualDefaults = {
+    enabled: Boolean(input?.billingOptions?.annual?.enabled ?? input?.annualEnabled ?? true),
+    priceCents: input?.annualPriceCents ?? ((Number(input?.priceCents) || 0) * 12),
+    quota: input?.annualQuota ?? ((Number(input?.monthlyQuota) || 0) * 12),
+    maxRefinements: input?.annualMaxRefinements ?? input?.maxRefinements ?? 2,
+    description: input?.annualDescription ?? `${Number(input?.annualQuota ?? ((Number(input?.monthlyQuota) || 0) * 12))} descrições/ano`,
+    displayLabel: input?.annualDisplayLabel ?? (formatBRLFromCents(input?.annualPriceCents ?? ((Number(input?.priceCents) || 0) * 12)) + "/ano"),
+  };
+
+  const monthly = normalizeBillingOption(input?.billingOptions?.monthly ?? {}, "monthly", monthlyDefaults);
+  const annual = normalizeBillingOption(input?.billingOptions?.annual ?? {}, "annual", annualDefaults);
+
+  return { monthly, annual };
+}
+
+function withBillingCompatibility(plan) {
+  if (!plan || typeof plan !== "object") return plan;
+
+  const billingOptions = buildBillingOptions(plan);
+  const monthly = billingOptions.monthly;
+  const annual = billingOptions.annual;
+
+  return {
+    ...plan,
+    priceCents: monthly.priceCents,
+    monthlyQuota: monthly.quota,
+    maxRefinements: monthly.maxRefinements,
+    description: monthly.description,
+    annualPriceCents: annual.priceCents,
+    annualQuota: annual.quota,
+    annualDescription: annual.description,
+    billingOptions,
+  };
+}
+
 export function formatBRLFromCents(cents) {
   const v = (Number(cents) || 0) / 100;
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -149,8 +245,8 @@ export async function getPlan(code) {
   const raw = await redisGet(planKey(code));
   if (!raw) return null;
   try {
-    const plan = JSON.parse(raw);
-    // Backward-compatible default
+    const parsed = JSON.parse(raw);
+    const plan = withBillingCompatibility(parsed);
     if (typeof plan?.maxRefinements !== "number" || !Number.isFinite(plan.maxRefinements)) {
       plan.maxRefinements = 2;
     }
@@ -169,19 +265,24 @@ export async function upsertPlan(input) {
   const name = String(input?.name || "").trim();
   if (!name) throw new Error("Missing plan name");
 
-  const priceCents = toInt(input?.priceCents, "priceCents");
-  if (priceCents < 0) throw new Error("priceCents must be >= 0");
-
-  const monthlyQuota = toInt(input?.monthlyQuota, "monthlyQuota");
-  if (monthlyQuota < 0) throw new Error("monthlyQuota must be >= 0");
-
-
-  const maxRefinements = toInt(input?.maxRefinements ?? 2, "maxRefinements");
-  if (maxRefinements < 0) throw new Error("maxRefinements must be >= 0");
   const active = Boolean(input?.active);
-  const description = String(input?.description || "").trim();
+  const billingOptions = buildBillingOptions(input);
+  const monthly = billingOptions.monthly;
+  const annual = billingOptions.annual;
 
-  const plan = { code, name, priceCents, monthlyQuota, maxRefinements, active, description };
+  const plan = {
+    code,
+    name,
+    active,
+    priceCents: monthly.priceCents,
+    monthlyQuota: monthly.quota,
+    maxRefinements: monthly.maxRefinements,
+    description: monthly.description,
+    annualPriceCents: annual.priceCents,
+    annualQuota: annual.quota,
+    annualDescription: annual.description,
+    billingOptions,
+  };
 
   await redisSet(planKey(code), JSON.stringify(plan));
 
@@ -309,9 +410,24 @@ export async function getPlanByChoice(choice) {
   return menu.find((p) => p.code === upper) || null;
 }
 
+export function getPlanBillingOption(plan, billingCycle = "monthly") {
+  const normalizedPlan = withBillingCompatibility(plan);
+  const cycle = normalizeBillingCycle(billingCycle);
+  return normalizedPlan?.billingOptions?.[cycle] || null;
+}
+
+export function listPlanBillingOptions(plan, { includeDisabled = true } = {}) {
+  const normalizedPlan = withBillingCompatibility(plan);
+  const options = BILLING_CYCLES.map((cycle) => normalizedPlan?.billingOptions?.[cycle]).filter(Boolean);
+  if (includeDisabled) return options;
+  return options.filter((option) => option.enabled);
+}
+
 function renderPlanLine(plan, index) {
-  const price = formatBRLFromCents(plan?.priceCents || 0);
-  const description = safeStr(plan?.description) || `${Number(plan?.monthlyQuota || 0)} descrições/mês`;
+  const monthlyOption = getPlanBillingOption(plan, "monthly");
+  const price = formatBRLFromCents(monthlyOption?.priceCents || plan?.priceCents || 0);
+  const description =
+    safeStr(monthlyOption?.description) || safeStr(plan?.description) || `${Number(plan?.monthlyQuota || 0)} descrições/mês`;
   const emojiNumber = ["1️⃣", "2️⃣", "3️⃣"][index] || `${index + 1})`;
   return `${emojiNumber} *${safeStr(plan?.name)}* — ${price} (${description})`;
 }
