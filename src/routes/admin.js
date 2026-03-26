@@ -4085,63 +4085,246 @@ router.post("/users/status", async (req, res) => {
 
     const rows = plans
       .map((p) => {
-        const code = escapeHtml(p.code);
-        const name = escapeHtml(p.name);
-        const price = escapeHtml(String((p.priceCents || 0) / 100).replace(".", ","));
-        const quota = escapeHtml(String(p.monthlyQuota ?? ""));
-        const refin = escapeHtml(String(p.maxRefinements ?? ""));
-        const desc = escapeHtml(String(p.description ?? ""));
-        const active = p.active ? "✅" : "❌";
-        return `<tr data-code="${code}" data-name="${name}" data-pricecents="${escapeHtml(String(p.priceCents || 0))}" data-monthlyquota="${quota}" data-maxrefinements="${refin}" data-description="${desc}">
+        const code = escapeHtml(String(p?.code || "").trim());
+        const name = escapeHtml(String(p?.name || "").trim());
+        const monthly = p?.billingOptions?.monthly || {
+          priceCents: p?.priceCents || 0,
+          quota: p?.monthlyQuota || 0,
+          maxRefinements: p?.maxRefinements || 0,
+          description: p?.description || "",
+          displayLabel: "",
+          enabled: true,
+        };
+        const annual = p?.billingOptions?.annual || {
+          priceCents: p?.annualPriceCents || 0,
+          quota: p?.annualQuota || 0,
+          maxRefinements: p?.annualMaxRefinements ?? p?.maxRefinements ?? 0,
+          description: p?.annualDescription || "",
+          displayLabel: "",
+          enabled: p?.annualEnabled ?? true,
+        };
+        const monthlyPrice = escapeHtml(formatMoneyCents(monthly.priceCents || 0));
+        const annualPrice = escapeHtml(formatMoneyCents(annual.priceCents || 0));
+        const monthlyQuota = escapeHtml(String(monthly.quota ?? ""));
+        const annualQuota = escapeHtml(String(annual.quota ?? ""));
+        const monthlyRefinements = escapeHtml(String(monthly.maxRefinements ?? p?.maxRefinements ?? ""));
+        const annualRefinements = escapeHtml(String(annual.maxRefinements ?? p?.maxRefinements ?? ""));
+        const monthlyDescription = escapeHtml(String(monthly.description ?? p?.description ?? ""));
+        const annualDescription = escapeHtml(String(annual.description ?? p?.annualDescription ?? ""));
+        const monthlyDisplayLabel = escapeHtml(String(monthly.displayLabel ?? ""));
+        const annualDisplayLabel = escapeHtml(String(annual.displayLabel ?? ""));
+        const active = Boolean(p?.active);
+        const annualEnabled = Boolean(annual?.enabled ?? true);
+        return `<tr
+          data-code="${code}"
+          data-name="${name}"
+          data-active="${active ? "true" : "false"}"
+          data-pricecents="${escapeHtml(String(monthly.priceCents || 0))}"
+          data-monthlyquota="${monthlyQuota}"
+          data-maxrefinements="${monthlyRefinements}"
+          data-description="${monthlyDescription}"
+          data-monthlydisplaylabel="${monthlyDisplayLabel}"
+          data-annualenabled="${annualEnabled ? "true" : "false"}"
+          data-annualpricecents="${escapeHtml(String(annual.priceCents || 0))}"
+          data-annualquota="${annualQuota}"
+          data-annualmaxrefinements="${annualRefinements}"
+          data-annualdescription="${annualDescription}"
+          data-annualdisplaylabel="${annualDisplayLabel}"
+        >
           <td><code>${code}</code></td>
           <td>${name}</td>
-          <td>R$ ${price}</td>
-          <td>${quota}</td>
-          <td>${refin}</td>
-          <td>${active}</td>
-          <td style="max-width:420px;">${desc}</td>
+          <td>${active ? '<span class="badge ok">Ativo</span>' : '<span class="badge danger">Inativo</span>'}</td>
           <td>
-            <button onclick="editRow(this)">Editar</button>
-            <button onclick="toggle('${code}', ${p.active ? "false" : "true"})">
-              ${p.active ? "Desativar" : "Ativar"}
-            </button>
+            <div><b>${monthlyPrice}</b></div>
+            <div class="muted">${monthlyQuota} descrições/mês · ${monthlyRefinements} ref.</div>
+            <div class="muted">${monthlyDescription || "—"}</div>
+            <div class="muted">Label: ${monthlyDisplayLabel || "—"}</div>
+          </td>
+          <td>
+            <div>${annualEnabled ? '<span class="badge ok">Anual habilitado</span>' : '<span class="badge warn">Anual desabilitado</span>'}</div>
+            <div style="margin-top:6px;"><b>${annualPrice}</b></div>
+            <div class="muted">${annualQuota} descrições/ano · ${annualRefinements} ref.</div>
+            <div class="muted">${annualDescription || "—"}</div>
+            <div class="muted">Label: ${annualDisplayLabel || "—"}</div>
+          </td>
+          <td>
+            <div class="row">
+              <button onclick="editRow(this)">Editar</button>
+              <button onclick="toggle('${code}', ${active ? "false" : "true"})">
+                ${active ? "Desativar" : "Ativar"}
+              </button>
+            </div>
           </td>
         </tr>`;
       })
       .join("");
 
+    const annualEnabledCount = plans.filter((plan) => Boolean(plan?.billingOptions?.annual?.enabled ?? plan?.annualEnabled ?? true)).length;
+    const inactiveCount = plans.filter((plan) => !plan?.active).length;
+
     const inner = `
+      <div class="grid cols3" style="margin-bottom:12px;">
+        <div class="kpi">
+          <div class="t">Planos cadastrados</div>
+          <div class="v">${plans.length}</div>
+          <div class="muted">Total de códigos disponíveis no catálogo.</div>
+        </div>
+        <div class="kpi">
+          <div class="t">Planos com anual habilitado</div>
+          <div class="v">${annualEnabledCount}</div>
+          <div class="muted">Oferta anual pronta para checkout e pricing.</div>
+        </div>
+        <div class="kpi">
+          <div class="t">Planos inativos</div>
+          <div class="v">${inactiveCount}</div>
+          <div class="muted">Continuam visíveis aqui, mas não aparecem no menu ativo do produto.</div>
+        </div>
+      </div>
+
       <div class="card pad">
-        <div class="row" style="justify-content:space-between;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:16px;">
           <div>
             <h3 style="margin:0 0 6px 0;">💳 Planos</h3>
-            <div class="muted">Catálogo do sistema (ativos e inativos).</div>
+            <div class="muted">Gerencie o catálogo completo de planos, incluindo todos os campos do ciclo mensal e todos os campos do ciclo anual.</div>
           </div>
-          <div class="muted">priceCents em centavos · R$ 24,90 = 2490</div>
+          <div class="muted">Valores em centavos · Ex.: R$ 24,90 = <code>2490</code></div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="grid cols3" style="margin-bottom:12px;">
+          <div class="card pad">
+            <div style="font-weight:800; margin-bottom:6px;">📌 Code do plano</div>
+            <div class="muted">Identificador técnico usado pelo sistema inteiro. Evite trocar o code de um plano já existente em produção.</div>
+          </div>
+          <div class="card pad">
+            <div style="font-weight:800; margin-bottom:6px;">📅 Ciclo mensal</div>
+            <div class="muted">Representa preço, quota, refinamentos e descrição do uso mês a mês.</div>
+          </div>
+          <div class="card pad">
+            <div style="font-weight:800; margin-bottom:6px;">🗓️ Ciclo anual</div>
+            <div class="muted">Permite habilitar/desabilitar a oferta anual e definir preço, quota anual, descrição anual, refinamentos anuais e label própria.</div>
+          </div>
+        </div>
+
+        <div class="grid cols2">
+          <div class="card pad">
+            <h4 style="margin:0 0 10px 0;">Dados gerais do plano</h4>
+            <div class="grid">
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Code do plano</div>
+                <input id="code" placeholder="Ex.: DE_VEZ_EM_QUANDO" style="width:100%" />
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Nome comercial</div>
+                <input id="name" placeholder="Ex.: De Vez em Quando" style="width:100%" />
+              </label>
+              <label>
+                <div class="row" style="justify-content:space-between; width:100%;">
+                  <span class="muted">Plano ativo no catálogo</span>
+                  <input id="active" type="checkbox" checked />
+                </div>
+                <div class="muted" style="font-size:12px; margin-top:6px;">Quando desativado, o plano permanece salvo, mas deixa de aparecer no catálogo ativo.</div>
+              </label>
+            </div>
+          </div>
+
+          <div class="card pad">
+            <h4 style="margin:0 0 10px 0;">Orientações importantes</h4>
+            <div class="muted" style="margin-bottom:8px;">• <b>priceCents</b> e <b>annualPriceCents</b> definem os valores oficiais usados pelo pricing.</div>
+            <div class="muted" style="margin-bottom:8px;">• <b>monthlyQuota</b> e <b>annualQuota</b> são contadores separados. O anual deve refletir o total do ano, não o valor mensal.</div>
+            <div class="muted" style="margin-bottom:8px;">• <b>Display label</b> permite ajustar o texto exibido no checkout, como “R$ 298,80/ano”.</div>
+            <div class="muted">• <b>Anual habilitado</b> controla se o ciclo anual fica disponível para escolha do usuário.</div>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="grid cols2">
+          <div class="card pad">
+            <h4 style="margin:0 0 10px 0;">Ciclo mensal</h4>
+            <div class="grid">
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Preço mensal (centavos)</div>
+                <input id="priceCents" placeholder="Ex.: 2490" style="width:100%" />
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Quota mensal</div>
+                <input id="monthlyQuota" placeholder="Ex.: 20" style="width:100%" />
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Refinamentos mensais</div>
+                <input id="maxRefinements" placeholder="Ex.: 2" style="width:100%" />
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Descrição mensal</div>
+                <input id="description" placeholder="Ex.: 20 descrições/mês" style="width:100%" />
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Label mensal exibida</div>
+                <input id="monthlyDisplayLabel" placeholder="Ex.: R$ 24,90/mês" style="width:100%" />
+              </label>
+            </div>
+          </div>
+
+          <div class="card pad">
+            <h4 style="margin:0 0 10px 0;">Ciclo anual</h4>
+            <div class="grid">
+              <label>
+                <div class="row" style="justify-content:space-between; width:100%;">
+                  <span class="muted">Oferta anual habilitada</span>
+                  <input id="annualEnabled" type="checkbox" checked />
+                </div>
+                <div class="muted" style="font-size:12px; margin-top:6px;">Desative apenas se quiser ocultar a contratação anual sem apagar seus dados.</div>
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Preço anual (centavos)</div>
+                <input id="annualPriceCents" placeholder="Ex.: 29880" style="width:100%" />
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Quota anual</div>
+                <input id="annualQuota" placeholder="Ex.: 240" style="width:100%" />
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Refinamentos anuais</div>
+                <input id="annualMaxRefinements" placeholder="Ex.: 2" style="width:100%" />
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Descrição anual</div>
+                <input id="annualDescription" placeholder="Ex.: 240 descrições/ano" style="width:100%" />
+              </label>
+              <label>
+                <div class="muted" style="margin-bottom:4px;">Label anual exibida</div>
+                <input id="annualDisplayLabel" placeholder="Ex.: R$ 298,80/ano" style="width:100%" />
+              </label>
+            </div>
+          </div>
         </div>
 
         <div class="hr"></div>
 
         <div class="row">
-          <input id="code" placeholder="code (ex: DE_VEZ_EM_QUANDO)" style="min-width:260px" />
-          <input id="name" placeholder="name (ex: De Vez em Quando)" style="min-width:260px" />
-          <input id="priceCents" placeholder="priceCents (ex: 2490)" style="width:170px" />
-          <input id="monthlyQuota" placeholder="monthlyQuota (ex: 20)" style="width:190px" />
-          <input id="maxRefinements" placeholder="maxRefinements (ex: 2)" style="width:220px" />
-          <input id="description" placeholder="description (ex: 20 descrições/mês)" style="min-width:260px" />
-          <button class="primary" onclick="create()">Criar/Atualizar</button>
+          <button class="primary" onclick="create()">Salvar plano</button>
+          <button onclick="clearPlanForm()">Limpar formulário</button>
         </div>
 
         <div class="hr"></div>
 
-        <table>
-          <thead>
-            <tr>
-              <th>Code</th><th>Nome</th><th>Preço</th><th>Cota</th><th>Ref.</th><th>Ativo</th><th>Descrição</th><th>Ação</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
+        <div style="overflow:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>Nome</th>
+                <th>Status</th>
+                <th>Mensal</th>
+                <th>Anual</th>
+                <th>Ação</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
 
         <div class="hr"></div>
         <details>
@@ -4151,43 +4334,86 @@ router.post("/users/status", async (req, res) => {
       </div>
 
       <script>
+        function byId(id){
+          return document.getElementById(id);
+        }
+
+        function readIntField(id){
+          return Number((byId(id)?.value || '0').trim());
+        }
+
+        function clearPlanForm(){
+          byId('code').value = '';
+          byId('name').value = '';
+          byId('active').checked = true;
+          byId('priceCents').value = '';
+          byId('monthlyQuota').value = '';
+          byId('maxRefinements').value = '';
+          byId('description').value = '';
+          byId('monthlyDisplayLabel').value = '';
+          byId('annualEnabled').checked = true;
+          byId('annualPriceCents').value = '';
+          byId('annualQuota').value = '';
+          byId('annualMaxRefinements').value = '';
+          byId('annualDescription').value = '';
+          byId('annualDisplayLabel').value = '';
+          const msg = byId('msg');
+          if (msg) msg.textContent = 'Formulário limpo.';
+        }
+
         async function create(){
           const body = {
-            code: (document.getElementById('code').value||'').trim(),
-            name: (document.getElementById('name').value||'').trim(),
-            priceCents: Number((document.getElementById('priceCents').value||'0').trim()),
-            monthlyQuota: Number((document.getElementById('monthlyQuota').value||'0').trim()),
-            maxRefinements: Number((document.getElementById('maxRefinements').value||'0').trim()),
-            description: (document.getElementById('description').value||'').trim(),
-            active: true,
+            code: (byId('code').value||'').trim(),
+            name: (byId('name').value||'').trim(),
+            active: !!byId('active').checked,
+            priceCents: readIntField('priceCents'),
+            monthlyQuota: readIntField('monthlyQuota'),
+            maxRefinements: readIntField('maxRefinements'),
+            description: (byId('description').value||'').trim(),
+            monthlyDisplayLabel: (byId('monthlyDisplayLabel').value||'').trim(),
+            annualEnabled: !!byId('annualEnabled').checked,
+            annualPriceCents: readIntField('annualPriceCents'),
+            annualQuota: readIntField('annualQuota'),
+            annualMaxRefinements: readIntField('annualMaxRefinements'),
+            annualDescription: (byId('annualDescription').value||'').trim(),
+            annualDisplayLabel: (byId('annualDisplayLabel').value||'').trim(),
           };
           const r = await fetch('/admin/plans', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
           const j = await r.json().catch(()=>({}));
-          document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
+          byId('msg').textContent = JSON.stringify(j, null, 2);
           if(j.ok) setTimeout(()=>location.reload(), 250);
         }
-        
+
         function editRow(btn){
           try{
             const tr = btn.closest('tr');
             if(!tr) return;
-            document.getElementById('code').value = tr.getAttribute('data-code') || '';
-            document.getElementById('name').value = tr.getAttribute('data-name') || '';
-            document.getElementById('priceCents').value = tr.getAttribute('data-pricecents') || '';
-            document.getElementById('monthlyQuota').value = tr.getAttribute('data-monthlyquota') || '';
-            document.getElementById('maxRefinements').value = tr.getAttribute('data-maxrefinements') || '';
-            document.getElementById('description').value = tr.getAttribute('data-description') || '';
-            const msg = document.getElementById('msg');
-            if(msg) msg.textContent = 'Editando: ' + (tr.getAttribute('data-code')||'');
+            byId('code').value = tr.getAttribute('data-code') || '';
+            byId('name').value = tr.getAttribute('data-name') || '';
+            byId('active').checked = (tr.getAttribute('data-active') || 'false') === 'true';
+            byId('priceCents').value = tr.getAttribute('data-pricecents') || '';
+            byId('monthlyQuota').value = tr.getAttribute('data-monthlyquota') || '';
+            byId('maxRefinements').value = tr.getAttribute('data-maxrefinements') || '';
+            byId('description').value = tr.getAttribute('data-description') || '';
+            byId('monthlyDisplayLabel').value = tr.getAttribute('data-monthlydisplaylabel') || '';
+            byId('annualEnabled').checked = (tr.getAttribute('data-annualenabled') || 'true') === 'true';
+            byId('annualPriceCents').value = tr.getAttribute('data-annualpricecents') || '';
+            byId('annualQuota').value = tr.getAttribute('data-annualquota') || '';
+            byId('annualMaxRefinements').value = tr.getAttribute('data-annualmaxrefinements') || '';
+            byId('annualDescription').value = tr.getAttribute('data-annualdescription') || '';
+            byId('annualDisplayLabel').value = tr.getAttribute('data-annualdisplaylabel') || '';
+            const msg = byId('msg');
+            if(msg) msg.textContent = 'Editando plano: ' + (tr.getAttribute('data-code')||'');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
           }catch(e){
             console.error(e);
           }
         }
 
-async function toggle(code, active){
+        async function toggle(code, active){
           const r = await fetch('/admin/plans/'+encodeURIComponent(code)+'/active', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({active}) });
           const j = await r.json().catch(()=>({}));
-          document.getElementById('msg').textContent = JSON.stringify(j, null, 2);
+          byId('msg').textContent = JSON.stringify(j, null, 2);
           if(j.ok) setTimeout(()=>location.reload(), 250);
         }
       </script>
