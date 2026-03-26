@@ -136,6 +136,7 @@ function layoutBase({ title, activePath = "/admin", content = "", headExtra = ""
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapeHtml(title || "Admin")}</title>
+  <link rel="icon" type="image/png" href="https://static.wixstatic.com/media/82d595_f278d1cb1322446fa19bae8399a2d502~mv2.png" />
   <style>
     :root{
       --bg:#f5f7fb;
