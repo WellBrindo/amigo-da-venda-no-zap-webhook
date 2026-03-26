@@ -94,6 +94,15 @@ const keyBizProfile = (userId) => redisUserKey(userId, "bizProfile");
 const keyPendingBizProfile = (userId) => redisUserKey(userId, "pendingBizProfile");
 // Sessão do anúncio atual (complemento estruturado / intake de categoria)
 const keyCurrentAdSession = (userId) => redisUserKey(userId, "currentAdSession");
+// Checkout draft / cupom / precificação
+const keyCheckoutDraft = (userId) => redisUserKey(userId, "checkoutDraft");
+const keySelectedPlanCode = (userId) => redisUserKey(userId, "selectedPlanCode");
+const keySelectedBillingCycle = (userId) => redisUserKey(userId, "selectedBillingCycle");
+const keySelectedCouponCode = (userId) => redisUserKey(userId, "selectedCouponCode");
+const keyPricingQuote = (userId) => redisUserKey(userId, "pricingQuote");
+const keyCouponReservationId = (userId) => redisUserKey(userId, "couponReservationId");
+const keyCouponReservationCreatedAt = (userId) => redisUserKey(userId, "couponReservationCreatedAt");
+const keyCheckoutCouponStatus = (userId) => redisUserKey(userId, "checkoutCouponStatus");
 // Status anterior (para estados transitórios como escolha de template / salvar perfil)
 const keyPrevStatus = (userId) => redisUserKey(userId, "prevStatus");
 // Metadados operacionais leves (inatividade / flood)
@@ -352,6 +361,93 @@ function normalizeIsoDate(value) {
   if (match) return match[1];
   const dt = new Date(raw);
   return Number.isFinite(dt.getTime()) ? dt.toISOString().slice(0, 10) : "";
+}
+
+function normalizePlanCode(value) {
+  return safeStr(normalizeMaybeJsonString(value)).toUpperCase();
+}
+
+function normalizeBillingCycle(value) {
+  const cycle = safeStr(normalizeMaybeJsonString(value)).toLowerCase();
+  return cycle === "annual" ? "annual" : cycle === "monthly" ? "monthly" : "";
+}
+
+function normalizeCouponCode(value) {
+  return safeStr(normalizeMaybeJsonString(value)).toUpperCase();
+}
+
+function normalizeCheckoutCouponStatus(value) {
+  return safeStr(normalizeMaybeJsonString(value)).toUpperCase();
+}
+
+function normalizePricingQuote(value) {
+  if (!isPlainObject(value)) return null;
+  const next = { ...value };
+
+  if ("planCode" in next) next.planCode = normalizePlanCode(next.planCode);
+  if ("billingCycle" in next) next.billingCycle = normalizeBillingCycle(next.billingCycle);
+  if ("couponCode" in next) next.couponCode = normalizeCouponCode(next.couponCode);
+  if ("couponReservationId" in next) next.couponReservationId = safeStr(next.couponReservationId);
+  if ("couponReservationCreatedAt" in next) next.couponReservationCreatedAt = normalizeIsoTimestamp(next.couponReservationCreatedAt);
+  if ("checkoutCouponStatus" in next) next.checkoutCouponStatus = normalizeCheckoutCouponStatus(next.checkoutCouponStatus);
+
+  ["basePriceCents", "discountAmountCents", "finalPriceCents"].forEach((field) => {
+    if (field in next) {
+      const n = Number(next[field]);
+      if (Number.isFinite(n)) next[field] = Math.max(0, Math.trunc(n));
+      else delete next[field];
+    }
+  });
+
+  ["basePrice", "discountAmount", "finalPrice"].forEach((field) => {
+    if (field in next) {
+      const n = Number(next[field]);
+      if (Number.isFinite(n)) next[field] = n;
+      else delete next[field];
+    }
+  });
+
+  if ("appliesTo" in next) {
+    const appliesTo = safeStr(next.appliesTo).toLowerCase();
+    next.appliesTo = appliesTo === "entire_subscription" ? "entire_subscription" : appliesTo === "first_charge_only" ? "first_charge_only" : "";
+    if (!next.appliesTo) delete next.appliesTo;
+  }
+
+  Object.keys(next).forEach((key) => {
+    const value = next[key];
+    if (typeof value === "string" && !safeStr(value)) delete next[key];
+    if (Array.isArray(value) && value.length === 0) delete next[key];
+    if (isPlainObject(value) && !Object.keys(value).length) delete next[key];
+  });
+
+  return Object.keys(next).length ? next : null;
+}
+
+function normalizeCheckoutDraft(draftObj) {
+  if (!isPlainObject(draftObj)) return null;
+  const next = { ...draftObj };
+
+  if ("planCode" in next) next.planCode = normalizePlanCode(next.planCode);
+  if ("selectedPlanCode" in next) next.selectedPlanCode = normalizePlanCode(next.selectedPlanCode);
+  if ("billingCycle" in next) next.billingCycle = normalizeBillingCycle(next.billingCycle);
+  if ("selectedBillingCycle" in next) next.selectedBillingCycle = normalizeBillingCycle(next.selectedBillingCycle);
+  if ("couponCode" in next) next.couponCode = normalizeCouponCode(next.couponCode);
+  if ("selectedCouponCode" in next) next.selectedCouponCode = normalizeCouponCode(next.selectedCouponCode);
+  if ("couponReservationId" in next) next.couponReservationId = safeStr(next.couponReservationId);
+  if ("couponReservationCreatedAt" in next) next.couponReservationCreatedAt = normalizeIsoTimestamp(next.couponReservationCreatedAt);
+  if ("checkoutCouponStatus" in next) next.checkoutCouponStatus = normalizeCheckoutCouponStatus(next.checkoutCouponStatus);
+  if ("pricingQuote" in next) next.pricingQuote = normalizePricingQuote(next.pricingQuote);
+  if ("createdAt" in next) next.createdAt = normalizeIsoTimestamp(next.createdAt);
+  if ("updatedAt" in next) next.updatedAt = normalizeIsoTimestamp(next.updatedAt);
+
+  Object.keys(next).forEach((key) => {
+    const value = next[key];
+    if (typeof value === "string" && !safeStr(value)) delete next[key];
+    if (Array.isArray(value) && value.length === 0) delete next[key];
+    if (isPlainObject(value) && !Object.keys(value).length) delete next[key];
+  });
+
+  return Object.keys(next).length ? next : null;
 }
 
 function normalizeActivityMeta(metaObj) {
@@ -1096,6 +1192,188 @@ export async function clearCurrentAdSession(waId) {
   return true;
 }
 
+// ===================== Checkout / Coupon =====================
+export async function getCheckoutDraft(waId) {
+  const parsed = safeJsonParse(await redisGet(keyCheckoutDraft(waId)));
+  return normalizeCheckoutDraft(parsed);
+}
+
+export async function setCheckoutDraft(waId, draftObj) {
+  await indexUser(waId);
+  const normalized = normalizeCheckoutDraft(draftObj);
+  if (!normalized) {
+    await redisDel(keyCheckoutDraft(waId));
+    return null;
+  }
+  await redisSet(keyCheckoutDraft(waId), safeJsonStringify(normalized));
+  return normalized;
+}
+
+export async function clearCheckoutDraft(waId) {
+  await indexUser(waId);
+  await redisDel(keyCheckoutDraft(waId));
+  return true;
+}
+
+export async function getSelectedPlanCode(waId) {
+  return normalizePlanCode(await redisGet(keySelectedPlanCode(waId)));
+}
+
+export async function setSelectedPlanCode(waId, planCode) {
+  await indexUser(waId);
+  const normalized = normalizePlanCode(planCode);
+  if (!normalized) {
+    await redisDel(keySelectedPlanCode(waId));
+    return "";
+  }
+  await redisSet(keySelectedPlanCode(waId), normalized);
+  return normalized;
+}
+
+export async function clearSelectedPlanCode(waId) {
+  await indexUser(waId);
+  await redisDel(keySelectedPlanCode(waId));
+  return true;
+}
+
+export async function getSelectedBillingCycle(waId) {
+  return normalizeBillingCycle(await redisGet(keySelectedBillingCycle(waId)));
+}
+
+export async function setSelectedBillingCycle(waId, billingCycle) {
+  await indexUser(waId);
+  const normalized = normalizeBillingCycle(billingCycle);
+  if (!normalized) {
+    await redisDel(keySelectedBillingCycle(waId));
+    return "";
+  }
+  await redisSet(keySelectedBillingCycle(waId), normalized);
+  return normalized;
+}
+
+export async function clearSelectedBillingCycle(waId) {
+  await indexUser(waId);
+  await redisDel(keySelectedBillingCycle(waId));
+  return true;
+}
+
+export async function getSelectedCouponCode(waId) {
+  return normalizeCouponCode(await redisGet(keySelectedCouponCode(waId)));
+}
+
+export async function setSelectedCouponCode(waId, couponCode) {
+  await indexUser(waId);
+  const normalized = normalizeCouponCode(couponCode);
+  if (!normalized) {
+    await redisDel(keySelectedCouponCode(waId));
+    return "";
+  }
+  await redisSet(keySelectedCouponCode(waId), normalized);
+  return normalized;
+}
+
+export async function clearSelectedCouponCode(waId) {
+  await indexUser(waId);
+  await redisDel(keySelectedCouponCode(waId));
+  return true;
+}
+
+export async function getPricingQuote(waId) {
+  const parsed = safeJsonParse(await redisGet(keyPricingQuote(waId)));
+  return normalizePricingQuote(parsed);
+}
+
+export async function setPricingQuote(waId, pricingQuote) {
+  await indexUser(waId);
+  const normalized = normalizePricingQuote(pricingQuote);
+  if (!normalized) {
+    await redisDel(keyPricingQuote(waId));
+    return null;
+  }
+  await redisSet(keyPricingQuote(waId), safeJsonStringify(normalized));
+  return normalized;
+}
+
+export async function clearPricingQuote(waId) {
+  await indexUser(waId);
+  await redisDel(keyPricingQuote(waId));
+  return true;
+}
+
+export async function getCouponReservationId(waId) {
+  return safeStr(await redisGet(keyCouponReservationId(waId)));
+}
+
+export async function setCouponReservationId(waId, reservationId) {
+  await indexUser(waId);
+  const normalized = safeStr(reservationId);
+  if (!normalized) {
+    await redisDel(keyCouponReservationId(waId));
+    return "";
+  }
+  await redisSet(keyCouponReservationId(waId), normalized);
+  return normalized;
+}
+
+export async function clearCouponReservationId(waId) {
+  await indexUser(waId);
+  await redisDel(keyCouponReservationId(waId));
+  return true;
+}
+
+export async function getCouponReservationCreatedAt(waId) {
+  return normalizeIsoTimestamp(await redisGet(keyCouponReservationCreatedAt(waId)));
+}
+
+export async function setCouponReservationCreatedAt(waId, isoTs) {
+  await indexUser(waId);
+  const normalized = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  await redisSet(keyCouponReservationCreatedAt(waId), normalized);
+  return normalized;
+}
+
+export async function clearCouponReservationCreatedAt(waId) {
+  await indexUser(waId);
+  await redisDel(keyCouponReservationCreatedAt(waId));
+  return true;
+}
+
+export async function getCheckoutCouponStatus(waId) {
+  return normalizeCheckoutCouponStatus(await redisGet(keyCheckoutCouponStatus(waId)));
+}
+
+export async function setCheckoutCouponStatus(waId, status) {
+  await indexUser(waId);
+  const normalized = normalizeCheckoutCouponStatus(status);
+  if (!normalized) {
+    await redisDel(keyCheckoutCouponStatus(waId));
+    return "";
+  }
+  await redisSet(keyCheckoutCouponStatus(waId), normalized);
+  return normalized;
+}
+
+export async function clearCheckoutCouponStatus(waId) {
+  await indexUser(waId);
+  await redisDel(keyCheckoutCouponStatus(waId));
+  return true;
+}
+
+export async function resetCheckoutCouponState(waId) {
+  await indexUser(waId);
+  await Promise.all([
+    clearCheckoutDraft(waId),
+    clearSelectedPlanCode(waId),
+    clearSelectedBillingCycle(waId),
+    clearSelectedCouponCode(waId),
+    clearPricingQuote(waId),
+    clearCouponReservationId(waId),
+    clearCouponReservationCreatedAt(waId),
+    clearCheckoutCouponStatus(waId),
+  ]);
+  return true;
+}
+
 // ===================== Card Validity / Cancel =====================
 export async function setCardValidUntil(waId, isoDate) {
   await indexUser(waId);
@@ -1420,6 +1698,7 @@ export async function resetUserToTrial(waId) {
     clearBizProfile(waId),
     clearPendingBizProfile(waId),
     clearCurrentAdSession(waId),
+    resetCheckoutCouponState(waId),
     clearLastAd(waId),
     clearRefineCount(waId),
     clearBillingCityState(waId),
@@ -1469,6 +1748,14 @@ export async function resetUserAsNew(waId) {
     keyBizProfile(id),
     keyPendingBizProfile(id),
     keyCurrentAdSession(id),
+    keyCheckoutDraft(id),
+    keySelectedPlanCode(id),
+    keySelectedBillingCycle(id),
+    keySelectedCouponCode(id),
+    keyPricingQuote(id),
+    keyCouponReservationId(id),
+    keyCouponReservationCreatedAt(id),
+    keyCheckoutCouponStatus(id),
     keyActivityMeta(id),
     keyGrowthMeta(id),
   ];
@@ -1503,6 +1790,14 @@ export async function getUserSnapshot(waId) {
     bizProfile,
     pendingBizProfile,
     currentAdSession,
+    checkoutDraft,
+    selectedPlanCode,
+    selectedBillingCycle,
+    selectedCouponCode,
+    pricingQuote,
+    couponReservationId,
+    couponReservationCreatedAt,
+    checkoutCouponStatus,
     activityMeta,
     growthMeta,
     asaasCustomerId,
@@ -1526,6 +1821,14 @@ export async function getUserSnapshot(waId) {
     getBizProfile(waId),
     getPendingBizProfile(waId),
     getCurrentAdSession(waId),
+    getCheckoutDraft(waId),
+    getSelectedPlanCode(waId),
+    getSelectedBillingCycle(waId),
+    getSelectedCouponCode(waId),
+    getPricingQuote(waId),
+    getCouponReservationId(waId),
+    getCouponReservationCreatedAt(waId),
+    getCheckoutCouponStatus(waId),
     getActivityMeta(waId),
     getGrowthMeta(waId),
     getAsaasCustomerId(waId),
@@ -1553,6 +1856,14 @@ export async function getUserSnapshot(waId) {
     bizProfile: bizProfile || null,
     pendingBizProfile: pendingBizProfile || null,
     currentAdSession: currentAdSession || null,
+    checkoutDraft: checkoutDraft || null,
+    selectedPlanCode: selectedPlanCode || "",
+    selectedBillingCycle: selectedBillingCycle || "",
+    selectedCouponCode: selectedCouponCode || "",
+    pricingQuote: pricingQuote || null,
+    couponReservationId: couponReservationId || "",
+    couponReservationCreatedAt: couponReservationCreatedAt || "",
+    checkoutCouponStatus: checkoutCouponStatus || "",
     activityMeta: activityMeta || {},
     growthMeta: growthMeta || {},
     asaasCustomerId: asaasCustomerId || "",
