@@ -60,7 +60,28 @@ import {
   getCouponUsageSummary,
 } from "../services/coupons.js";
 
-import { createCampaignAndDispatch, listCampaigns, getCampaign } from "../services/broadcast.js";
+import {
+  createCampaignAndDispatch,
+  listCampaigns as listBroadcastCampaigns,
+  getCampaign as getBroadcastCampaign,
+  reprocessCampaignForActiveWindow,
+} from "../services/broadcast.js";
+
+import {
+  createCampaign,
+  updateCampaign,
+  listCampaigns as listManagedCampaigns,
+  getCampaign as getManagedCampaign,
+  setCampaignActive,
+  archiveCampaign,
+  duplicateCampaign,
+  simulateCampaignsForUser,
+  CAMPAIGN_CATEGORY,
+  CAMPAIGN_CHANNEL,
+  CAMPAIGN_TRIGGER_TYPE,
+  CAMPAIGN_MESSAGE_MODE,
+  CAMPAIGN_CONFLICT_GROUP,
+} from "../services/campaigns.js";
 
 import {
   listCopyKeys,
@@ -78,7 +99,13 @@ import { listPayments, getSubscription, cancelSubscription } from "../services/a
 import { listAsaasEvents } from "../services/asaas/ledger.js";
 
 import { redisGet, redisSet, redisDel } from "../services/redis.js";
-import { logAdminAudit, listAdminAudit, getAdminAuditCount } from "../services/audit.js";
+import {
+  logAdminAudit,
+  listAdminAudit,
+  getAdminAuditCount,
+  logCampaignAudit,
+  listCampaignAuditByCampaign,
+} from "../services/audit.js";
 import {
   listManagedAdmins,
   getManagedAdmin,
@@ -650,6 +677,114 @@ async function safeRecordAdminAudit(req, entry) {
       module: String(entry?.module || ""),
     }));
   }
+}
+
+async function safeRecordCampaignAudit(req, entry) {
+  try {
+    await logCampaignAudit({
+      ...entry,
+      actor: getAdminActor(req),
+    });
+  } catch (err) {
+    console.warn(JSON.stringify({
+      level: "warn",
+      tag: "campaign_admin_audit_failed",
+      error: String(err?.message || err),
+      action: String(entry?.action || ""),
+      campaignId: String(entry?.campaignId || ""),
+    }));
+  }
+}
+
+function parseBoolInput(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  const v = String(value).trim().toLowerCase();
+  return v === "1" || v === "true" || v === "on" || v === "yes";
+}
+
+function parseIntInput(value, fallback = 0, { min = null, max = null } = {}) {
+  if (value === undefined || value === null || value === "") return fallback;
+  let n = Number(value);
+  if (!Number.isFinite(n)) n = Number(fallback || 0);
+  n = Math.trunc(n);
+  if (Number.isFinite(min)) n = Math.max(min, n);
+  if (Number.isFinite(max)) n = Math.min(max, n);
+  return n;
+}
+
+function parseCsvList(value, { upper = false } = {}) {
+  const source = Array.isArray(value) ? value.join(",") : String(value || "");
+  const items = source
+    .split(",")
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(items.map((item) => (upper ? item.toUpperCase() : item))));
+}
+
+function campaignOptionEntries(record) {
+  return Object.entries(record || {}).map(([value, label]) => ({ value, label }));
+}
+
+function renderSelectOptions(entries, currentValue = "") {
+  const current = String(currentValue || "").trim();
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry) => {
+      const value = String(entry?.value || "").trim();
+      const label = String(entry?.label || value).trim();
+      const selected = value === current ? " selected" : "";
+      return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(label)}</option>`;
+    })
+    .join("");
+}
+
+function buildCampaignPayloadFromBody(body = {}) {
+  return {
+    code: String(body.code || "").trim(),
+    name: String(body.name || "").trim(),
+    description: String(body.description || "").trim(),
+    category: String(body.category || "").trim(),
+    channel: String(body.channel || "").trim(),
+    messageMode: String(body.messageMode || "").trim(),
+    copyKey: String(body.copyKey || "").trim(),
+    inlineText: String(body.inlineText || "").trim(),
+    priority: parseIntInput(body.priority, 100, { min: 0, max: 100000 }),
+    conflictGroup: String(body.conflictGroup || "").trim(),
+    triggerType: String(body.triggerType || "").trim(),
+    triggerEvent: String(body.triggerEvent || "").trim(),
+    delayMinutes: parseIntInput(body.delayMinutes, 0, { min: 0, max: 525600 }),
+    cooldownHours: parseIntInput(body.cooldownHours, 24, { min: 0, max: 8760 }),
+    sendOncePerUser: parseBoolInput(body.sendOncePerUser, false),
+    maxSendsPerUser: parseIntInput(body.maxSendsPerUser, 1, { min: 1, max: 1000 }),
+    requiredStatuses: parseCsvList(body.requiredStatuses, { upper: true }),
+    excludedStatuses: parseCsvList(body.excludedStatuses, { upper: true }),
+    requiredPlanCodes: parseCsvList(body.requiredPlanCodes, { upper: true }),
+    excludedPlanCodes: parseCsvList(body.excludedPlanCodes, { upper: true }),
+    requiresActivePlan: parseBoolInput(body.requiresActivePlan, false),
+    requiresNoActivePlan: parseBoolInput(body.requiresNoActivePlan, false),
+    requiresTrialEnded: parseBoolInput(body.requiresTrialEnded, false),
+    requiresPlansViewed: parseBoolInput(body.requiresPlansViewed, false),
+    requiresPaymentPending: parseBoolInput(body.requiresPaymentPending, false),
+    requiresCheckoutStarted: parseBoolInput(body.requiresCheckoutStarted, false),
+    requiresWindow24hOpen: parseBoolInput(body.requiresWindow24hOpen, true),
+    minTrialUsed: parseIntInput(body.minTrialUsed, 0, { min: 0, max: 100000 }),
+    maxTrialUsed: parseIntInput(body.maxTrialUsed, 0, { min: 0, max: 100000 }),
+    minAdsCreated: parseIntInput(body.minAdsCreated, 0, { min: 0, max: 100000 }),
+    maxAdsCreated: parseIntInput(body.maxAdsCreated, 0, { min: 0, max: 100000 }),
+    minHoursSinceLastInbound: parseIntInput(body.minHoursSinceLastInbound, 0, { min: 0, max: 100000 }),
+    maxHoursSinceLastInbound: parseIntInput(body.maxHoursSinceLastInbound, 0, { min: 0, max: 100000 }),
+    minHoursSinceLastOutbound: parseIntInput(body.minHoursSinceLastOutbound, 0, { min: 0, max: 100000 }),
+    maxHoursSinceLastOutbound: parseIntInput(body.maxHoursSinceLastOutbound, 0, { min: 0, max: 100000 }),
+    blockIfInCheckout: parseBoolInput(body.blockIfInCheckout, false),
+    blockIfPaymentPending: parseBoolInput(body.blockIfPaymentPending, false),
+    blockIfBlocked: parseBoolInput(body.blockIfBlocked, true),
+    businessHoursOnly: parseBoolInput(body.businessHoursOnly, false),
+    timezone: String(body.timezone || "America/Sao_Paulo").trim(),
+    startAt: String(body.startAt || "").trim(),
+    endAt: String(body.endAt || "").trim(),
+    isActive: parseBoolInput(body.isActive, true),
+    notes: String(body.notes || "").trim(),
+  };
 }
 
 function formatMoneyCents(cents) {
@@ -8842,85 +8977,277 @@ router.get("/window24h-ui", async (req, res) => {
   // -----------------------------
   // ✅ Campanhas (UI + APIs)
   // -----------------------------
+  
   router.get("/campaigns-ui", async (req, res) => {
+    const categoryOptions = renderSelectOptions(campaignOptionEntries(CAMPAIGN_CATEGORY), "");
+    const channelOptions = renderSelectOptions(campaignOptionEntries(CAMPAIGN_CHANNEL), "");
+    const triggerTypeOptions = renderSelectOptions(campaignOptionEntries(CAMPAIGN_TRIGGER_TYPE), "");
+    const messageModeOptions = renderSelectOptions(campaignOptionEntries(CAMPAIGN_MESSAGE_MODE), "copy_key");
+    const conflictGroupOptions = renderSelectOptions(campaignOptionEntries(CAMPAIGN_CONFLICT_GROUP), "");
+
     const inner = `
       <div class="card pad">
-        <div class="row" style="justify-content:space-between;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start;">
           <div>
             <h3 style="margin:0 0 6px 0;">📦 Campanhas</h3>
-            <div class="muted">Histórico de envios, pendentes e reprocesamento (somente quem já está na janela 24h).</div>
+            <div class="muted">Gerencie o motor de campanhas sem deploy. Aqui você pode criar, editar, duplicar, ativar, arquivar e simular campanhas.</div>
           </div>
           <div class="row">
-            <button class="primary" onclick="load()">Atualizar</button>
-            <a class="pill" href="/admin/broadcast-ui">📣 Novo broadcast</a>
+            <button class="primary" onclick="loadCampaigns()">Atualizar</button>
+            <a class="pill" href="/admin/broadcast-ui">📣 Broadcast legado</a>
           </div>
         </div>
 
         <div class="hr"></div>
 
-        <div id="list" class="muted">Carregando…</div>
+        <div class="grid cols2">
+          <div class="card pad">
+            <h4 style="margin:0 0 10px 0;">Nova campanha</h4>
+            <div class="grid">
+              <input id="cp_name" placeholder="Nome da campanha" />
+              <input id="cp_code" placeholder="Código estável (ex: TRIAL_CONVERSION_20H)" />
+              <textarea id="cp_description" placeholder="Descrição interna"></textarea>
+
+              <label class="muted">Categoria</label>
+              <select id="cp_category">${categoryOptions}</select>
+
+              <label class="muted">Canal</label>
+              <select id="cp_channel">${channelOptions}</select>
+
+              <label class="muted">Modo da mensagem</label>
+              <select id="cp_messageMode">${messageModeOptions}</select>
+
+              <input id="cp_copyKey" placeholder="copyKey (quando messageMode = copy_key)" />
+              <textarea id="cp_inlineText" placeholder="Texto inline (quando messageMode = inline_text)"></textarea>
+
+              <div class="grid cols3">
+                <div><label class="muted">Prioridade</label><input id="cp_priority" type="number" value="100" /></div>
+                <div><label class="muted">Delay (min)</label><input id="cp_delayMinutes" type="number" value="0" /></div>
+                <div><label class="muted">Cooldown (h)</label><input id="cp_cooldownHours" type="number" value="24" /></div>
+              </div>
+
+              <label class="muted">Grupo de conflito</label>
+              <select id="cp_conflictGroup">${conflictGroupOptions}</select>
+
+              <label class="muted">Tipo de gatilho</label>
+              <select id="cp_triggerType">${triggerTypeOptions}</select>
+
+              <input id="cp_triggerEvent" placeholder="Evento do gatilho (opcional)" />
+
+              <div class="grid cols2">
+                <input id="cp_requiredStatuses" placeholder="requiredStatuses (csv)" />
+                <input id="cp_excludedStatuses" placeholder="excludedStatuses (csv)" />
+                <input id="cp_requiredPlanCodes" placeholder="requiredPlanCodes (csv)" />
+                <input id="cp_excludedPlanCodes" placeholder="excludedPlanCodes (csv)" />
+              </div>
+
+              <div class="grid cols3">
+                <div><label class="muted">Min trial</label><input id="cp_minTrialUsed" type="number" value="0" /></div>
+                <div><label class="muted">Max trial</label><input id="cp_maxTrialUsed" type="number" value="0" /></div>
+                <div><label class="muted">Max envios/usuário</label><input id="cp_maxSendsPerUser" type="number" value="1" /></div>
+              </div>
+
+              <div class="grid cols2">
+                <label class="pill"><input id="cp_isActive" type="checkbox" checked /> Ativa</label>
+                <label class="pill"><input id="cp_sendOncePerUser" type="checkbox" /> Enviar apenas uma vez por usuário</label>
+                <label class="pill"><input id="cp_requiresWindow24hOpen" type="checkbox" checked /> Exigir janela 24h</label>
+                <label class="pill"><input id="cp_requiresActivePlan" type="checkbox" /> Exigir plano ativo</label>
+                <label class="pill"><input id="cp_requiresNoActivePlan" type="checkbox" /> Exigir sem plano ativo</label>
+                <label class="pill"><input id="cp_requiresTrialEnded" type="checkbox" /> Exigir trial encerrado</label>
+                <label class="pill"><input id="cp_requiresPlansViewed" type="checkbox" /> Exigir planos vistos</label>
+                <label class="pill"><input id="cp_requiresCheckoutStarted" type="checkbox" /> Exigir checkout iniciado</label>
+                <label class="pill"><input id="cp_requiresPaymentPending" type="checkbox" /> Exigir pagamento pendente</label>
+                <label class="pill"><input id="cp_blockIfInCheckout" type="checkbox" /> Bloquear se estiver em checkout</label>
+                <label class="pill"><input id="cp_blockIfPaymentPending" type="checkbox" /> Bloquear se houver pagamento pendente</label>
+                <label class="pill"><input id="cp_blockIfBlocked" type="checkbox" checked /> Bloquear usuário bloqueado</label>
+                <label class="pill"><input id="cp_businessHoursOnly" type="checkbox" /> Somente em horário comercial</label>
+              </div>
+
+              <input id="cp_startAt" placeholder="Início (ISO opcional)" />
+              <input id="cp_endAt" placeholder="Fim (ISO opcional)" />
+              <input id="cp_timezone" value="America/Sao_Paulo" placeholder="Timezone" />
+              <textarea id="cp_notes" placeholder="Observações internas"></textarea>
+
+              <div class="row">
+                <button class="primary" onclick="createManagedCampaign()">Salvar campanha</button>
+                <span id="cp_status" class="muted"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card pad">
+            <h4 style="margin:0 0 10px 0;">Simulação</h4>
+            <div class="grid">
+              <input id="sim_userRef" placeholder="userId ou waId" />
+              <input id="sim_campaignId" placeholder="campaignId opcional" />
+              <button class="primary" onclick="simulateCampaign()">Simular elegibilidade</button>
+              <pre id="sim_out" style="white-space:pre-wrap; min-height:200px;"></pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+        <div id="campaigns_list" class="muted">Carregando campanhas…</div>
 
         <div class="hr"></div>
         <details>
-          <summary class="muted">Ver JSON bruto</summary>
-          <pre id="raw" style="white-space:pre-wrap;"></pre>
+          <summary class="muted">JSON bruto</summary>
+          <pre id="campaigns_raw" style="white-space:pre-wrap;"></pre>
         </details>
       </div>
 
       <script>
         function esc(s){
-          return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+          return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+        }
+        function boolVal(id){ return !!document.getElementById(id)?.checked; }
+        function strVal(id){ return String(document.getElementById(id)?.value || '').trim(); }
+        function numVal(id){ const v = Number(document.getElementById(id)?.value || 0); return Number.isFinite(v) ? Math.trunc(v) : 0; }
+        function setStatus(msg){ document.getElementById('cp_status').textContent = msg || ''; }
+
+        function buildPayload(){
+          return {
+            name: strVal('cp_name'),
+            code: strVal('cp_code'),
+            description: strVal('cp_description'),
+            category: strVal('cp_category'),
+            channel: strVal('cp_channel'),
+            messageMode: strVal('cp_messageMode'),
+            copyKey: strVal('cp_copyKey'),
+            inlineText: strVal('cp_inlineText'),
+            priority: numVal('cp_priority'),
+            delayMinutes: numVal('cp_delayMinutes'),
+            cooldownHours: numVal('cp_cooldownHours'),
+            conflictGroup: strVal('cp_conflictGroup'),
+            triggerType: strVal('cp_triggerType'),
+            triggerEvent: strVal('cp_triggerEvent'),
+            requiredStatuses: strVal('cp_requiredStatuses'),
+            excludedStatuses: strVal('cp_excludedStatuses'),
+            requiredPlanCodes: strVal('cp_requiredPlanCodes'),
+            excludedPlanCodes: strVal('cp_excludedPlanCodes'),
+            minTrialUsed: numVal('cp_minTrialUsed'),
+            maxTrialUsed: numVal('cp_maxTrialUsed'),
+            maxSendsPerUser: numVal('cp_maxSendsPerUser'),
+            isActive: boolVal('cp_isActive'),
+            sendOncePerUser: boolVal('cp_sendOncePerUser'),
+            requiresWindow24hOpen: boolVal('cp_requiresWindow24hOpen'),
+            requiresActivePlan: boolVal('cp_requiresActivePlan'),
+            requiresNoActivePlan: boolVal('cp_requiresNoActivePlan'),
+            requiresTrialEnded: boolVal('cp_requiresTrialEnded'),
+            requiresPlansViewed: boolVal('cp_requiresPlansViewed'),
+            requiresCheckoutStarted: boolVal('cp_requiresCheckoutStarted'),
+            requiresPaymentPending: boolVal('cp_requiresPaymentPending'),
+            blockIfInCheckout: boolVal('cp_blockIfInCheckout'),
+            blockIfPaymentPending: boolVal('cp_blockIfPaymentPending'),
+            blockIfBlocked: boolVal('cp_blockIfBlocked'),
+            businessHoursOnly: boolVal('cp_businessHoursOnly'),
+            startAt: strVal('cp_startAt'),
+            endAt: strVal('cp_endAt'),
+            timezone: strVal('cp_timezone'),
+            notes: strVal('cp_notes'),
+          };
         }
 
-        async function load(){
-          const r = await fetch('/admin/campaigns');
-          const j = await r.json().catch(()=>({}));
-          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+        async function createManagedCampaign(){
+          const payload = buildPayload();
+          if(!payload.name){ alert('Informe o nome da campanha.'); return; }
+          if(!payload.code){ alert('Informe o código da campanha.'); return; }
+          if(payload.messageMode === 'copy_key' && !payload.copyKey){ alert('Informe a copyKey da campanha.'); return; }
+          if(payload.messageMode === 'inline_text' && !payload.inlineText){ alert('Informe o texto inline da campanha.'); return; }
 
-          const items = Array.isArray(j.items) ? j.items : [];
+          setStatus('Salvando...');
+          const r = await fetch('/admin/campaigns', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify(payload)
+          });
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          setStatus(j?.ok ? 'Campanha salva.' : ('Erro: ' + String(j?.error || 'desconhecido')));
+          await loadCampaigns();
+        }
+
+        async function loadCampaigns(){
+          const r = await fetch('/admin/campaigns?mode=managed&limit=100');
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+
+          const items = Array.isArray(j?.campaigns) ? j.campaigns : [];
           if(!items.length){
-            document.getElementById('list').innerHTML = '<div class="muted">Nenhuma campanha registrada.</div>';
+            document.getElementById('campaigns_list').innerHTML = '<div class="muted">Nenhuma campanha cadastrada.</div>';
             return;
           }
 
-          const html = '<table><thead><tr><th>Data</th><th>Assunto</th><th>Plano alvo</th><th>Total</th><th>Enviados</th><th>Pendentes</th><th>Erros</th><th>Ações</th></tr></thead><tbody>' +
-            items.map(it => {
-              const id = esc(it.id||'');
+          const html = '<table><thead><tr><th>Nome</th><th>Código</th><th>Categoria</th><th>Ativa</th><th>Prioridade</th><th>Canal</th><th>Ações</th></tr></thead><tbody>' +
+            items.map((it) => {
+              const id = esc(it.id || '');
+              const meta = it || {};
               return '<tr>' +
-                '<td><code>'+esc(it.createdAt||'')+'</code></td>' +
-                '<td>'+esc(it.subject||'')+'</td>' +
-                '<td><code>'+esc(it.targetPlan||'')+'</code></td>' +
-                '<td><b>'+esc(it.totalUsers||0)+'</b></td>' +
-                '<td><b>'+esc(it.sentCount||0)+'</b></td>' +
-                '<td><b>'+esc(it.pendingCount||0)+'</b></td>' +
-                '<td><b>'+esc(it.errorCount||0)+'</b></td>' +
+                '<td><b>' + esc(meta.name || '') + '</b><div class="muted">' + esc(meta.description || '') + '</div></td>' +
+                '<td><code>' + esc(meta.code || '') + '</code></td>' +
+                '<td>' + esc(meta.category || '') + '</td>' +
+                '<td>' + (meta.isActive ? '<span class="badge ok">ATIVA</span>' : '<span class="badge warn">INATIVA</span>') + '</td>' +
+                '<td>' + esc(meta.priority || 0) + '</td>' +
+                '<td>' + esc(meta.channel || '') + '</td>' +
                 '<td class="row">' +
-                  '<a class="pill" href="#" onclick="reprocess(\\''+id+'\\');return false;">reprocess 24h</a>' +
-                  '<a class="pill" href="#" onclick="details(\\''+id+'\\');return false;">detalhes</a>' +
+                  '<a class="pill" href="#" onclick="detailsCampaign(\'' + id + '\');return false;">detalhes</a>' +
+                  '<a class="pill" href="#" onclick="toggleCampaign(\'' + id + '\',' + (!meta.isActive ? 'true' : 'false') + ');return false;">' + (meta.isActive ? 'desativar' : 'ativar') + '</a>' +
+                  '<a class="pill" href="#" onclick="duplicateCampaignUi(\'' + id + '\');return false;">duplicar</a>' +
+                  '<a class="pill" href="#" onclick="archiveCampaignUi(\'' + id + '\');return false;">arquivar</a>' +
                 '</td>' +
               '</tr>';
             }).join('') +
             '</tbody></table>';
-
-          document.getElementById('list').innerHTML = html;
+          document.getElementById('campaigns_list').innerHTML = html;
         }
 
-        async function details(id){
+        async function detailsCampaign(id){
           const r = await fetch('/admin/campaigns/' + encodeURIComponent(id));
           const j = await r.json().catch(()=>({}));
-          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
           alert('Detalhes carregados no JSON bruto.');
         }
 
-        async function reprocess(id){
-          if(!confirm('Reprocessar apenas usuários que JÁ estão na janela 24h agora?')) return;
-          const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/reprocess-window24h', { method:'POST' });
+        async function toggleCampaign(id, active){
+          const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/active', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ isActive: !!active })
+          });
           const j = await r.json().catch(()=>({}));
-          document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
-          await load();
+          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          await loadCampaigns();
         }
 
-        load();
+        async function duplicateCampaignUi(id){
+          const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/duplicate', { method:'POST' });
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          await loadCampaigns();
+        }
+
+        async function archiveCampaignUi(id){
+          if(!confirm('Arquivar esta campanha?')) return;
+          const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/archive', { method:'POST' });
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          await loadCampaigns();
+        }
+
+        async function simulateCampaign(){
+          const userRef = strVal('sim_userRef');
+          const campaignId = strVal('sim_campaignId');
+          if(!userRef){ alert('Informe userId ou waId para simular.'); return; }
+          const r = await fetch('/admin/campaigns/simulate', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ userRef, campaignId })
+          });
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('sim_out').textContent = JSON.stringify(j, null, 2);
+        }
+
+        loadCampaigns();
       </script>
     `;
     const html = layoutBase({ title: "Campanhas", activePath: "/admin/campaigns-ui", content: inner });
@@ -8928,35 +9255,215 @@ router.get("/window24h-ui", async (req, res) => {
     return res.status(200).send(html);
   });
 
-
   router.get("/campaigns", async (req, res) => {
-    const limit = Number(req.query?.limit || 30);
-    const data = await listCampaigns(limit);
-    return res.json(data);
+    try {
+      const mode = String(req.query?.mode || "managed").trim().toLowerCase();
+      const limit = Number(req.query?.limit || 100);
+
+      if (mode === "legacy") {
+        const data = await listBroadcastCampaigns(limit);
+        return res.json(data);
+      }
+
+      const data = await listManagedCampaigns({ includeInactive: true, limit });
+      return res.json(data);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err?.message || err) });
+    }
   });
 
   router.get("/campaigns/:id", async (req, res) => {
-    const id = String(req.params.id || "").trim();
-    const data = await getCampaign(id);
-    return res.json(data);
+    try {
+      const id = String(req.params.id || "").trim();
+      const managed = await getManagedCampaign(id).catch(() => null);
+      if (managed?.campaign) {
+        const audit = await listCampaignAuditByCampaign(id, { limit: 50 }).catch(() => []);
+        return res.json({ ok: true, campaign: managed.campaign, audit });
+      }
+
+      const legacy = await getBroadcastCampaign(id);
+      return res.json(legacy);
+    } catch (err) {
+      return res.status(404).json({ ok: false, error: String(err?.message || err) });
+    }
   });
 
   router.post("/campaigns", async (req, res) => {
     try {
-      const subject = String(req.body?.subject || "").trim();
-      const text = String(req.body?.text || "").trim();
-      const planTargets = req.body?.planTargets || null;
+      const body = req.body || {};
+      const actor = getAdminActor(req);
 
-      const r = await createCampaignAndDispatch({
-        subject,
-        text,
-        planTargets,
-        mode: "TEXT",
+      const isLegacyBroadcast = String(body.subject || "").trim() || String(body.text || "").trim();
+      if (isLegacyBroadcast) {
+        const subject = String(body.subject || "").trim();
+        const text = String(body.text || "").trim();
+        const planTargets = body?.planTargets || null;
+
+        const result = await createCampaignAndDispatch({
+          subject,
+          text,
+          planTargets,
+          mode: "TEXT",
+        });
+
+        await safeRecordAdminAudit(req, {
+          module: "marketing",
+          action: "CREATE_BROADCAST_CAMPAIGN",
+          summary: `Criou broadcast legado ${String(result?.campaign?.id || "")}.`,
+          targetId: String(result?.campaign?.id || ""),
+          meta: { subject, planTargets },
+        });
+
+        return res.json(result);
+      }
+
+      const payload = buildCampaignPayloadFromBody(body);
+      const created = await createCampaign(payload, { actor });
+
+      await safeRecordCampaignAudit(req, {
+        campaignId: created?.campaign?.id || "",
+        campaignCode: created?.campaign?.code || "",
+        action: "CREATE",
+        notes: "Campanha criada pelo Admin.",
+        after: created?.campaign || {},
       });
 
-      return res.json(r);
+      return res.json(created);
     } catch (err) {
-      return res.status(400).json({ ok: false, error: err.message });
+      return res.status(400).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/campaigns/:id", async (req, res) => {
+    try {
+      const id = String(req.params.id || "").trim();
+      const actor = getAdminActor(req);
+      const current = await getManagedCampaign(id);
+      if (!current?.campaign) return res.status(404).json({ ok: false, error: "campaign not found" });
+
+      const patch = buildCampaignPayloadFromBody(req.body || {});
+      const updated = await updateCampaign(id, patch, { actor });
+
+      await safeRecordCampaignAudit(req, {
+        campaignId: id,
+        campaignCode: updated?.campaign?.code || current?.campaign?.code || "",
+        action: "UPDATE",
+        notes: "Campanha atualizada pelo Admin.",
+        before: current?.campaign || {},
+        after: updated?.campaign || {},
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/campaigns/:id/active", async (req, res) => {
+    try {
+      const id = String(req.params.id || "").trim();
+      const isActive = !!req.body?.isActive;
+      const actor = getAdminActor(req);
+      const current = await getManagedCampaign(id);
+      if (!current?.campaign) return res.status(404).json({ ok: false, error: "campaign not found" });
+
+      const updated = await setCampaignActive(id, isActive, { actor });
+
+      await safeRecordCampaignAudit(req, {
+        campaignId: id,
+        campaignCode: updated?.campaign?.code || current?.campaign?.code || "",
+        action: isActive ? "ACTIVATE" : "DEACTIVATE",
+        notes: isActive ? "Campanha ativada pelo Admin." : "Campanha desativada pelo Admin.",
+        before: current?.campaign || {},
+        after: updated?.campaign || {},
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/campaigns/:id/archive", async (req, res) => {
+    try {
+      const id = String(req.params.id || "").trim();
+      const actor = getAdminActor(req);
+      const current = await getManagedCampaign(id);
+      if (!current?.campaign) return res.status(404).json({ ok: false, error: "campaign not found" });
+
+      const updated = await archiveCampaign(id, { actor });
+
+      await safeRecordCampaignAudit(req, {
+        campaignId: id,
+        campaignCode: updated?.campaign?.code || current?.campaign?.code || "",
+        action: "ARCHIVE",
+        notes: "Campanha arquivada pelo Admin.",
+        before: current?.campaign || {},
+        after: updated?.campaign || {},
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/campaigns/:id/duplicate", async (req, res) => {
+    try {
+      const id = String(req.params.id || "").trim();
+      const actor = getAdminActor(req);
+      const duplicated = await duplicateCampaign(id, { actor });
+
+      await safeRecordCampaignAudit(req, {
+        campaignId: duplicated?.campaign?.id || "",
+        campaignCode: duplicated?.campaign?.code || "",
+        action: "DUPLICATE",
+        notes: `Campanha duplicada a partir de ${id}.`,
+        after: duplicated?.campaign || {},
+        meta: { sourceCampaignId: id },
+      });
+
+      return res.json(duplicated);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/campaigns/simulate", async (req, res) => {
+    try {
+      const userRef = String(req.body?.userRef || "").trim();
+      const campaignId = String(req.body?.campaignId || "").trim();
+      if (!userRef) return res.status(400).json({ ok: false, error: "userRef required" });
+
+      const userId = await resolveAdminUserRef(userRef);
+      const user = await getUserSnapshot(userId);
+      const simulation = await simulateCampaignsForUser(
+        { userId },
+        { userId, user, campaignIds: campaignId ? [campaignId] : [] },
+        { includeInactive: true }
+      );
+
+      await safeRecordCampaignAudit(req, {
+        campaignId: campaignId,
+        campaignCode: "",
+        action: "SIMULATE",
+        notes: `Simulação executada para ${userId}.`,
+        meta: { userId, campaignId },
+      });
+
+      return res.json({ ok: true, userId, simulation });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/campaigns/:id/reprocess-window24h", async (req, res) => {
+    try {
+      const id = String(req.params.id || "").trim();
+      const result = await reprocessCampaignForActiveWindow(id, { limit: 5000 });
+      return res.json(result);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err?.message || err) });
     }
   });
 
