@@ -376,6 +376,25 @@ Agora vou te mostrar como essa mesma descrição fica no modelo *LIVRE*.
   FLOW_PROGRESS_SIGNATURE_SUMMARY:
     "Plano: *{{planName}}*\n\nDescrições usadas: *{{used}} / {{total}}*\n\nVocê já criou *{{used}} anúncios* este mês 🙂",
 
+  // CAMPAIGNS — Motor de campanhas formais
+  FLOW_CAMPAIGN_TRIAL_CONVERSION_20H:
+    "Você já deu o primeiro passo 🙂\n\nFalta pouquinho pra ter o *Amigo das Vendas* te ajudando todos os dias 💚\n\nMuitos usuários recuperam o valor do plano com apenas *1 venda*.\n\nQuer continuar de onde parou? Responda *PLANO* e seguimos juntos 🚀",
+
+  FLOW_CAMPAIGN_CHECKOUT_RECOVERY_20H:
+    "Seu plano está quase ativo 🙂\n\nFalta bem pouquinho para concluir sua contratação e ter o *Amigo das Vendas* te ajudando nas suas vendas 💚\n\nSe quiser continuar de onde parou, responda *PAGAR* ou *MENU*.",
+
+  FLOW_CAMPAIGN_PAYMENT_PENDING_RECOVERY:
+    "Seu pagamento ainda está pendente 🙂\n\nAssim que ele for confirmado, seu plano ativa automaticamente e você pode continuar criando anúncios sem interrupção.\n\nSe quiser retomar agora, responda *PAGAR* ou *MENU*.",
+
+  FLOW_CAMPAIGN_CREATION_REENGAGEMENT:
+    "Oi 🙂 vi que você começou seu anúncio, mas parou no meio.\n\nMe diga o que você vende e eu continuo daqui com você 💚",
+
+  FLOW_CAMPAIGN_HABIT_ACTIVATION:
+    "Que tal criar um anúncio hoje? 🙂\n\nQuem posta com frequência costuma vender mais, e o *Amigo das Vendas* pode te ajudar a fazer isso em poucos segundos.\n\nMe mande sua próxima descrição 💚",
+
+  FLOW_CAMPAIGN_UPSELL_NUDGE:
+    "Você está usando bastante o *Amigo das Vendas* 🙂\n\nTalvez já esteja na hora de subir para um plano com mais descrições e continuar vendendo sem limite apertado.\n\nSe quiser ver as opções, responda *PLANOS*.",
+
 
   // OPENAI — Prompts
   OPENAI_SYSTEM_FIXED: [
@@ -660,6 +679,13 @@ export const COPY_CATALOG = Object.freeze([
   { category: "Flow", key: "FLOW_DAILY_AD_NUDGE_SHORT", label: "Anúncio do dia: versão curta" },
   { category: "Flow", key: "FLOW_DAILY_AD_ALREADY_CREATED_TODAY", label: "Anúncio do dia: já usou hoje" },
   { category: "Flow", key: "FLOW_PROGRESS_SIGNATURE_SUMMARY", label: "Minha assinatura: progresso resumido" },
+
+  { category: "Campaigns", key: "FLOW_CAMPAIGN_TRIAL_CONVERSION_20H", label: "Conversão pós-trial (20h)" },
+  { category: "Campaigns", key: "FLOW_CAMPAIGN_CHECKOUT_RECOVERY_20H", label: "Recuperação de checkout (20h)" },
+  { category: "Campaigns", key: "FLOW_CAMPAIGN_PAYMENT_PENDING_RECOVERY", label: "Recuperação de pagamento pendente" },
+  { category: "Campaigns", key: "FLOW_CAMPAIGN_CREATION_REENGAGEMENT", label: "Reengajamento de criação" },
+  { category: "Campaigns", key: "FLOW_CAMPAIGN_HABIT_ACTIVATION", label: "Ativação de hábito" },
+  { category: "Campaigns", key: "FLOW_CAMPAIGN_UPSELL_NUDGE", label: "Upsell" },
 
   { category: "OpenAI", key: "OPENAI_SYSTEM_FIXED", label: "Prompt FIXO (system)" },
   { category: "OpenAI", key: "OPENAI_SYSTEM_FIXED_NO_PROFILE", label: "Prompt FIXO sem perfil salvo (system)" },
