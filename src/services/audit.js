@@ -16,6 +16,23 @@ const ADMIN_AUDIT_TTL_SECONDS = 180 * 24 * 60 * 60;
 const COUPON_AUDIT_MAX_ITEMS = 2000;
 const COUPON_AUDIT_TTL_SECONDS = 180 * 24 * 60 * 60;
 
+
+const CAMPAIGN_AUDIT_GLOBAL_KEY = "audit:campaign:global";
+const CAMPAIGN_AUDIT_BY_CAMPAIGN_PREFIX = "audit:campaign:campaign";
+const CAMPAIGN_AUDIT_MAX_ITEMS = 2000;
+const CAMPAIGN_AUDIT_TTL_SECONDS = 180 * 24 * 60 * 60;
+
+function normalizeCampaignCode(value) {
+  const text = safeStr(value).toUpperCase();
+  return text || "";
+}
+
+function campaignAuditListKey(campaignId) {
+  const id = safeStr(campaignId);
+  if (!id) throw new Error("campaignAuditListKey: campaignId is required");
+  return `${CAMPAIGN_AUDIT_BY_CAMPAIGN_PREFIX}:${id}`;
+}
+
 function safeStr(value) {
   return String(value ?? "").trim();
 }
@@ -168,5 +185,69 @@ export async function getCouponAuditCountByUser(internalUserId) {
   const userId = safeStr(internalUserId);
   if (!userId) return 0;
   const count = await redisLLen(redisCouponUserAuditListKey(userId));
+  return toInt(count, 0);
+}
+
+
+export async function logCampaignAudit(input = {}) {
+  const event = normalizeEvent({
+    module: safeStr(input.module) || "CAMPAIGN",
+    ...input,
+    campaignCode: normalizeCampaignCode(input.campaignCode),
+  });
+
+  const campaignId = safeStr(input.campaignId || event.targetId);
+  if (!campaignId) throw new Error("logCampaignAudit: campaignId is required");
+
+  const enrichedEvent = normalizeEvent({
+    ...event,
+    targetId: campaignId,
+    targetLabel: safeStr(input.targetLabel) || "campaign",
+    meta: {
+      ...normalizeObject(event.meta),
+      campaignId,
+      campaignCode: normalizeCampaignCode(input.campaignCode),
+      notes: safeStr(input.notes),
+    },
+  });
+
+  const jobs = [
+    pushAuditEvent(CAMPAIGN_AUDIT_GLOBAL_KEY, enrichedEvent, {
+      maxItems: CAMPAIGN_AUDIT_MAX_ITEMS,
+      ttlSeconds: CAMPAIGN_AUDIT_TTL_SECONDS,
+    }),
+    pushAuditEvent(campaignAuditListKey(campaignId), enrichedEvent, {
+      maxItems: CAMPAIGN_AUDIT_MAX_ITEMS,
+      ttlSeconds: CAMPAIGN_AUDIT_TTL_SECONDS,
+    }),
+  ];
+
+  await Promise.allSettled(jobs);
+  return enrichedEvent;
+}
+
+export async function listCampaignAudit({ limit = 100 } = {}) {
+  const lim = Math.max(1, Math.min(1500, toInt(limit, 100)));
+  const raw = await redisLRange(CAMPAIGN_AUDIT_GLOBAL_KEY, 0, lim - 1);
+  return parseAuditItems(raw);
+}
+
+export async function listCampaignAuditByCampaign(campaignId, { limit = 100 } = {}) {
+  const id = safeStr(campaignId);
+  if (!id) return [];
+  const lim = Math.max(1, Math.min(1500, toInt(limit, 100)));
+  const raw = await redisLRange(campaignAuditListKey(id), 0, lim - 1);
+  return parseAuditItems(raw);
+}
+
+export async function getCampaignAuditCount() {
+  const count = await redisLLen(CAMPAIGN_AUDIT_GLOBAL_KEY);
+  return toInt(count, 0);
+}
+
+export async function getCampaignAuditCountByCampaign(campaignId) {
+  const id = safeStr(campaignId);
+  if (!id) return 0;
+  const count = await redisLLen(campaignAuditListKey(id));
   return toInt(count, 0);
 }
