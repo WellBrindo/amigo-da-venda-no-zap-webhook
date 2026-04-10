@@ -324,3 +324,88 @@ export function redisCouponReportKey(reportId) {
 export async function redisNextCouponReservationSequence() {
   return redisIncrBy(redisCouponReservationSequenceKey(), 1);
 }
+
+function normalizeCampaignCode(code) {
+  return requireKeyPart("campaignCode", code).toUpperCase();
+}
+
+export function redisCampaignSequenceKey() {
+  return "seq:campaign";
+}
+
+export function redisCampaignExecutionSequenceKey() {
+  return "seq:campaignExecution";
+}
+
+export function redisCampaignDefinitionKey(campaignId) {
+  const cid = requireKeyPart("campaignId", campaignId);
+  return `campaign:def:${cid}`;
+}
+
+export function redisCampaignIndexAllKey() {
+  return "campaign:index:all";
+}
+
+export function redisCampaignIndexActiveKey() {
+  return "campaign:index:active";
+}
+
+export function redisCampaignIndexCategoryKey(category) {
+  const cat = requireKeyPart("category", category).toLowerCase();
+  return `campaign:index:category:${cat}`;
+}
+
+export function redisCampaignIndexCodeKey(code) {
+  const normalized = normalizeCampaignCode(code);
+  return `campaign:index:code:${normalized}`;
+}
+
+export function redisCampaignUserStateKey(campaignId, userId) {
+  const cid = requireKeyPart("campaignId", campaignId);
+  const uid = requireKeyPart("userId", userId);
+  return `campaign:userstate:${cid}:${uid}`;
+}
+
+export function redisCampaignLogGlobalKey() {
+  return "campaign:log:global";
+}
+
+export function redisCampaignLogUserKey(userId) {
+  const uid = requireKeyPart("userId", userId);
+  return `campaign:log:user:${uid}`;
+}
+
+export function redisCampaignLogCampaignKey(campaignId) {
+  const cid = requireKeyPart("campaignId", campaignId);
+  return `campaign:log:campaign:${cid}`;
+}
+
+export function redisCampaignCooldownKey(campaignId, userId) {
+  const cid = requireKeyPart("campaignId", campaignId);
+  const uid = requireKeyPart("userId", userId);
+  return `campaign:cooldown:${cid}:${uid}`;
+}
+
+export function redisCampaignConflictGlobalKey() {
+  return "campaign:conflict:global";
+}
+
+export function redisCampaignPendingUserKey(userId) {
+  const uid = requireKeyPart("userId", userId);
+  return `campaign:pending:${uid}`;
+}
+
+export function redisCampaignDeliveryKey(campaignId, userId, executionId) {
+  const cid = requireKeyPart("campaignId", campaignId);
+  const uid = requireKeyPart("userId", userId);
+  const eid = requireKeyPart("executionId", executionId);
+  return `campaign:delivery:${cid}:${uid}:${eid}`;
+}
+
+export async function redisNextCampaignSequence() {
+  return redisIncrBy(redisCampaignSequenceKey(), 1);
+}
+
+export async function redisNextCampaignExecutionSequence() {
+  return redisIncrBy(redisCampaignExecutionSequenceKey(), 1);
+}
