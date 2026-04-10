@@ -87,13 +87,7 @@ import {
   setFloodMeta,
   armPostAdIdleReminder,
   clearPostAdIdleReminder,
-  getGrowthMeta,
-  setGrowthMeta,
   markUserAdCreated,
-  markFeedbackAsked,
-  markFeedbackAnswered,
-  markTestimonialAsked,
-  markReferralAsked,
   getCheckoutDraft,
   setCheckoutDraft,
   clearCheckoutDraft,
@@ -196,7 +190,6 @@ const ST = Object.freeze({
   WAIT_MENU_NEW_DOC: "WAIT_MENU_NEW_DOC",
   WAIT_MENU_PROFILE: "WAIT_MENU_PROFILE",
 
-
   // Pós-anúncio
   WAIT_TEMPLATE_MODE: "WAIT_TEMPLATE_MODE",
   WAIT_SAVE_PROFILE: "WAIT_SAVE_PROFILE",
@@ -295,7 +288,6 @@ function wantsFreeCommand(t) {
   return s === "LIVRE" || s === "FREE";
 }
 
-
 function wantsMenuCommand(t) {
   const s = upper(t);
   return s === "MENU" || s === "MENÚ";
@@ -388,7 +380,6 @@ function normalizeBusinessVoice(adText, bizProfile) {
 function ensureArray(v) {
   return Array.isArray(v) ? v : [];
 }
-
 
 function normalizeMenuChoice(t) {
   const s = cleanText(t);
@@ -528,17 +519,6 @@ function shouldWarnFlood(meta, now = nowIso()) {
   return true;
 }
 
-function nextHigherPlan(menu, currentPlanCode) {
-  const plans = Array.isArray(menu) ? menu.filter(Boolean) : [];
-  const currentIndex = plans.findIndex((item) => item?.code === currentPlanCode);
-  if (currentIndex < 0) return null;
-  return plans[currentIndex + 1] || null;
-}
-
-function shouldShowProgressMilestone(count) {
-  return count === 3 || count === 5 || count === 8;
-}
-
 function moneyBRFromCents(cents) {
   const v = (Number(cents) || 0) / 100;
   return v.toFixed(2);
@@ -588,7 +568,6 @@ function boldWrapSafe(s) {
   if (!core) return "";
   return `*${core.replace(/\*/g, "").trim()}*`;
 }
-
 
 function enforceAdFormatting(adText) {
   const raw = normalizeNewlines(adText);
@@ -861,18 +840,12 @@ function enforceAdFormatting(adText) {
   return arr.join("\n").trim().replace(/\*{2,}/g, "*");
 }
 
-
-
-
-
 function firstNameFromFullName(fullName) {
   const s = cleanText(fullName);
   if (!s) return "";
   const parts = s.split(/\s+/).filter(Boolean);
   return parts.length ? parts[0] : "";
 }
-
-
 
 const CATEGORY_TERMS = Object.freeze({
   VEHICLE: [
@@ -2673,7 +2646,6 @@ async function msgAskBillingAddress(waId){
   return withMenuHint(waId, await getCopyText("FLOW_ASK_BILLING_ADDRESS", { waId }));
 }
 
-
 async function msgAfterAdAskTemplateChoice(waId, currentMode){
   return await getCopyText("FLOW_ASK_TEMPLATE_CHOICE", { waId });
 }
@@ -2682,26 +2654,8 @@ async function msgTemplateSet(waId, mode){
   return await getCopyText(mode === "FREE" ? "FLOW_TEMPLATE_SET_FREE" : "FLOW_TEMPLATE_SET_FIXED", { waId });
 }
 
-
-
 async function msgAskProfileRegistration(waId) {
   return await getCopyText("FLOW_ASK_PROFILE_REGISTRATION", { waId });
-}
-
-async function msgUpgradeOffer(waId) {
-  const menu = await getMenuPlans();
-  const currentPlanCode = await getUserPlan(waId);
-  const currentPlan = menu.find((item) => item?.code === currentPlanCode) || (await getPlan(currentPlanCode)) || null;
-  const suggestedUpgrade = nextHigherPlan(menu, currentPlanCode);
-
-  return await getCopyText("FLOW_UPGRADE_OFFER", {
-    waId,
-    vars: {
-      currentPlanName: currentPlan?.name || currentPlanCode || "Seu plano",
-      currentPlanQuotaLine: currentPlan?.monthlyQuota ? `\n${currentPlan.monthlyQuota} descrições/mês` : "",
-      upgradePlanLine: suggestedUpgrade ? `\n• ${suggestedUpgrade.name} — ${suggestedUpgrade.monthlyQuota} descrições/mês` : "",
-    },
-  });
 }
 
 async function msgFirstResultPrompt(waId) {
@@ -2715,35 +2669,6 @@ async function msgFirstResultExplain(waId) {
 async function msgFirstResultShowFree(waId) {
   return await getCopyText("FLOW_FIRST_RESULT_SHOW_FREE", { waId });
 }
-
-async function msgFeedbackAsk(waId) {
-  return await getCopyText("FLOW_FEEDBACK_ASK", { waId });
-}
-
-async function msgReferralInvite(waId) {
-  return await getCopyText("FLOW_REFERRAL_INVITE", {
-    waId,
-    vars: { referralLink: "https://wa.me/5511978257959" },
-  });
-}
-
-
-async function msgHabitNudge(waId, count) {
-  return await getCopyText("FLOW_HABIT_NUDGE", { waId, vars: { count } });
-}
-
-async function msgProgressMilestone(waId, count) {
-  return await getCopyText("FLOW_PROGRESS_MILESTONE", { waId, vars: { count } });
-}
-
-async function msgDailyPostingHabit(waId) {
-  return await getCopyText("FLOW_DAILY_POSTING_HABIT", { waId });
-}
-
-async function msgRetentionSignoff(waId) {
-  return await getCopyText("FLOW_RETENTION_SIGNOFF", { waId });
-}
-
 
 function buildRefinementReminder(maxRefinements) {
   const qty = Number.isFinite(Number(maxRefinements)) && Number(maxRefinements) >= 0
@@ -2909,7 +2834,6 @@ function sanitizeGeneratedAd(adText, bizProfile) {
   text = removeGeneratedPlaceholders(text);
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
-
 
 function ensureCompanyNameBold(adText, companyName) {
   const name = normalizeProfileScalar(companyName);
@@ -3415,9 +3339,6 @@ export async function handleInboundText({ waId, userId, text }) {
   if (activity.shouldWarnFlood) {
     prefixes.push(await getCopyText("FLOW_FLOOD_NOTICE", { waId: id }));
   }
-  if (activity.shouldPrefixIdleNudge) {
-    prefixes.push(await getCopyText("FLOW_IDLE_NUDGE", { waId: id }));
-  }
 
   return prependReplies(outcome, prefixes);
 }
@@ -3438,7 +3359,6 @@ async function handleInboundTextCore({ waId, userId, text }) {
     await setUserStatus(id, ST.TRIAL);
   }
 
-
   // Comandos globais de preferência de template
   if (wantsTemplateCommand(inbound)) {
     await setTemplateMode(id, "FIXED");
@@ -3457,7 +3377,6 @@ async function handleInboundTextCore({ waId, userId, text }) {
     return reply(await msgMenuMain(id));
   }
 
-
   const status = await getUserStatus(id);
 
   // ✅ Segurança: ACTIVE sem plano nunca pode continuar
@@ -3467,7 +3386,6 @@ async function handleInboundTextCore({ waId, userId, text }) {
       return reply(await getCopyText("FLOW_ACTIVE_NO_PLAN_ERROR", { waId: id }));
     }
   }
-
 
   // ✅ Primeiro contato (ou usuário sem nome): sempre pedir nome antes de seguir no fluxo.
   // Mantém comandos globais (TEMPLATE/LIVRE/MENU) funcionando acima.
@@ -3791,33 +3709,14 @@ async function handleInboundTextCore({ waId, userId, text }) {
     return reply(await msgFirstResultExplain(id));
   }
 
-  // 0.42) Feedback pós-uso
+  // 0.42) Compatibilidade de estado legado de feedback
   if (status === ST.WAIT_FEEDBACK_RESPONSE) {
-    const c = normalizeChoice(inbound);
-    if (!["1", "2", "3"].includes(c)) {
-      return reply(await msgFeedbackAsk(id));
-    }
-
-    await markFeedbackAnswered(id, c);
-
     const prev = await getPrevStatus(id);
     await clearPrevStatus(id);
     await setUserStatus(id, prev || ST.ACTIVE);
-
-    if (c === "1") {
-      await markTestimonialAsked(id);
-      return replyMulti([
-        await getCopyText("FLOW_TESTIMONIAL_ASK", { waId: id }),
-        await getCopyText("FLOW_MENU_URL_FEEDBACK", { waId: id }),
-        await msgRetentionSignoff(id),
-      ]);
-    }
-
-    return replyMulti([
-      await msgRetentionSignoff(id),
-    ]);
+    await armPostAdIdleReminder(id, "REFINE_OR_OK");
+    return reply(await msgRefinementPrompt(id, await resolveMaxRefinementsForUser(id, (prev || ST.ACTIVE) === ST.TRIAL)));
   }
-
 
   // 0.44) Desambiguação curta de categoria quando o motor detectar conflito
   if (status === ST.WAIT_CATEGORY_DISAMBIGUATION) {
@@ -3880,7 +3779,6 @@ async function handleInboundTextCore({ waId, userId, text }) {
       skipCategoryIntake: true,
     });
   }
-
 
   // 0.445) Desambiguação curta da intenção do anúncio
   if (status === ST.WAIT_INTENT_DISAMBIGUATION) {
@@ -3948,7 +3846,6 @@ async function handleInboundTextCore({ waId, userId, text }) {
     });
   }
 
-
   // 0.45) Complemento de informações antes de gerar anúncio
   if (status === ST.WAIT_CATEGORY_DETAILS) {
     const intake = await getAdSessionPayload(id);
@@ -3988,8 +3885,6 @@ async function handleInboundTextCore({ waId, userId, text }) {
       forcedIntentKey: intake.intentKey || "",
     });
   }
-
-
 
   // 0.5) Wizard — adicionar/ajustar dados da empresa (manual)
   if (
@@ -4156,38 +4051,10 @@ async function handleInboundTextCore({ waId, userId, text }) {
     return reply(await msgAskBillingCycle(id, plan));
   }
 
-  // 4.1) Upgrade automático ao atingir limite
+  // 4.1) Compatibilidade de estado legado de upgrade
   if (status === ST.WAIT_UPGRADE_CHOICE) {
-    const c = normalizeChoice(inbound);
-
-    if (c === "1") {
-      const menu = await getMenuPlans();
-      const currentPlanCode = await getUserPlan(id);
-      const suggestedUpgrade = nextHigherPlan(menu, currentPlanCode);
-      if (!suggestedUpgrade) {
-        await setUserStatus(id, ST.WAIT_PLAN);
-        return reply(await msgPlansOnly(id));
-      }
-
-      await clearCheckoutQuoteState(id, {
-        releaseReservation: true,
-        reason: "upgrade_selection_changed",
-        meta: { nextPlanCode: suggestedUpgrade.code },
-      });
-      await clearSelectedBillingCycle(id);
-      await setSelectedPlanCode(id, suggestedUpgrade.code);
-      await setUserPlan(id, suggestedUpgrade.code);
-      await markCheckoutInteraction(id, { started: true });
-      await setUserStatus(id, ST.WAIT_BILLING_CYCLE);
-      return reply(await msgAskBillingCycle(id, suggestedUpgrade));
-    }
-
-    if (c === "2") {
-      await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly(id));
-    }
-
-    return reply(await msgUpgradeOffer(id));
+    await setUserStatus(id, ST.WAIT_PLAN);
+    return reply(await msgPlansOnly(id));
   }
 
   // 4.2) Escolha do ciclo de cobrança
@@ -4471,31 +4338,6 @@ async function buildPostProfilePrompt({ waId, saved, maxRefinements }) {
   return [await msgAfterSaveProfile(waId, saved, maxRefinements)];
 }
 
-async function buildPostAdGrowthMessages({ waId, adsCreatedTotal }) {
-  const count = Number(adsCreatedTotal || 0);
-  if (count <= 0) return [];
-
-  const growthMeta = await getGrowthMeta(waId);
-  const messages = [];
-
-  if (shouldShowProgressMilestone(count)) {
-    messages.push(await msgProgressMilestone(waId, count));
-  }
-
-  if (count >= 3 && !growthMeta?.habitPromptedAt) {
-    messages.push(await msgHabitNudge(waId, count));
-    messages.push(await msgDailyPostingHabit(waId));
-    await setGrowthMeta(waId, { ...growthMeta, habitPromptedAt: nowIso() });
-  }
-
-  if (count >= 10 && !growthMeta?.referralAskedAt) {
-    messages.push(await msgReferralInvite(waId));
-    await markReferralAsked(waId);
-  }
-
-  return messages;
-}
-
 async function handlePostAdDecisionCommand({ waId, inboundText }) {
   const lastAd = await getLastAd(waId);
   if (!lastAd) return null;
@@ -4645,7 +4487,6 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   const maxRefinements = await resolveMaxRefinementsForUser(id, isTrial);
 
-
   const currentRefines = isRefinement ? await getRefineCount(id) : 0; // refinamentos na "rodada" atual
   const attemptedNext = isRefinement ? (currentRefines + 1) : 0;
 
@@ -4653,7 +4494,6 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   const nextRefines = isRefinement ? (willConsumeExtraCredit ? 1 : attemptedNext) : 0;
 
   const creditsNeeded = isRefinement ? (willConsumeExtraCredit ? 1 : 0) : 1;
-
 
   // TRIAL: checa limite (considera refinamentos que não consomem crédito)
   if (isTrial) {
@@ -4687,16 +4527,6 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
     const used = await getUserQuotaUsed(id);
     if (used >= Number(plan.monthlyQuota || 0)) {
-      const menu = await getMenuPlans();
-      const suggestedUpgrade = nextHigherPlan(menu, planCode);
-      if (suggestedUpgrade) {
-        await setUserStatus(id, ST.WAIT_UPGRADE_CHOICE);
-        return replyMulti([
-          await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id }),
-          await msgUpgradeOffer(id),
-        ]);
-      }
-
       await setUserStatus(id, ST.WAIT_PLAN);
       return replyMulti([
         await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id }),
@@ -4772,9 +4602,8 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     }
   }
 
-  const growthMeta = await markUserAdCreated(id);
+  await markUserAdCreated(id);
   await setLastCampaignInteractionAt(id, nowIso());
-  const adsCreatedTotal = Number(growthMeta?.adsCreatedTotal || 0);
 
   let formattedAd = enforceAdFormatting(ad);
   formattedAd = sanitizeGeneratedAd(formattedAd, bizProfile);
@@ -4796,23 +4625,10 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   // Mantém o status atual e apenas orienta refinamentos
   const refineMsg = await msgRefinementPrompt(id, maxRefinements);
-  const followups = [refineMsg];
-  const growthMessages = await buildPostAdGrowthMessages({ waId: id, adsCreatedTotal });
+  await setLastCampaignInteractionAt(id, nowIso());
+  await armPostAdIdleReminder(id, "REFINE_OR_OK");
 
-  const currentGrowthMeta = await getGrowthMeta(id);
-  const shouldAskFeedback = adsCreatedTotal >= 8 && !currentGrowthMeta?.feedbackAskedAt && !currentGrowthMeta?.feedbackAnsweredAt;
-  if (shouldAskFeedback) {
-    await markFeedbackAsked(id);
-    await setLastCampaignInteractionAt(id, nowIso());
-    await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
-    await setUserStatus(id, ST.WAIT_FEEDBACK_RESPONSE);
-    growthMessages.push(await msgFeedbackAsk(id));
-  } else {
-    await setLastCampaignInteractionAt(id, nowIso());
-    await armPostAdIdleReminder(id, "REFINE_OR_OK");
-  }
-
-  return replyMulti([formattedAd, ...followups, ...growthMessages]);
+  return replyMulti([formattedAd, refineMsg]);
 }
 
 // -------------------- Asaas helpers --------------------
