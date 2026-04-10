@@ -10,7 +10,7 @@ import { resolveAdminSession } from "./services/adminAccess.js";
 import { startLifecycleAutomationLoop } from "./services/broadcast.js";
 
 const APP_NAME = "amigo-das-vendas";
-const APP_VERSION = "16.0.9-modular-clean-server-bootstrap";
+const APP_VERSION = "16.1.0-campaign-orchestrator-bootstrap";
 
 const ADMIN_SECRET = String(process.env.ADMIN_SECRET || "").trim();
 
