@@ -1,5 +1,5 @@
 // src/routes/webhook.js
-// ✅ V16.4.8 — Webhook robusto + campanhas padronizadas no broadcast.js
+// ✅ V16.5.0 — Webhook robusto + integração com orquestrador de campanhas
 import { Router } from "express";
 
 import { touch24hWindow } from "../services/window24h.js";
@@ -93,25 +93,6 @@ export function webhookRouter() {
               await touch24hWindow(inboundWaId);
             }
 
-            // ✅ 1.1) processa campanhas pendentes (padronizado em broadcast.js)
-            // (não interfere no fluxo: envia mensagens adicionais se houver)
-            try {
-              if (inboundWaId) {
-                await processPendingForWaId(inboundWaId);
-              }
-            } catch (err) {
-              console.warn(
-                JSON.stringify({
-                  level: "warn",
-                  tag: "process_pending_campaigns_failed",
-                  waId: inboundWaId || null,
-                  bsuid: inboundBsuid || null,
-                  internalUserId,
-                  error: String(err?.message || err),
-                })
-              );
-            }
-
             // 2) pega texto inbound (só texto por enquanto)
             let inboundText = "";
             if (msg?.type === "text") {
@@ -150,6 +131,25 @@ export function webhookRouter() {
                 // pequena pausa para evitar rate-limit e manter a ordem
                 await sleep(80);
               }
+            }
+
+            // 5) processa campanhas pendentes pelo novo orquestrador,
+            // somente depois do fluxo inbound principal já ter sido tratado
+            try {
+              if (inboundWaId) {
+                await processPendingForWaId(inboundWaId);
+              }
+            } catch (err) {
+              console.warn(
+                JSON.stringify({
+                  level: "warn",
+                  tag: "process_pending_campaigns_failed",
+                  waId: inboundWaId || null,
+                  bsuid: inboundBsuid || null,
+                  internalUserId,
+                  error: String(err?.message || err),
+                })
+              );
             }
           }
         }
