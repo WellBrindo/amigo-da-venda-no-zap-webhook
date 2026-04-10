@@ -118,6 +118,11 @@ import {
   setCheckoutCouponStatus,
   clearCheckoutCouponStatus,
   resetCheckoutCouponState,
+  setPlansViewedAt,
+  setCheckoutStartedAt,
+  setTrialEndedAt,
+  setLastCampaignInteractionAt,
+  setLastPlanPromptAt,
 } from "./state.js";
 
 import { getMenuPlans, getPlan, getPlanByChoice, renderPlansMenu } from "./Plans.js";
@@ -444,6 +449,23 @@ function todayISO() {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+async function markPlansPrompted(waId, { trialEnded = false } = {}) {
+  const ts = nowIso();
+  await setPlansViewedAt(waId, ts);
+  await setLastPlanPromptAt(waId, ts);
+  if (trialEnded) {
+    await setTrialEndedAt(waId, ts);
+  }
+}
+
+async function markCheckoutInteraction(waId, { started = false } = {}) {
+  const ts = nowIso();
+  await setLastCampaignInteractionAt(waId, ts);
+  if (started) {
+    await setCheckoutStartedAt(waId, ts);
+  }
 }
 
 function diffMsSafe(fromIso, toIso = nowIso()) {
@@ -2513,11 +2535,13 @@ async function msgAskProduct(waId){
   }));
 }
 
-async function msgTrialOverAndPlans() {
+async function msgTrialOverAndPlans(waId) {
+  await markPlansPrompted(waId, { trialEnded: true });
   return await renderPlansMenu();
 }
 
-async function msgPlansOnly() {
+async function msgPlansOnly(waId) {
+  await markPlansPrompted(waId, { trialEnded: false });
   // Versão sem o "trial concluído"
   const menu = await getMenuPlans();
   if (!menu || menu.length === 0) {
@@ -3220,7 +3244,7 @@ async function createCurrentPlanPayment(waId) {
   const plan = selection.plan || (planCode ? await getPlan(planCode) : null);
   if (!plan) {
     await setUserStatus(waId, ST.WAIT_PLAN);
-    return await msgPlansOnly();
+    return await msgPlansOnly(waId);
   }
 
   const pm = await getPaymentMethod(waId);
@@ -3244,7 +3268,7 @@ async function createCurrentPlanPayment(waId) {
       return await msgCouponInvalid(waId, pricingFailure);
     }
     await setUserStatus(waId, ST.WAIT_PLAN);
-    return await msgPlansOnly();
+    return await msgPlansOnly(waId);
   }
 
   const quote = quoteResult.quote;
@@ -3267,6 +3291,7 @@ async function createCurrentPlanPayment(waId) {
       name: `Plano ${plan.name} (${billingLabel})`,
     });
 
+    await markCheckoutInteraction(waId);
     await setUserStatus(waId, ST.PAYMENT_PENDING);
 
     const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
@@ -3294,6 +3319,7 @@ async function createCurrentPlanPayment(waId) {
       name: `Assinatura ${plan.name} (${billingLabel})`,
     });
 
+    await markCheckoutInteraction(waId);
     await setUserStatus(waId, ST.PAYMENT_PENDING);
 
     const url = link?.url || link?.paymentLink || link?.link || "";
@@ -3482,7 +3508,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     }
 
     if (choice === "3") {
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     if (choice === "4") {
@@ -3496,7 +3522,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     const choice = normalizeMenuChoice(inbound);
     if (choice === "1") {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     if (choice === "2") {
@@ -4114,7 +4140,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
   if (status === ST.WAIT_PLAN) {
     const choice = normalizeChoice(inbound);
     const plan = await getPlanByChoice(choice);
-    if (!plan) return reply(await msgPlansOnly());
+    if (!plan) return reply(await msgPlansOnly(id));
 
     await clearCheckoutQuoteState(id, {
       releaseReservation: true,
@@ -4124,6 +4150,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     await clearSelectedBillingCycle(id);
     await setSelectedPlanCode(id, plan.code);
     await setUserPlan(id, plan.code);
+    await markCheckoutInteraction(id, { started: true });
     await setUserStatus(id, ST.WAIT_BILLING_CYCLE);
 
     return reply(await msgAskBillingCycle(id, plan));
@@ -4139,7 +4166,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
       const suggestedUpgrade = nextHigherPlan(menu, currentPlanCode);
       if (!suggestedUpgrade) {
         await setUserStatus(id, ST.WAIT_PLAN);
-        return reply(await msgPlansOnly());
+        return reply(await msgPlansOnly(id));
       }
 
       await clearCheckoutQuoteState(id, {
@@ -4150,13 +4177,14 @@ async function handleInboundTextCore({ waId, userId, text }) {
       await clearSelectedBillingCycle(id);
       await setSelectedPlanCode(id, suggestedUpgrade.code);
       await setUserPlan(id, suggestedUpgrade.code);
+      await markCheckoutInteraction(id, { started: true });
       await setUserStatus(id, ST.WAIT_BILLING_CYCLE);
       return reply(await msgAskBillingCycle(id, suggestedUpgrade));
     }
 
     if (c === "2") {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     return reply(await msgUpgradeOffer(id));
@@ -4169,7 +4197,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
 
     if (!plan) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     if (!billingCycle) return reply(await msgAskBillingCycle(id, plan));
@@ -4180,6 +4208,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
       meta: { planCode: plan.code, billingCycle },
     });
     await setSelectedBillingCycle(id, billingCycle);
+    await markCheckoutInteraction(id);
     await setUserStatus(id, ST.WAIT_COUPON_CODE);
     return reply(await msgAskCouponCode(id, plan, billingCycle));
   }
@@ -4189,7 +4218,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     const selection = await getCurrentCheckoutSelection(id);
     if (!selection.planCode || !selection.plan) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     const billingCycle = selection.billingCycle || "monthly";
@@ -4232,10 +4261,11 @@ async function handleInboundTextCore({ waId, userId, text }) {
 
     if (!selection.planCode || !plan || !quote) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     if (wantsConfirmCheckoutCommand(inbound)) {
+      await markCheckoutInteraction(id);
       await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
       return reply(await msgAskPaymentMethod(id, plan, quote));
     }
@@ -4245,7 +4275,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
       await clearSelectedPlanCode(id);
       await clearSelectedBillingCycle(id);
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     if (wantsChangeBillingCycleCommand(inbound)) {
@@ -4272,11 +4302,12 @@ async function handleInboundTextCore({ waId, userId, text }) {
     const quote = await getStoredPricingQuote(id);
     if (!quote?.planCode || !quote?.billingCycle) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     const pm = c === "1" ? "CARD" : "PIX";
     await setPaymentMethod(id, pm);
+    await markCheckoutInteraction(id);
 
     const customerId = await getAsaasCustomerId(id);
     if (customerId) {
@@ -4298,7 +4329,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     const plan = planCode ? await getPlan(planCode) : null;
     if (!plan) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     const pm = await getPaymentMethod(id);
@@ -4345,6 +4376,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     }
 
     if (c === "3") {
+      await markCheckoutInteraction(id);
       await setUserStatus(id, ST.PAYMENT_PENDING);
       return replyMulti([
         await getCopyText("FLOW_MENU_URL_FEEDBACK", { waId: id }),
@@ -4362,7 +4394,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
       const plan = (await getMenuPlans()).find((p) => p.code === planCode) || null;
       if (!plan) {
         await setUserStatus(id, ST.WAIT_PLAN);
-        return reply(await msgPlansOnly());
+        return reply(await msgPlansOnly(id));
       }
       await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
       return reply(await msgAskPaymentMethod(id, plan));
@@ -4631,7 +4663,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
       await setUserStatus(id, ST.WAIT_PLAN);
       return replyMulti([
         await getCopyText("FLOW_PLAN_VALUE_REINFORCEMENT", { waId: id }),
-        await msgTrialOverAndPlans(),
+        await msgTrialOverAndPlans(id),
       ]);
     }
   } else {
@@ -4641,7 +4673,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
       const pm = await getPaymentMethod(id);
       if (pm === "CARD") {
         await setUserStatus(id, ST.WAIT_PLAN);
-        return reply((await getCopyText("FLOW_QUOTA_BLOCKED", { waId: id })) + "\n\n" + (await msgPlansOnly()));
+        return reply((await getCopyText("FLOW_QUOTA_BLOCKED", { waId: id })) + "\n\n" + (await msgPlansOnly(id)));
       }
     }
 
@@ -4650,7 +4682,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     const plan = (await getMenuPlans()).find((p) => p.code === planCode);
     if (!plan) {
       await setUserStatus(id, ST.WAIT_PLAN);
-      return reply(await msgPlansOnly());
+      return reply(await msgPlansOnly(id));
     }
 
     const used = await getUserQuotaUsed(id);
@@ -4668,7 +4700,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
       await setUserStatus(id, ST.WAIT_PLAN);
       return replyMulti([
         await getCopyText("FLOW_QUOTA_REACHED_PREFIX", { waId: id }),
-        await msgPlansOnly(),
+        await msgPlansOnly(id),
       ]);
     }
   }
@@ -4741,6 +4773,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   }
 
   const growthMeta = await markUserAdCreated(id);
+  await setLastCampaignInteractionAt(id, nowIso());
   const adsCreatedTotal = Number(growthMeta?.adsCreatedTotal || 0);
 
   let formattedAd = enforceAdFormatting(ad);
@@ -4755,6 +4788,7 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   const alreadyPrompted = await getTemplatePrompted(id);
 
   if (!alreadyPrompted) {
+    await setLastCampaignInteractionAt(id, nowIso());
     await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
     await setUserStatus(id, ST.WAIT_FIRST_RESULT_PROMPT);
     return replyMulti([formattedAd, await msgFirstResultPrompt(id)]);
@@ -4769,10 +4803,12 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   const shouldAskFeedback = adsCreatedTotal >= 8 && !currentGrowthMeta?.feedbackAskedAt && !currentGrowthMeta?.feedbackAnsweredAt;
   if (shouldAskFeedback) {
     await markFeedbackAsked(id);
+    await setLastCampaignInteractionAt(id, nowIso());
     await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
     await setUserStatus(id, ST.WAIT_FEEDBACK_RESPONSE);
     growthMessages.push(await msgFeedbackAsk(id));
   } else {
+    await setLastCampaignInteractionAt(id, nowIso());
     await armPostAdIdleReminder(id, "REFINE_OR_OK");
   }
 
