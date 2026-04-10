@@ -1052,3 +1052,178 @@ export async function resetUserDescriptionMetrics(userRef, { days = 120, months 
 
   return { ok: true, userId: id, waId: id, deleted: delCount, ranges: { days: { start: fmtYmd(startDay), end: dayEnd, count: dN }, months: { start: fmtYm(startMonth), end: fmtYm(endMonth), count: mN } } };
 }
+
+const CAMPAIGN_EVENTS = Object.freeze([
+  "campaign_evaluated",
+  "campaign_eligible",
+  "campaign_blocked",
+  "campaign_sent",
+  "campaign_error",
+  "campaign_conflict_lost",
+  "campaign_window24h_blocked",
+  "campaign_cooldown_blocked",
+]);
+
+function normalizeCampaignMetricId(value) {
+  return normalizeMetricSlug(value);
+}
+
+function normalizeCampaignCategoryMetric(value) {
+  return normalizeMetricSlug(value);
+}
+
+function kCampaignEventGlobalDay(eventName, day) {
+  return `metrics:campaign:event:${eventName}:global:day:${day}`;
+}
+function kCampaignEventGlobalMonth(eventName, month) {
+  return `metrics:campaign:event:${eventName}:global:month:${month}`;
+}
+function kCampaignEventCampaignDay(campaignId, eventName, day) {
+  return `metrics:campaign:event:${eventName}:campaign:${campaignId}:day:${day}`;
+}
+function kCampaignEventCampaignMonth(campaignId, eventName, month) {
+  return `metrics:campaign:event:${eventName}:campaign:${campaignId}:month:${month}`;
+}
+function kCampaignEventCategoryDay(category, eventName, day) {
+  return `metrics:campaign:event:${eventName}:category:${category}:day:${day}`;
+}
+function kCampaignEventCategoryMonth(category, eventName, month) {
+  return `metrics:campaign:event:${eventName}:category:${category}:month:${month}`;
+}
+function kCampaignEventUserDay(userRef, eventName, day) {
+  return `metrics:campaign:event:${eventName}:user:${userRef}:day:${day}`;
+}
+function kCampaignEventUserMonth(userRef, eventName, month) {
+  return `metrics:campaign:event:${eventName}:user:${userRef}:month:${month}`;
+}
+
+export async function recordCampaignMetricEvent(
+  eventName,
+  { userId = "", waId = "", campaignId = "", category = "", by = 1, date = new Date() } = {}
+) {
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  const inc = Number(by) || 1;
+  if (!normalizedEvent) return { ok: false, error: "eventName required" };
+
+  const id = normalizeUserMetricRef(userId || waId);
+  const normalizedCampaignId = normalizeCampaignMetricId(campaignId);
+  const normalizedCategory = normalizeCampaignCategoryMetric(category);
+  const { day, month } = getDayKeyParts(date);
+
+  const keys = {
+    gd: kCampaignEventGlobalDay(normalizedEvent, day),
+    gm: kCampaignEventGlobalMonth(normalizedEvent, month),
+  };
+  const jobs = [
+    redisIncrBy(keys.gd, inc),
+    redisIncrBy(keys.gm, inc),
+  ];
+
+  if (id) {
+    keys.ud = kCampaignEventUserDay(id, normalizedEvent, day);
+    keys.um = kCampaignEventUserMonth(id, normalizedEvent, month);
+    jobs.push(redisIncrBy(keys.ud, inc));
+    jobs.push(redisIncrBy(keys.um, inc));
+  }
+  if (normalizedCampaignId) {
+    keys.cd = kCampaignEventCampaignDay(normalizedCampaignId, normalizedEvent, day);
+    keys.cm = kCampaignEventCampaignMonth(normalizedCampaignId, normalizedEvent, month);
+    jobs.push(redisIncrBy(keys.cd, inc));
+    jobs.push(redisIncrBy(keys.cm, inc));
+  }
+  if (normalizedCategory) {
+    keys.kd = kCampaignEventCategoryDay(normalizedCategory, normalizedEvent, day);
+    keys.km = kCampaignEventCategoryMonth(normalizedCategory, normalizedEvent, month);
+    jobs.push(redisIncrBy(keys.kd, inc));
+    jobs.push(redisIncrBy(keys.km, inc));
+  }
+
+  await Promise.all(jobs);
+  const ttlJobs = Object.values(keys).map((key) =>
+    redisExpire(key, key.includes(":day:") ? TTL_DAY_SECONDS : TTL_MONTH_SECONDS)
+  );
+  await Promise.allSettled(ttlJobs);
+
+  return {
+    ok: true,
+    eventName: normalizedEvent,
+    userId: id || null,
+    campaignId: normalizedCampaignId || null,
+    category: normalizedCategory || null,
+    keys,
+  };
+}
+
+export async function getCampaignMetricEvent(eventName, date = new Date()) {
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  if (!normalizedEvent) return { ok: false, error: "eventName required" };
+  const { day, month } = getDayKeyParts(date);
+  const [d, m] = await Promise.all([
+    redisGet(kCampaignEventGlobalDay(normalizedEvent, day)),
+    redisGet(kCampaignEventGlobalMonth(normalizedEvent, month)),
+  ]);
+  return {
+    ok: true,
+    eventName: normalizedEvent,
+    day,
+    month,
+    dayCount: Number(d || 0),
+    monthCount: Number(m || 0),
+  };
+}
+
+export async function getCampaignMetricEventByCampaign(campaignId, eventName, date = new Date()) {
+  const normalizedCampaignId = normalizeCampaignMetricId(campaignId);
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  if (!normalizedCampaignId) return { ok: false, error: "campaignId required" };
+  if (!normalizedEvent) return { ok: false, error: "eventName required" };
+  const { day, month } = getDayKeyParts(date);
+  const [d, m] = await Promise.all([
+    redisGet(kCampaignEventCampaignDay(normalizedCampaignId, normalizedEvent, day)),
+    redisGet(kCampaignEventCampaignMonth(normalizedCampaignId, normalizedEvent, month)),
+  ]);
+  return {
+    ok: true,
+    campaignId: normalizedCampaignId,
+    eventName: normalizedEvent,
+    day,
+    month,
+    dayCount: Number(d || 0),
+    monthCount: Number(m || 0),
+  };
+}
+
+export async function getCampaignMetricEventByCategory(category, eventName, date = new Date()) {
+  const normalizedCategory = normalizeCampaignCategoryMetric(category);
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  if (!normalizedCategory) return { ok: false, error: "category required" };
+  if (!normalizedEvent) return { ok: false, error: "eventName required" };
+  const { day, month } = getDayKeyParts(date);
+  const [d, m] = await Promise.all([
+    redisGet(kCampaignEventCategoryDay(normalizedCategory, normalizedEvent, day)),
+    redisGet(kCampaignEventCategoryMonth(normalizedCategory, normalizedEvent, month)),
+  ]);
+  return {
+    ok: true,
+    category: normalizedCategory,
+    eventName: normalizedEvent,
+    day,
+    month,
+    dayCount: Number(d || 0),
+    monthCount: Number(m || 0),
+  };
+}
+
+export async function getCampaignMetricsOverview(date = new Date()) {
+  const entries = await Promise.all(CAMPAIGN_EVENTS.map((eventName) => getCampaignMetricEvent(eventName, date)));
+  return {
+    ok: true,
+    day: entries[0]?.day || getDayKeyParts(date).day,
+    month: entries[0]?.month || getDayKeyParts(date).month,
+    events: Object.fromEntries(
+      entries
+        .filter((entry) => entry && entry.ok)
+        .map((entry) => [entry.eventName, { dayCount: entry.dayCount, monthCount: entry.monthCount }])
+    ),
+  };
+}
