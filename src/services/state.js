@@ -460,6 +460,21 @@ function normalizeActivityMeta(metaObj) {
   const idleReminderSentAt = normalizeIsoTimestamp(src.idleReminderSentAt);
   if (idleReminderSentAt) dst.idleReminderSentAt = idleReminderSentAt;
 
+  const plansViewedAt = normalizeIsoTimestamp(src.plansViewedAt);
+  if (plansViewedAt) dst.plansViewedAt = plansViewedAt;
+
+  const checkoutStartedAt = normalizeIsoTimestamp(src.checkoutStartedAt);
+  if (checkoutStartedAt) dst.checkoutStartedAt = checkoutStartedAt;
+
+  const trialEndedAt = normalizeIsoTimestamp(src.trialEndedAt);
+  if (trialEndedAt) dst.trialEndedAt = trialEndedAt;
+
+  const lastCampaignInteractionAt = normalizeIsoTimestamp(src.lastCampaignInteractionAt);
+  if (lastCampaignInteractionAt) dst.lastCampaignInteractionAt = lastCampaignInteractionAt;
+
+  const lastPlanPromptAt = normalizeIsoTimestamp(src.lastPlanPromptAt);
+  if (lastPlanPromptAt) dst.lastPlanPromptAt = lastPlanPromptAt;
+
   const postAdIdleState = safeStr(src.postAdIdleState).toUpperCase();
   if (["REFINE_OR_OK", "WAIT_NEXT_DESCRIPTION"].includes(postAdIdleState)) {
     dst.postAdIdleState = postAdIdleState;
@@ -1458,6 +1473,91 @@ export async function setFloodMeta(waId, floodMeta) {
 export async function clearFloodMeta(waId) {
   const meta = await getActivityMeta(waId);
   delete meta.flood;
+  return setActivityMeta(waId, meta);
+}
+
+export async function getPlansViewedAt(waId) {
+  const meta = await getActivityMeta(waId);
+  return safeStr(meta.plansViewedAt);
+}
+
+export async function setPlansViewedAt(waId, isoTs = new Date().toISOString()) {
+  const meta = await getActivityMeta(waId);
+  meta.plansViewedAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setActivityMeta(waId, meta);
+}
+
+export async function clearPlansViewedAt(waId) {
+  const meta = await getActivityMeta(waId);
+  delete meta.plansViewedAt;
+  return setActivityMeta(waId, meta);
+}
+
+export async function getCheckoutStartedAt(waId) {
+  const meta = await getActivityMeta(waId);
+  return safeStr(meta.checkoutStartedAt);
+}
+
+export async function setCheckoutStartedAt(waId, isoTs = new Date().toISOString()) {
+  const meta = await getActivityMeta(waId);
+  meta.checkoutStartedAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setActivityMeta(waId, meta);
+}
+
+export async function clearCheckoutStartedAt(waId) {
+  const meta = await getActivityMeta(waId);
+  delete meta.checkoutStartedAt;
+  return setActivityMeta(waId, meta);
+}
+
+export async function getTrialEndedAt(waId) {
+  const meta = await getActivityMeta(waId);
+  return safeStr(meta.trialEndedAt);
+}
+
+export async function setTrialEndedAt(waId, isoTs = new Date().toISOString()) {
+  const meta = await getActivityMeta(waId);
+  meta.trialEndedAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setActivityMeta(waId, meta);
+}
+
+export async function clearTrialEndedAt(waId) {
+  const meta = await getActivityMeta(waId);
+  delete meta.trialEndedAt;
+  return setActivityMeta(waId, meta);
+}
+
+export async function getLastCampaignInteractionAt(waId) {
+  const meta = await getActivityMeta(waId);
+  return safeStr(meta.lastCampaignInteractionAt);
+}
+
+export async function setLastCampaignInteractionAt(waId, isoTs = new Date().toISOString()) {
+  const meta = await getActivityMeta(waId);
+  meta.lastCampaignInteractionAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setActivityMeta(waId, meta);
+}
+
+export async function clearLastCampaignInteractionAt(waId) {
+  const meta = await getActivityMeta(waId);
+  delete meta.lastCampaignInteractionAt;
+  return setActivityMeta(waId, meta);
+}
+
+export async function getLastPlanPromptAt(waId) {
+  const meta = await getActivityMeta(waId);
+  return safeStr(meta.lastPlanPromptAt);
+}
+
+export async function setLastPlanPromptAt(waId, isoTs = new Date().toISOString()) {
+  const meta = await getActivityMeta(waId);
+  meta.lastPlanPromptAt = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
+  return setActivityMeta(waId, meta);
+}
+
+export async function clearLastPlanPromptAt(waId) {
+  const meta = await getActivityMeta(waId);
+  delete meta.lastPlanPromptAt;
   return setActivityMeta(waId, meta);
 }
 
