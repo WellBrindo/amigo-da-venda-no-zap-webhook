@@ -1,15 +1,15 @@
 // src/services/broadcast.js
-// ✅ V16.4.7 — Broadcast inteligente com campanhas:
-// - Filtra por plano
-// - Envia somente para usuários na janela 24h
-// - Fora da janela: fica pendente
-// - Ao entrar na janela (touch inbound): envia automaticamente
-// - Registra campanhas e estatísticas (sent/pending/errors)
+// Orquestrador do motor de campanhas.
+// Responsabilidades:
+// - manter bootstrap do lifecycle
+// - criar/disparar campanhas manuais com compatibilidade
+// - processar pendências quando usuário volta para a janela 24h
+// - executar rotinas operacionais isoladas (ex.: expiração de cupom)
+// - delegar definição/elegibilidade/conflito para src/services/campaigns.js
 
 import {
   redisSet,
   redisGet,
-  redisDel,
   redisSAdd,
   redisSRem,
   redisSIsMember,
@@ -26,14 +26,12 @@ import {
   getUserPlan,
   getUserStatus,
   getActivityMeta,
-  setActivityMeta,
-  getPostAdIdleMeta,
-  markPostAdIdleReminderSent,
   getGrowthMeta,
-  markAdOfDaySent,
+  getUserTrialUsed,
+  getUserAdsCreatedTotal,
   resetCheckoutCouponState,
 } from "./state.js";
-import { listWindow24hActive, nowMs, getLastInboundTs } from "./window24h.js";
+import { listWindow24hActive, nowMs } from "./window24h.js";
 import { sendWhatsAppText } from "./meta/whatsapp.js";
 import { getCopyText } from "./copy.js";
 import { pushSystemAlert } from "./alerts.js";
@@ -43,11 +41,34 @@ import {
   expireCouponReservation,
   markCouponRemovedMessageSent,
 } from "./coupons.js";
+import {
+  createCampaign,
+  getCampaign as getCampaignCore,
+  listCampaigns as listCampaignsCore,
+  evaluateCampaignEligibility,
+  resolveCampaignConflict,
+  logCampaignConflict,
+  markCampaignSent,
+  markCampaignError,
+  CAMPAIGN_CATEGORY,
+  CAMPAIGN_TRIGGER_TYPE,
+  CAMPAIGN_MESSAGE_MODE,
+  CAMPAIGN_CHANNEL,
+  CAMPAIGN_CONFLICT_GROUP,
+} from "./campaigns.js";
 
-const CAMPAIGNS_LIST_KEY = "campaigns:list"; // LIST de campaignId (newest first)
+const CAMPAIGNS_LIST_KEY = "campaigns:list"; // campanhas manuais para compatibilidade do Admin legado
 const PENDING_CAMPAIGNS_SET = "campaigns:pending:set"; // SET de campaignId com pendências
 const CAMPAIGNS_TTL_SECONDS = 60 * 60 * 24 * 45; // 45 dias
 const CAMPAIGNS_MAX_LIST = 300;
+
+const AUTOMATION_TZ = "America/Sao_Paulo";
+const COUPON_EXPIRATION_CHECK_LIMIT = 200;
+const COUPON_REMOVAL_MESSAGE_KEY = "FLOW_COUPON_REMOVED_TIMEOUT";
+const COUPON_REMOVAL_FALLBACK = [
+  "Seu cupom de desconto foi removido porque o pagamento não foi confirmado dentro do prazo.",
+  "Se quiser, você pode escolher novamente seu plano e aplicar um novo cupom válido na contratação.",
+].join("\n\n");
 
 function safeStr(v) {
   return String(v ?? "").trim();
@@ -59,7 +80,21 @@ function normalizePlanTargets(planTargets) {
   return arr
     .map((p) => safeStr(p).toUpperCase())
     .filter(Boolean)
-    .filter((p) => /^[A-Z0-9_]{3,40}$/.test(p));
+    .filter((p) => /^[A-Z0-9_]{3,60}$/.test(p));
+}
+
+function normalizeRuntimeMeta(input = {}) {
+  const src = input && typeof input === "object" ? input : {};
+  return {
+    subject: safeStr(src.subject),
+    text: safeStr(src.text),
+    mode: safeStr(src.mode || "TEXT").toUpperCase(),
+    planTargets: normalizePlanTargets(src.planTargets),
+    createdAt: safeStr(src.createdAt) || new Date().toISOString(),
+    totalTargets: Math.max(0, Number(src.totalTargets || 0) || 0),
+    sendNow: Math.max(0, Number(src.sendNow || 0) || 0),
+    pending: Math.max(0, Number(src.pending || 0) || 0),
+  };
 }
 
 function buildMessage({ subject, text }) {
@@ -79,7 +114,6 @@ async function getRecipientForUser(userId) {
   return { userId: id, recipient, channel: safeStr(outbound?.channel || "WHATSAPP") };
 }
 
-
 function campaignKeyMeta(id) {
   return `campaign:${id}:meta`;
 }
@@ -87,14 +121,10 @@ function campaignKeySent(id) {
   return `campaign:${id}:sent`; // SET
 }
 function campaignKeyPending(id) {
-  return `campaign:${id}:pending`; // SET
+  return `campaign:${id}:pending`; // SET internalUserId
 }
 function campaignKeyErrors(id) {
   return `campaign:${id}:errors`; // LIST
-}
-
-function makeCampaignId() {
-  return `cp_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 }
 
 async function setWithTTL(key, value, ttlSeconds = CAMPAIGNS_TTL_SECONDS) {
@@ -103,12 +133,10 @@ async function setWithTTL(key, value, ttlSeconds = CAMPAIGNS_TTL_SECONDS) {
 }
 
 async function ensureCampaignTTL(id) {
-  // garante TTL nas principais estruturas
   const ttl = CAMPAIGNS_TTL_SECONDS;
   try {
     await redisExpire(campaignKeyMeta(id), ttl);
     await redisExpire(campaignKeyErrors(id), ttl);
-    // Sets não têm EXPIRE por member, mas podemos expirar a key
     await redisExpire(campaignKeySent(id), ttl);
     await redisExpire(campaignKeyPending(id), ttl);
   } catch (_) {
@@ -122,10 +150,10 @@ async function addCampaignToList(id) {
   await redisExpire(CAMPAIGNS_LIST_KEY, CAMPAIGNS_TTL_SECONDS);
 }
 
-async function recordError(id, waId, errorMsg) {
+async function recordError(id, userRef, errorMsg) {
   const entry = {
     ts: new Date().toISOString(),
-    waId: safeStr(waId),
+    userRef: safeStr(userRef),
     error: safeStr(errorMsg).slice(0, 500),
   };
   await redisLPush(campaignKeyErrors(id), JSON.stringify(entry));
@@ -134,7 +162,7 @@ async function recordError(id, waId, errorMsg) {
 }
 
 async function computeTargetsByPlan({ planTargets = [] }) {
-  const targets = await listUsers(); // internalUserIds
+  const targets = await listUsers();
   const plansFilter = normalizePlanTargets(planTargets);
 
   if (plansFilter.length === 0) {
@@ -142,7 +170,6 @@ async function computeTargetsByPlan({ planTargets = [] }) {
   }
 
   const filtered = [];
-  // leitura simples e segura (sem paralelismo agressivo)
   for (const userId of targets) {
     try {
       const p = await getUserPlan(userId);
@@ -150,27 +177,152 @@ async function computeTargetsByPlan({ planTargets = [] }) {
         filtered.push(userId);
       }
     } catch (_) {
-      // se der erro em um usuário específico, ignora — campanha não pode quebrar
+      // campanha manual não pode quebrar por um usuário isolado
     }
   }
   return filtered;
 }
 
+async function readRuntimeMeta(campaignId) {
+  const raw = await redisGet(campaignKeyMeta(campaignId)).catch(() => "");
+  try {
+    return normalizeRuntimeMeta(raw ? JSON.parse(raw) : {});
+  } catch {
+    return normalizeRuntimeMeta({});
+  }
+}
+
+async function writeRuntimeMeta(campaignId, meta = {}) {
+  const normalized = normalizeRuntimeMeta(meta);
+  await setWithTTL(campaignKeyMeta(campaignId), JSON.stringify(normalized));
+  return normalized;
+}
+
+async function getCampaignStats(campaignId) {
+  const [sentCount, pendingCount, errs] = await Promise.all([
+    redisSCard(campaignKeySent(campaignId)).catch(() => 0),
+    redisSCard(campaignKeyPending(campaignId)).catch(() => 0),
+    redisLRange(campaignKeyErrors(campaignId), 0, 199).catch(() => []),
+  ]);
+
+  return {
+    sent: Number(sentCount || 0),
+    pending: Number(pendingCount || 0),
+    errors: Array.isArray(errs) ? errs.length : 0,
+  };
+}
+
+function isCheckoutLikeStatus(status) {
+  const s = safeStr(status).toUpperCase();
+  return [
+    "WAIT_PLAN",
+    "WAIT_BILLING_CYCLE",
+    "WAIT_COUPON_CODE",
+    "WAIT_CHECKOUT_CONFIRMATION",
+    "WAIT_PAYMENT_METHOD",
+    "WAIT_DOC",
+    "WAIT_BILLING_CITY_STATE",
+    "WAIT_BILLING_ADDRESS",
+    "PAYMENT_PENDING",
+  ].includes(s);
+}
+
+function deriveUserContext({ status = "", planCode = "", activityMeta = {}, growthMeta = {}, trialUsed = 0, adsCreated = 0, window24hOpen = false } = {}) {
+  const s = safeStr(status).toUpperCase();
+  const p = safeStr(planCode).toUpperCase();
+  const lastInboundAt = safeStr(activityMeta?.lastInboundAt);
+  const lastOutboundAt =
+    safeStr(activityMeta?.idleReminderSentAt) ||
+    safeStr(activityMeta?.postAdIdleReminderSentAt) ||
+    "";
+  const lastPlanPromptAt = safeStr(activityMeta?.lastPlanPromptAt);
+  const trialEnded = s !== "TRIAL";
+  const plansViewed = isCheckoutLikeStatus(s) || !!lastPlanPromptAt || s === "ACTIVE";
+  const checkoutStarted = isCheckoutLikeStatus(s);
+  const isPaymentPending = s === "PAYMENT_PENDING";
+  const isBlockedUser = s === "BLOCKED";
+  const isInCheckout = isCheckoutLikeStatus(s) && !isPaymentPending;
+
+  return {
+    status: s,
+    planCode: p,
+    window24hOpen: !!window24hOpen,
+    isBlockedUser,
+    isInCheckout,
+    isPaymentPending,
+    trialEnded,
+    plansViewed,
+    checkoutStarted,
+    trialUsed: Math.max(0, Number(trialUsed || 0) || 0),
+    adsCreated: Math.max(0, Number(adsCreated || 0) || 0),
+    lastInboundAt,
+    lastOutboundAt,
+    lastAdCreatedAt: safeStr(growthMeta?.lastAdCreatedAt),
+  };
+}
+
+async function renderCampaignMessage(campaign, userId) {
+  const messageMode = safeStr(campaign?.messageMode).toLowerCase();
+  const inlineText = safeStr(campaign?.inlineText);
+
+  if (messageMode === CAMPAIGN_MESSAGE_MODE.INLINE_TEXT) {
+    return inlineText;
+  }
+
+  const copyKey = safeStr(campaign?.copyKey);
+  if (!copyKey) return "";
+  const text = await getCopyText(copyKey, { waId: safeStr(userId), userId: safeStr(userId), vars: {} }).catch(() => "");
+  return safeStr(text);
+}
+
+function shouldConsiderLifecycleCampaign(campaign) {
+  if (!campaign || !campaign.isActive || campaign.isArchived) return false;
+  const triggerType = safeStr(campaign.triggerType).toLowerCase();
+  const category = safeStr(campaign.category).toLowerCase();
+  if (triggerType === CAMPAIGN_TRIGGER_TYPE.MANUAL) return false;
+  if (category === CAMPAIGN_CATEGORY.OPERATIONAL) return false;
+  return true;
+}
+
 export async function createCampaignAndDispatch({
   subject,
   text,
-  planTargets, // array ou string
-  mode = "TEXT", // futuro: TEMPLATE
-}) {
+  planTargets,
+  mode = "TEXT",
+} = {}) {
   const subj = safeStr(subject);
   const body = safeStr(text);
   if (!subj && !body) throw new Error("Missing subject or text");
 
-  const id = makeCampaignId();
-  const createdAt = new Date().toISOString();
+  const campaignResult = await createCampaign(
+    {
+      code: `MANUAL_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
+      name: subj || "Campanha manual",
+      description: subj || body.slice(0, 120),
+      isActive: true,
+      category: CAMPAIGN_CATEGORY.GENERIC_NURTURE,
+      channel: CAMPAIGN_CHANNEL.WHATSAPP_WINDOW24H,
+      messageMode: CAMPAIGN_MESSAGE_MODE.INLINE_TEXT,
+      inlineText: body,
+      priority: 100,
+      conflictGroup: CAMPAIGN_CONFLICT_GROUP.GENERIC,
+      triggerType: CAMPAIGN_TRIGGER_TYPE.MANUAL,
+      triggerEvent: "manual_dispatch",
+      requiredStatuses: [],
+      excludedStatuses: [],
+      requiredPlanCodes: normalizePlanTargets(planTargets),
+      excludedPlanCodes: [],
+      requiresWindow24hOpen: false,
+      notes: subj,
+    },
+    { actor: "broadcast.createCampaignAndDispatch" }
+  );
+
+  const campaign = campaignResult?.campaign;
+  if (!campaign?.id) throw new Error("failed to create campaign");
 
   const targetUserIds = await computeTargetsByPlan({ planTargets });
-  const windowWaIds = await listWindow24hActive(nowMs(), 20000); // limite alto, mas safe
+  const windowWaIds = await listWindow24hActive(nowMs(), 20000);
   const windowSet = new Set((windowWaIds || []).map((x) => String(x)));
 
   const sendNow = [];
@@ -179,88 +331,76 @@ export async function createCampaignAndDispatch({
   for (const userId of targetUserIds) {
     const recipientInfo = await getRecipientForUser(userId);
     if (!recipientInfo?.recipient) {
-      await recordError(id, userId, "Missing outbound recipient for campaign target");
+      await recordError(campaign.id, userId, "Missing outbound recipient for campaign target");
+      await markCampaignError(campaign.id, userId, "Missing outbound recipient for campaign target").catch(() => ({}));
       continue;
     }
     if (windowSet.has(String(recipientInfo.recipient))) sendNow.push(recipientInfo);
     else pending.push(String(userId));
   }
 
-  const meta = {
-    id,
-    createdAt,
+  const runtimeMeta = await writeRuntimeMeta(campaign.id, {
     subject: subj,
+    text: body,
     mode,
     planTargets: normalizePlanTargets(planTargets),
-    text: body, // por enquanto texto simples
-    totals: {
-      totalTargets: targetUserIds.length,
-      sendNow: sendNow.length,
-      pending: pending.length,
-    },
-  };
+    createdAt: new Date().toISOString(),
+    totalTargets: targetUserIds.length,
+    sendNow: sendNow.length,
+    pending: pending.length,
+  });
 
-  await setWithTTL(campaignKeyMeta(id), JSON.stringify(meta));
-  await addCampaignToList(id);
+  await addCampaignToList(campaign.id);
 
-  if (sendNow.length > 0) {
-    // envia agora + registra sent
-    for (const entry of sendNow) {
-      const userId = safeStr(entry?.userId);
-      const recipient = safeStr(entry?.recipient);
-      try {
-        const msg = buildMessage({ subject: subj, text: body });
-        await sendWhatsAppText({ to: recipient, text: msg });
-        await redisSAdd(campaignKeySent(id), userId);
-      } catch (err) {
-        await recordError(id, userId || recipient, err?.message || err);
-      }
+  const msg = buildMessage({ subject: subj, text: body });
+
+  for (const entry of sendNow) {
+    const userId = safeStr(entry?.userId);
+    const recipient = safeStr(entry?.recipient);
+    try {
+      await sendWhatsAppText({ to: recipient, text: msg });
+      await redisSAdd(campaignKeySent(campaign.id), userId);
+      await markCampaignSent(campaign.id, userId, { details: { source: "manual_dispatch", recipient } }).catch(() => ({}));
+    } catch (err) {
+      await recordError(campaign.id, userId || recipient, err?.message || err);
+      await markCampaignError(campaign.id, userId, err).catch(() => ({}));
     }
   }
 
   if (pending.length > 0) {
-    await redisSAdd(campaignKeyPending(id), pending);
-    await redisSAdd(PENDING_CAMPAIGNS_SET, id);
+    await redisSAdd(campaignKeyPending(campaign.id), pending);
+    await redisSAdd(PENDING_CAMPAIGNS_SET, campaign.id);
   }
 
-  await ensureCampaignTTL(id);
+  await ensureCampaignTTL(campaign.id);
 
-  // alerta “informativo” (opcional) — ajuda no log do Render
   await pushSystemAlert("CAMPAIGN_CREATED", {
-    id,
+    id: campaign.id,
     totalTargets: targetUserIds.length,
     sendNow: sendNow.length,
     pending: pending.length,
-    planTargets: meta.planTargets,
+    planTargets: runtimeMeta.planTargets,
     mode,
-  });
+  }).catch(() => ({}));
 
-  return await getCampaign(id);
+  return await getCampaign(campaign.id);
 }
 
 export async function getCampaign(id) {
-  const raw = await redisGet(campaignKeyMeta(id));
-  const meta = raw ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : null;
+  const result = await getCampaignCore(String(id || "").trim());
+  const campaign = result?.campaign || null;
+  if (!campaign) return { ok: true, campaign: null };
 
-  const [sentCount, pendingCount] = await Promise.all([
-    redisSCard(campaignKeySent(id)).catch(() => 0),
-    redisSCard(campaignKeyPending(id)).catch(() => 0),
-  ]);
-
-  // errorsCount = tamanho da lista (aproximação via LRANGE pequeno)
-  const errs = await redisLRange(campaignKeyErrors(id), 0, 199).catch(() => []);
-  const errorsCount = Array.isArray(errs) ? errs.length : 0;
+  const runtimeMeta = await readRuntimeMeta(campaign.id);
+  const stats = await getCampaignStats(campaign.id);
 
   return {
     ok: true,
     campaign: {
-      id,
-      meta,
-      stats: {
-        sent: Number(sentCount || 0),
-        pending: Number(pendingCount || 0),
-        errors: Number(errorsCount || 0),
-      },
+      id: campaign.id,
+      meta: runtimeMeta,
+      definition: campaign,
+      stats,
     },
   };
 }
@@ -279,35 +419,17 @@ export async function listCampaigns(limit = 30) {
   return { ok: true, count: out.length, campaigns: out };
 }
 
-/**
- * ✅ Auto-send pendências quando o usuário entra na janela 24h
- * Chame isso no webhook inbound (após touch24hWindow).
- */
-
-/**
- * ✅ Reprocessa uma campanha APENAS para usuários que já estão na janela 24h AGORA.
- * - Não toca em usuários fora da janela.
- * - Só tenta reenviar para waIds que ainda estão pendentes nessa campanha.
- */
 export async function reprocessCampaignForActiveWindow(campaignId, { limit = 5000 } = {}) {
   const id = safeStr(campaignId);
   if (!id) throw new Error("campaignId required");
 
-  const rawMeta = await redisGet(campaignKeyMeta(id)).catch(() => "");
-  let meta = null;
-  try {
-    meta = rawMeta ? JSON.parse(rawMeta) : null;
-  } catch {
-    meta = null;
-  }
-  if (!meta) throw new Error("campaign meta not found");
+  const campaign = (await getCampaignCore(id))?.campaign;
+  if (!campaign) throw new Error("campaign not found");
 
-  // lista waIds ativos na janela
+  const runtimeMeta = await readRuntimeMeta(id);
   const windowWaIds = await listWindow24hActive(nowMs(), Number(limit || 5000));
   const windowList = Array.isArray(windowWaIds) ? windowWaIds.map((x) => String(x)) : [];
   const windowSet = new Set(windowList);
-
-  // pendentes atuais da campanha (internalUserIds)
   const pendingUserIds = await redisSMembers(campaignKeyPending(id)).catch(() => []);
   const pendList = Array.isArray(pendingUserIds) ? pendingUserIds.map((x) => String(x)) : [];
 
@@ -315,13 +437,8 @@ export async function reprocessCampaignForActiveWindow(campaignId, { limit = 500
   let sent = 0;
   let errors = 0;
 
-  const subj = safeStr(meta?.subject);
-  const text = safeStr(meta?.text);
-  const msg = buildMessage({ subject: subj, text });
-
-  if (!msg) {
-    throw new Error("campaign message empty");
-  }
+  const msg = buildMessage({ subject: runtimeMeta.subject, text: runtimeMeta.text });
+  if (!msg) throw new Error("campaign message empty");
 
   for (const userId of pendList) {
     if (!userId) continue;
@@ -330,23 +447,25 @@ export async function reprocessCampaignForActiveWindow(campaignId, { limit = 500
     if (!recipient) {
       errors += 1;
       await recordError(id, userId, "Missing outbound recipient for pending campaign user");
+      await markCampaignError(id, userId, "Missing outbound recipient for pending campaign user").catch(() => ({}));
       continue;
     }
-    if (!windowSet.has(recipient)) continue; // 🔒 apenas janela 24h
+    if (!windowSet.has(recipient)) continue;
 
     attempted += 1;
     try {
       await sendWhatsAppText({ to: recipient, text: msg });
       await redisSAdd(campaignKeySent(id), userId);
       await redisSRem(campaignKeyPending(id), userId);
+      await markCampaignSent(id, userId, { details: { source: "reprocess_active_window", recipient } }).catch(() => ({}));
       sent += 1;
     } catch (err) {
       errors += 1;
       await recordError(id, userId, err?.message || err);
+      await markCampaignError(id, userId, err).catch(() => ({}));
     }
   }
 
-  // se zerou pendências na campanha, remove do índice global
   const pendingLeft = await redisSCard(campaignKeyPending(id)).catch(() => 0);
   if (Number(pendingLeft || 0) === 0) {
     await redisSRem(PENDING_CAMPAIGNS_SET, id).catch(() => 0);
@@ -383,27 +502,16 @@ export async function processPendingForWaId(waId) {
     const cpId = safeStr(cpIdRaw);
     if (!cpId) continue;
 
-    // está pendente nessa campanha?
     const isPending = await redisSIsMember(campaignKeyPending(cpId), id).catch(() => 0);
     if (!Number(isPending)) continue;
 
-    // lê meta (pega texto)
-    const rawMeta = await redisGet(campaignKeyMeta(cpId)).catch(() => "");
-    let meta = null;
-    try {
-      meta = rawMeta ? JSON.parse(rawMeta) : null;
-    } catch {
-      meta = null;
-    }
-
-    const subj = safeStr(meta?.subject);
-    const text = safeStr(meta?.text);
-    const msg = buildMessage({ subject: subj, text });
+    const runtimeMeta = await readRuntimeMeta(cpId);
+    const msg = buildMessage({ subject: runtimeMeta.subject, text: runtimeMeta.text });
 
     if (!msg) {
-      // meta corrompida — remove do pending e registra erro
       await redisSRem(campaignKeyPending(cpId), id).catch(() => 0);
       await recordError(cpId, id, "Campaign meta missing subject/text (auto-send skipped)");
+      await markCampaignError(cpId, id, "Campaign meta missing subject/text (auto-send skipped)").catch(() => ({}));
       processed += 1;
       continue;
     }
@@ -412,6 +520,7 @@ export async function processPendingForWaId(waId) {
     const recipient = safeStr(recipientInfo?.recipient);
     if (!recipient) {
       await recordError(cpId, id, "Missing outbound recipient for pending campaign user");
+      await markCampaignError(cpId, id, "Missing outbound recipient for pending campaign user").catch(() => ({}));
       continue;
     }
 
@@ -419,13 +528,13 @@ export async function processPendingForWaId(waId) {
       await sendWhatsAppText({ to: recipient, text: msg });
       await redisSAdd(campaignKeySent(cpId), id);
       await redisSRem(campaignKeyPending(cpId), id);
+      await markCampaignSent(cpId, id, { details: { source: "pending_after_inbound", recipient } }).catch(() => ({}));
       processed += 1;
     } catch (err) {
       await recordError(cpId, id, err?.message || err);
-      // mantém pendente para tentar de novo quando o usuário voltar a falar
+      await markCampaignError(cpId, id, err).catch(() => ({}));
     }
 
-    // se zerou pendências na campanha, remove do índice global
     const pendingLeft = await redisSCard(campaignKeyPending(cpId)).catch(() => 0);
     if (Number(pendingLeft || 0) === 0) {
       await redisSRem(PENDING_CAMPAIGNS_SET, cpId).catch(() => 0);
@@ -436,18 +545,6 @@ export async function processPendingForWaId(waId) {
 
   return { ok: true, waId: inboundWaId, userId: id, processed };
 }
-
-const AUTOMATION_TZ = "America/Sao_Paulo";
-const DAILY_AD_TARGET_HOUR = 10;
-const DAILY_AD_MIN_REMAINING_MS = 30 * 60 * 1000;
-const DAILY_AD_MAX_REMAINING_MS = 6 * 60 * 60 * 1000;
-const IDLE_REMINDER_DELAY_MS = 5 * 60 * 1000;
-const COUPON_EXPIRATION_CHECK_LIMIT = 200;
-const COUPON_REMOVAL_MESSAGE_KEY = "FLOW_COUPON_REMOVED_TIMEOUT";
-const COUPON_REMOVAL_FALLBACK = [
-  "Seu cupom de desconto foi removido porque o pagamento não foi confirmado dentro do prazo.",
-  "Se quiser, você pode escolher novamente seu plano e aplicar um novo cupom válido na contratação.",
-].join("\n\n");
 
 function getTzParts(inputMs = nowMs(), timeZone = AUTOMATION_TZ) {
   const dtf = new Intl.DateTimeFormat("en-CA", {
@@ -476,25 +573,6 @@ function previousTzDate(inputMs = nowMs(), timeZone = AUTOMATION_TZ) {
   const parts = getTzParts(inputMs, timeZone);
   const utcMidnight = Date.UTC(parts.year, Math.max(0, parts.month - 1), parts.day);
   return getTzParts(utcMidnight - 24 * 60 * 60 * 1000, timeZone).date;
-}
-
-function isDailyAdEligibleStatus(status) {
-  return status === "TRIAL" || status === "ACTIVE";
-}
-
-function isIdleEligibleStatus(status) {
-  return String(status || "").startsWith("WAIT_") || status === "PAYMENT_PENDING";
-}
-
-async function sendCopyMessage(userId, key, vars = {}) {
-  const id = safeStr(userId);
-  const text = await getCopyText(key, { waId: id, vars });
-  if (!String(text || "").trim()) return false;
-  const recipientInfo = await getRecipientForUser(id);
-  const recipient = safeStr(recipientInfo?.recipient);
-  if (!recipient) return false;
-  await sendWhatsAppText({ to: recipient, text: String(text) });
-  return true;
 }
 
 function normalizeCopyResult(text, key = "") {
@@ -594,81 +672,75 @@ async function processExpiredCouponReservations({ now = nowMs(), limit = COUPON_
   };
 }
 
-async function maybeSendPostAdIdleReminder(userId, nowTs) {
+async function evaluateLifecycleCandidatesForUser(userId, nowTs) {
   const status = await getUserStatus(userId).catch(() => "");
-  if (!(status === "TRIAL" || status === "ACTIVE")) return { sent: false };
-
-  const postAdIdle = await getPostAdIdleMeta(userId).catch(() => ({}));
-  const idleState = String(postAdIdle?.postAdIdleState || "").trim();
-  if (!idleState) return { sent: false };
-
-  const armedAt = String(postAdIdle?.postAdIdleArmedAt || "").trim();
-  if (!armedAt) return { sent: false };
-
-  const armedMs = new Date(armedAt).getTime();
-  if (!Number.isFinite(armedMs)) return { sent: false };
-  if (nowTs - armedMs < IDLE_REMINDER_DELAY_MS) return { sent: false };
-
+  const planCode = await getUserPlan(userId).catch(() => "");
   const activityMeta = await getActivityMeta(userId).catch(() => ({}));
-  const lastInboundAt = String(activityMeta?.lastInboundAt || "").trim();
-  const lastInboundMs = lastInboundAt ? new Date(lastInboundAt).getTime() : NaN;
-  if (Number.isFinite(lastInboundMs) && lastInboundMs > armedMs) return { sent: false, skipped: "user-interacted-after-arm" };
-
-  const reminderSentAt = String(postAdIdle?.postAdIdleReminderSentAt || "").trim();
-  const reminderSentMs = reminderSentAt ? new Date(reminderSentAt).getTime() : NaN;
-  if (Number.isFinite(reminderSentMs) && reminderSentMs >= armedMs) return { sent: false };
-
-  await sendCopyMessage(userId, "FLOW_RETENTION_SIGNOFF");
-  await markPostAdIdleReminderSent(userId, new Date(nowTs).toISOString()).catch(() => ({}));
-  return { sent: true, type: "post_ad_idle", idleState };
-}
-
-async function maybeSendIdleReminder(userId, nowTs) {
-  const status = await getUserStatus(userId).catch(() => "");
-  if (!isIdleEligibleStatus(status)) return { sent: false };
-
-  const activityMeta = await getActivityMeta(userId).catch(() => ({}));
-  const lastInboundAt = String(activityMeta?.lastInboundAt || "").trim();
-  if (!lastInboundAt) return { sent: false };
-
-  const lastInboundMs = new Date(lastInboundAt).getTime();
-  if (!Number.isFinite(lastInboundMs)) return { sent: false };
-  if (nowTs - lastInboundMs < IDLE_REMINDER_DELAY_MS) return { sent: false };
-
-  const idleReminderSentAt = String(activityMeta?.idleReminderSentAt || "").trim();
-  const idleReminderSentMs = idleReminderSentAt ? new Date(idleReminderSentAt).getTime() : NaN;
-  if (Number.isFinite(idleReminderSentMs) && idleReminderSentMs >= lastInboundMs) return { sent: false };
-
-  await sendCopyMessage(userId, "FLOW_IDLE_NUDGE");
-  await setActivityMeta(userId, { ...activityMeta, idleReminderSentAt: new Date(nowTs).toISOString() }).catch(() => ({}));
-  return { sent: true, type: "idle" };
-}
-
-async function maybeSendDailyAdNudge(userId, nowTs, waIdHint = "") {
-  const status = await getUserStatus(userId).catch(() => "");
-  if (!isDailyAdEligibleStatus(status)) return { sent: false };
-
-  const currentParts = getTzParts(nowTs);
-  if (currentParts.hour !== DAILY_AD_TARGET_HOUR) return { sent: false };
-
   const growthMeta = await getGrowthMeta(userId).catch(() => ({}));
-  if (String(growthMeta?.lastAdCreatedDate || "") === currentParts.date) return { sent: false, skipped: "already-created-today" };
-  if (String(growthMeta?.adOfDaySentDate || "") === currentParts.date) return { sent: false, skipped: "already-sent-today" };
+  const trialUsed = await getUserTrialUsed(userId).catch(() => 0);
+  const adsCreated = await getUserAdsCreatedTotal(userId).catch(() => 0);
 
-  const inboundRef = safeStr(waIdHint) || safeStr((await getRecipientForUser(userId))?.recipient);
-  const lastInboundMs = Number(await getLastInboundTs(inboundRef).catch(() => 0) || 0);
-  if (!lastInboundMs) return { sent: false };
+  const context = deriveUserContext({
+    status,
+    planCode,
+    activityMeta,
+    growthMeta,
+    trialUsed,
+    adsCreated,
+    window24hOpen: true,
+  });
 
-  const remainingMs = (lastInboundMs + 24 * 60 * 60 * 1000) - nowTs;
-  if (!(remainingMs > DAILY_AD_MIN_REMAINING_MS && remainingMs <= DAILY_AD_MAX_REMAINING_MS)) return { sent: false };
+  const all = await listCampaignsCore({ includeInactive: false, limit: 1000 }).catch(() => ({ campaigns: [] }));
+  const campaigns = (Array.isArray(all?.campaigns) ? all.campaigns : []).filter(shouldConsiderLifecycleCampaign);
 
-  const lastInboundDate = getTzParts(lastInboundMs).date;
-  if (lastInboundDate !== previousTzDate(nowTs)) return { sent: false };
+  const evaluations = [];
+  for (const campaign of campaigns) {
+    try {
+      const result = await evaluateCampaignEligibility(campaign, { userId }, { ...context, userId, nowMs: nowTs });
+      evaluations.push(result);
+    } catch (_) {
+      // erro isolado de uma campanha não pode quebrar o tick inteiro
+    }
+  }
 
-  const key = remainingMs <= 90 * 60 * 1000 ? "FLOW_DAILY_AD_NUDGE_SHORT" : "FLOW_DAILY_AD_NUDGE";
-  await sendCopyMessage(userId, key);
-  await markAdOfDaySent(userId, new Date(nowTs).toISOString()).catch(() => ({}));
-  return { sent: true, type: "daily_ad" };
+  return { status, context, evaluations };
+}
+
+async function dispatchLifecycleWinner(userId, evaluation) {
+  const campaign = evaluation?.campaign;
+  if (!campaign?.id) return { sent: false };
+
+  const recipientInfo = await getRecipientForUser(userId);
+  const recipient = safeStr(recipientInfo?.recipient);
+  if (!recipient) {
+    await recordError(campaign.id, userId, "Missing outbound recipient for lifecycle campaign");
+    await markCampaignError(campaign.id, userId, "Missing outbound recipient for lifecycle campaign").catch(() => ({}));
+    return { sent: false };
+  }
+
+  const text = await renderCampaignMessage(campaign, userId);
+  if (!safeStr(text)) {
+    await recordError(campaign.id, userId, "Lifecycle campaign message empty");
+    await markCampaignError(campaign.id, userId, "Lifecycle campaign message empty").catch(() => ({}));
+    return { sent: false };
+  }
+
+  try {
+    await sendWhatsAppText({ to: recipient, text });
+    await markCampaignSent(campaign.id, userId, {
+      details: {
+        source: "lifecycle_automation",
+        recipient,
+        triggerType: campaign.triggerType,
+        category: campaign.category,
+      },
+    }).catch(() => ({}));
+    return { sent: true, campaignId: campaign.id };
+  } catch (err) {
+    await recordError(campaign.id, userId, err?.message || err);
+    await markCampaignError(campaign.id, userId, err).catch(() => ({}));
+    return { sent: false };
+  }
 }
 
 export async function runLifecycleAutomationTick({ limit = 5000, tsMs = nowMs() } = {}) {
@@ -697,45 +769,43 @@ export async function runLifecycleAutomationTick({ limit = 5000, tsMs = nowMs() 
     mapped.push({ userId, waId });
   }
 
-  let postAdIdleSent = 0;
-  let idleSent = 0;
-  let dailyAdSent = 0;
+  let campaignSent = 0;
+  let conflictsLogged = 0;
   let errors = 0;
 
   for (const entry of mapped) {
     const userId = entry.userId;
-    const waId = entry.waId;
     try {
-      const postAdIdle = await maybeSendPostAdIdleReminder(userId, tsMs);
-      if (postAdIdle?.sent) postAdIdleSent += 1;
-    } catch (err) {
-      errors += 1;
-      await recordError("automation_post_ad_idle", userId, err?.message || err).catch(() => 0);
-    }
+      const result = await evaluateLifecycleCandidatesForUser(userId, tsMs);
+      const eligible = result.evaluations.filter((item) => item?.eligible);
+      if (!eligible.length) continue;
 
-    try {
-      const idle = await maybeSendIdleReminder(userId, tsMs);
-      if (idle?.sent) idleSent += 1;
-    } catch (err) {
-      errors += 1;
-      await recordError("automation_idle", userId, err?.message || err).catch(() => 0);
-    }
+      const resolved = resolveCampaignConflict(eligible);
+      if (eligible.length > 1) {
+        await logCampaignConflict({
+          userId,
+          evaluations: eligible,
+          winner: resolved?.winner || null,
+        }).catch(() => ({}));
+        conflictsLogged += 1;
+      }
 
-    try {
-      const dailyAd = await maybeSendDailyAdNudge(userId, tsMs, waId);
-      if (dailyAd?.sent) dailyAdSent += 1;
+      const winner = resolved?.winner || null;
+      if (!winner) continue;
+
+      const sent = await dispatchLifecycleWinner(userId, winner);
+      if (sent?.sent) campaignSent += 1;
     } catch (err) {
       errors += 1;
-      await recordError("automation_daily_ad", userId, err?.message || err).catch(() => 0);
+      await recordError("automation_lifecycle", userId, err?.message || err).catch(() => 0);
     }
   }
 
   return {
     ok: true,
     activeWindow: mapped.length,
-    postAdIdleSent,
-    idleSent,
-    dailyAdSent,
+    campaignSent,
+    conflictsLogged,
     errors,
     couponExpirationsChecked: Number(couponAutomation?.checked || 0),
     couponExpired: Number(couponAutomation?.expiredCount || 0),
