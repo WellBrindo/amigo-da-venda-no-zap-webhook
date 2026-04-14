@@ -9069,7 +9069,7 @@ router.get("/window24h-ui", async (req, res) => {
               <textarea id="cp_notes" placeholder="Observações internas"></textarea>
 
               <div class="row">
-                <button class="primary" onclick="createManagedCampaign()">Salvar campanha</button>
+                <button id="cp_save_btn" class="primary" onclick="createManagedCampaign()">Salvar campanha</button>
                 <span id="cp_status" class="muted"></span>
               </div>
             </div>
@@ -9103,7 +9103,71 @@ router.get("/window24h-ui", async (req, res) => {
         function boolVal(id){ return !!document.getElementById(id)?.checked; }
         function strVal(id){ return String(document.getElementById(id)?.value || '').trim(); }
         function numVal(id){ const v = Number(document.getElementById(id)?.value || 0); return Number.isFinite(v) ? Math.trunc(v) : 0; }
-        function setStatus(msg){ document.getElementById('cp_status').textContent = msg || ''; }
+        function setStatus(msg, kind){
+          const el = document.getElementById('cp_status');
+          if(!el) return;
+          el.textContent = msg || '';
+          el.style.color = kind === 'error' ? '#991b1b' : kind === 'success' ? '#065f46' : '';
+        }
+        function setSaveButtonBusy(isBusy){
+          const btn = document.getElementById('cp_save_btn');
+          if(!btn) return;
+          btn.disabled = !!isBusy;
+          btn.textContent = isBusy ? 'Salvando...' : 'Salvar campanha';
+        }
+        function resetCampaignForm(){
+          const defaults = {
+            cp_name: '',
+            cp_code: '',
+            cp_description: '',
+            cp_category: '',
+            cp_channel: '',
+            cp_messageMode: 'copy_key',
+            cp_copyKey: '',
+            cp_inlineText: '',
+            cp_priority: '100',
+            cp_delayMinutes: '0',
+            cp_cooldownHours: '24',
+            cp_conflictGroup: '',
+            cp_triggerType: '',
+            cp_triggerEvent: '',
+            cp_requiredStatuses: '',
+            cp_excludedStatuses: '',
+            cp_requiredPlanCodes: '',
+            cp_excludedPlanCodes: '',
+            cp_minTrialUsed: '0',
+            cp_maxTrialUsed: '0',
+            cp_maxSendsPerUser: '1',
+            cp_startAt: '',
+            cp_endAt: '',
+            cp_timezone: 'America/Sao_Paulo',
+            cp_notes: ''
+          };
+          Object.keys(defaults).forEach((id) => {
+            const el = document.getElementById(id);
+            if(el) el.value = defaults[id];
+          });
+
+          const checks = {
+            cp_isActive: true,
+            cp_sendOncePerUser: false,
+            cp_requiresWindow24hOpen: true,
+            cp_requiresActivePlan: false,
+            cp_requiresNoActivePlan: false,
+            cp_requiresTrialEnded: false,
+            cp_requiresPlansViewed: false,
+            cp_requiresCheckoutStarted: false,
+            cp_requiresPaymentPending: false,
+            cp_blockIfInCheckout: false,
+            cp_blockIfPaymentPending: false,
+            cp_blockIfBlocked: true,
+            cp_businessHoursOnly: false
+          };
+          Object.keys(checks).forEach((id) => {
+            const el = document.getElementById(id);
+            if(el) el.checked = !!checks[id];
+          });
+        }
 
         function buildPayload(){
           return {
@@ -9155,50 +9219,76 @@ router.get("/window24h-ui", async (req, res) => {
           if(payload.messageMode === 'copy_key' && !payload.copyKey){ alert('Informe a copyKey da campanha.'); return; }
           if(payload.messageMode === 'inline_text' && !payload.inlineText){ alert('Informe o texto inline da campanha.'); return; }
 
-          setStatus('Salvando...');
-          const r = await fetch('/admin/campaigns', {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify(payload)
-          });
-          const j = await r.json().catch(()=>({}));
-          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
-          setStatus(j?.ok ? 'Campanha salva.' : ('Erro: ' + String(j?.error || 'desconhecido')));
-          await loadCampaigns();
+          setSaveButtonBusy(true);
+          setStatus('Salvando campanha...', 'info');
+          try {
+            const r = await fetch('/admin/campaigns', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify(payload)
+            });
+            const j = await r.json().catch(()=>({}));
+            document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+
+            if(!r.ok || !j?.ok){
+              setStatus('Erro: ' + String(j?.error || 'desconhecido'), 'error');
+              return;
+            }
+
+            setStatus(String(j?.message || 'Campanha cadastrada com sucesso.'), 'success');
+            resetCampaignForm();
+            await loadCampaigns();
+          } catch (err) {
+            setStatus('Erro: ' + String(err?.message || err || 'desconhecido'), 'error');
+          } finally {
+            setSaveButtonBusy(false);
+          }
         }
 
         async function loadCampaigns(){
-          const r = await fetch('/admin/campaigns?mode=managed&limit=100');
-          const j = await r.json().catch(()=>({}));
-          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          const listEl = document.getElementById('campaigns_list');
+          if(listEl) listEl.innerHTML = '<div class="muted">Carregando campanhas...</div>';
+          try {
+            const r = await fetch('/admin/campaigns?mode=managed&limit=100');
+            const j = await r.json().catch(()=>({}));
+            document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
 
-          const items = Array.isArray(j?.campaigns) ? j.campaigns : [];
-          if(!items.length){
-            document.getElementById('campaigns_list').innerHTML = '<div class="muted">Nenhuma campanha cadastrada.</div>';
-            return;
+            if(!r.ok || j?.ok === false){
+              const errorText = 'Falha ao carregar campanhas: ' + String(j?.error || 'desconhecido');
+              if(listEl) listEl.innerHTML = '<div class="badge danger">' + esc(errorText) + '</div>';
+              return;
+            }
+
+            const items = Array.isArray(j?.campaigns) ? j.campaigns : Array.isArray(j?.items) ? j.items : [];
+            if(!items.length){
+              if(listEl) listEl.innerHTML = '<div class="muted">Nenhuma campanha cadastrada.</div>';
+              return;
+            }
+
+            const html = '<table><thead><tr><th>Nome</th><th>Código</th><th>Categoria</th><th>Ativa</th><th>Prioridade</th><th>Canal</th><th>Ações</th></tr></thead><tbody>' +
+              items.map((it) => {
+                const id = esc(it.id || '');
+                const meta = it || {};
+                return '<tr>' +
+                  '<td><b>' + esc(meta.name || '') + '</b><div class="muted">' + esc(meta.description || '') + '</div></td>' +
+                  '<td><code>' + esc(meta.code || '') + '</code></td>' +
+                  '<td>' + esc(meta.category || '') + '</td>' +
+                  '<td>' + (meta.isActive ? '<span class="badge ok">ATIVA</span>' : '<span class="badge warn">INATIVA</span>') + '</td>' +
+                  '<td>' + esc(meta.priority || 0) + '</td>' +
+                  '<td>' + esc(meta.channel || '') + '</td>' +
+                  '<td class="row">' +
+                    '<a class="pill" href="#" onclick="detailsCampaign(\'' + id + '\');return false;">detalhes</a>' +
+                    '<a class="pill" href="#" onclick="toggleCampaign(\'' + id + '\',' + (!meta.isActive ? 'true' : 'false') + ');return false;">' + (meta.isActive ? 'desativar' : 'ativar') + '</a>' +
+                    '<a class="pill" href="#" onclick="duplicateCampaignUi(\'' + id + '\');return false;">duplicar</a>' +
+                    '<a class="pill" href="#" onclick="archiveCampaignUi(\'' + id + '\');return false;">arquivar</a>' +
+                  '</td>' +
+                '</tr>';
+              }).join('') +
+              '</tbody></table>';
+            if(listEl) listEl.innerHTML = html;
+          } catch (err) {
+            if(listEl) listEl.innerHTML = '<div class="badge danger">' + esc('Falha ao carregar campanhas: ' + String(err?.message || err || 'desconhecido')) + '</div>';
           }
-
-          const html = '<table><thead><tr><th>Nome</th><th>Código</th><th>Categoria</th><th>Ativa</th><th>Prioridade</th><th>Canal</th><th>Ações</th></tr></thead><tbody>' +
-            items.map((it) => {
-              const id = esc(it.id || '');
-              const meta = it || {};
-              return '<tr>' +
-                '<td><b>' + esc(meta.name || '') + '</b><div class="muted">' + esc(meta.description || '') + '</div></td>' +
-                '<td><code>' + esc(meta.code || '') + '</code></td>' +
-                '<td>' + esc(meta.category || '') + '</td>' +
-                '<td>' + (meta.isActive ? '<span class="badge ok">ATIVA</span>' : '<span class="badge warn">INATIVA</span>') + '</td>' +
-                '<td>' + esc(meta.priority || 0) + '</td>' +
-                '<td>' + esc(meta.channel || '') + '</td>' +
-                '<td class="row">' +
-                  '<a class="pill" href="#" onclick="detailsCampaign(\'' + id + '\');return false;">detalhes</a>' +
-                  '<a class="pill" href="#" onclick="toggleCampaign(\'' + id + '\',' + (!meta.isActive ? 'true' : 'false') + ');return false;">' + (meta.isActive ? 'desativar' : 'ativar') + '</a>' +
-                  '<a class="pill" href="#" onclick="duplicateCampaignUi(\'' + id + '\');return false;">duplicar</a>' +
-                  '<a class="pill" href="#" onclick="archiveCampaignUi(\'' + id + '\');return false;">arquivar</a>' +
-                '</td>' +
-              '</tr>';
-            }).join('') +
-            '</tbody></table>';
-          document.getElementById('campaigns_list').innerHTML = html;
         }
 
         async function detailsCampaign(id){
@@ -9328,7 +9418,11 @@ router.get("/window24h-ui", async (req, res) => {
         after: created?.campaign || {},
       });
 
-      return res.json(created);
+      return res.json({
+        ok: true,
+        message: "Campanha cadastrada com sucesso.",
+        campaign: created?.campaign || null,
+      });
     } catch (err) {
       return res.status(400).json({ ok: false, error: String(err?.message || err) });
     }
