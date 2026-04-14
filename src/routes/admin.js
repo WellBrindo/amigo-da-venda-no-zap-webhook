@@ -9352,11 +9352,18 @@ router.get("/window24h-ui", async (req, res) => {
 
       if (mode === "legacy") {
         const data = await listBroadcastCampaigns(limit);
-        return res.json(data);
+        return res.json({
+          ok: true,
+          ...(data && typeof data === "object" ? data : {}),
+        });
       }
 
       const data = await listManagedCampaigns({ includeInactive: true, limit });
-      return res.json(data);
+      return res.json({
+        ok: true,
+        campaigns: Array.isArray(data?.campaigns) ? data.campaigns : [],
+        total: Number(data?.total || 0),
+      });
     } catch (err) {
       return res.status(400).json({ ok: false, error: String(err?.message || err) });
     }
