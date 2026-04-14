@@ -9277,10 +9277,10 @@ router.get("/window24h-ui", async (req, res) => {
                   '<td>' + esc(meta.priority || 0) + '</td>' +
                   '<td>' + esc(meta.channel || '') + '</td>' +
                   '<td class="row">' +
-                    '<a class="pill" href="#" onclick="detailsCampaign(\'' + id + '\');return false;">detalhes</a>' +
-                    '<a class="pill" href="#" onclick="toggleCampaign(\'' + id + '\',' + (!meta.isActive ? 'true' : 'false') + ');return false;">' + (meta.isActive ? 'desativar' : 'ativar') + '</a>' +
-                    '<a class="pill" href="#" onclick="duplicateCampaignUi(\'' + id + '\');return false;">duplicar</a>' +
-                    '<a class="pill" href="#" onclick="archiveCampaignUi(\'' + id + '\');return false;">arquivar</a>' +
+                    '<a class="pill" href="#" onclick="detailsCampaign(&quot;' + id + '&quot;);return false;">detalhes</a>' +
+                    '<a class="pill" href="#" onclick="toggleCampaign(&quot;' + id + '&quot;,' + (!meta.isActive ? 'true' : 'false') + ');return false;">' + (meta.isActive ? 'desativar' : 'ativar') + '</a>' +
+                    '<a class="pill" href="#" onclick="duplicateCampaignUi(&quot;' + id + '&quot;);return false;">duplicar</a>' +
+                    '<a class="pill" href="#" onclick="archiveCampaignUi(&quot;' + id + '&quot;);return false;">arquivar</a>' +
                   '</td>' +
                 '</tr>';
               }).join('') +
