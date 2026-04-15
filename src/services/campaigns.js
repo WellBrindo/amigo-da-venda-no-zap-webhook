@@ -121,6 +121,18 @@ function safeStr(value) {
   return String(value ?? "").trim();
 }
 
+function serializeActorLabel(actor) {
+  if (typeof actor === "string") return safeStr(actor);
+  if (actor && typeof actor === "object") {
+    const user = safeStr(actor.user);
+    const type = safeStr(actor.type);
+    if (type && user) return `${type}:${user}`;
+    if (user) return user;
+    if (type) return type;
+  }
+  return safeStr(actor);
+}
+
 function toUpper(value) {
   return safeStr(value).toUpperCase();
 }
@@ -255,6 +267,10 @@ function normalizeCampaignDefinition(input = {}, { existing = null, actor = null
   const inlineText = safeStr(input.inlineText ?? current?.inlineText);
   const messageMode = normalizeMessageMode(input.messageMode ?? current?.messageMode, { copyKey, inlineText });
 
+  const actorLabel = serializeActorLabel(actor);
+  const inputCreatedBy = serializeActorLabel(input.createdBy);
+  const inputUpdatedBy = serializeActorLabel(input.updatedBy);
+
   const campaign = {
     id: safeStr(input.id || current?.id || ""),
     code,
@@ -304,8 +320,8 @@ function normalizeCampaignDefinition(input = {}, { existing = null, actor = null
     notes: safeStr(input.notes ?? current?.notes),
     createdAt: current?.createdAt || now,
     updatedAt: now,
-    createdBy: safeStr(current?.createdBy || actor || input.createdBy),
-    updatedBy: safeStr(actor || input.updatedBy || current?.updatedBy),
+    createdBy: safeStr(current?.createdBy || inputCreatedBy || actorLabel),
+    updatedBy: safeStr(actorLabel || inputUpdatedBy || current?.updatedBy),
     version: toPositiveInt((current?.version || 0) + 1, 1),
   };
 
@@ -469,7 +485,7 @@ export async function createCampaign(input = {}, { actor = null } = {}) {
     userId: "",
     action: CAMPAIGN_EXECUTION_ACTION.SKIPPED,
     reason: "campaign_created",
-    details: { code: campaign.code, actor: safeStr(actor) },
+    details: { code: campaign.code, actor: serializeActorLabel(actor) },
     evaluatedAt: nowIso(),
   });
 
@@ -494,7 +510,7 @@ export async function updateCampaign(id, patch = {}, { actor = null } = {}) {
     userId: "",
     action: CAMPAIGN_EXECUTION_ACTION.SKIPPED,
     reason: "campaign_updated",
-    details: { actor: safeStr(actor), previousVersion: previous.version, nextVersion: campaign.version },
+    details: { actor: serializeActorLabel(actor), previousVersion: previous.version, nextVersion: campaign.version },
     evaluatedAt: nowIso(),
   });
 
