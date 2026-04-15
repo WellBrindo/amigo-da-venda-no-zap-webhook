@@ -4799,7 +4799,7 @@ router.get("/coupons", async (req, res) => {
       function readSelectedPlanCodes(){
         const values = new Set();
         const textareaValues = String(q('couponEligiblePlanCodes').value || '')
-          .split(/[\n,;]+/)
+          .split(/[\\r\\n,;]+/)
           .map((item)=>String(item || '').trim().toUpperCase())
           .filter(Boolean);
         textareaValues.forEach((v)=>values.add(v));
