@@ -1,6 +1,7 @@
 import {
   redisGet,
   redisSet,
+  redisDel,
   redisSAdd,
   redisSRem,
   redisSMembers,
@@ -546,6 +547,44 @@ export async function duplicateCampaign(id, { actor = null, codeSuffix = "COPY" 
     },
     { actor }
   );
+}
+
+export async function deleteCampaign(id, { actor = null } = {}) {
+  const current = (await getCampaign(id))?.campaign;
+  if (!current) throw new Error("campaign not found");
+  if (current.isActive) throw new Error("deactivate campaign before deleting");
+
+  const campaignId = safeStr(current.id);
+  const category = normalizeCategory(current.category);
+  const code = normalizeCampaignCode(current.code);
+
+  await redisDel(redisCampaignDefinitionKey(campaignId));
+  await redisSRem(redisCampaignIndexAllKey(), campaignId);
+  await redisSRem(redisCampaignIndexActiveKey(), campaignId);
+  await redisSRem(redisCampaignIndexCategoryKey(category), campaignId);
+  await redisDel(redisCampaignIndexCodeKey(code));
+
+  await appendCampaignLog({
+    executionId: await nextExecutionId(),
+    campaignId,
+    userId: "",
+    action: CAMPAIGN_EXECUTION_ACTION.SKIPPED,
+    reason: "campaign_deleted",
+    details: {
+      actor: serializeActorLabel(actor),
+      code: current.code,
+      name: current.name,
+    },
+    evaluatedAt: nowIso(),
+  });
+
+  return {
+    ok: true,
+    deleted: true,
+    campaignId,
+    code: current.code,
+    name: current.name,
+  };
 }
 
 export async function getCampaignUserState(campaignId, userId) {
