@@ -70,6 +70,7 @@ import {
 import {
   createCampaign,
   updateCampaign,
+  deleteCampaign,
   listCampaigns as listManagedCampaigns,
   getCampaign as getManagedCampaign,
   setCampaignActive,
@@ -9070,6 +9071,7 @@ router.get("/window24h-ui", async (req, res) => {
 
               <div class="row">
                 <button id="cp_save_btn" class="primary" onclick="createManagedCampaign()">Salvar campanha</button>
+                <button id="cp_cancel_btn" onclick="cancelCampaignEditing()" style="display:none;">Cancelar edição</button>
                 <span id="cp_status" class="muted"></span>
               </div>
             </div>
@@ -9100,6 +9102,8 @@ router.get("/window24h-ui", async (req, res) => {
         function esc(s){
           return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
         }
+        let editingCampaignId = "";
+
         function boolVal(id){ return !!document.getElementById(id)?.checked; }
         function strVal(id){ return String(document.getElementById(id)?.value || '').trim(); }
         function numVal(id){ const v = Number(document.getElementById(id)?.value || 0); return Number.isFinite(v) ? Math.trunc(v) : 0; }
@@ -9107,13 +9111,19 @@ router.get("/window24h-ui", async (req, res) => {
           const el = document.getElementById('cp_status');
           if(!el) return;
           el.textContent = msg || '';
-          el.style.color = kind === 'error' ? '#991b1b' : kind === 'success' ? '#065f46' : '';
+          el.style.color = kind === 'error' ? '#991b1b' : kind === 'success' ? '#065f46' : kind === 'info' ? '#1d4ed8' : '';
         }
         function setSaveButtonBusy(isBusy){
           const btn = document.getElementById('cp_save_btn');
           if(!btn) return;
           btn.disabled = !!isBusy;
-          btn.textContent = isBusy ? 'Salvando...' : 'Salvar campanha';
+          btn.textContent = isBusy ? (editingCampaignId ? 'Atualizando...' : 'Salvando...') : (editingCampaignId ? 'Atualizar campanha' : 'Salvar campanha');
+        }
+        function syncEditingUi(){
+          const cancelBtn = document.getElementById('cp_cancel_btn');
+          const saveBtn = document.getElementById('cp_save_btn');
+          if(cancelBtn) cancelBtn.style.display = editingCampaignId ? '' : 'none';
+          if(saveBtn) saveBtn.textContent = editingCampaignId ? 'Atualizar campanha' : 'Salvar campanha';
         }
         function resetCampaignForm(){
           const defaults = {
@@ -9147,7 +9157,6 @@ router.get("/window24h-ui", async (req, res) => {
             const el = document.getElementById(id);
             if(el) el.value = defaults[id];
           });
-
           const checks = {
             cp_isActive: true,
             cp_sendOncePerUser: false,
@@ -9168,7 +9177,69 @@ router.get("/window24h-ui", async (req, res) => {
             if(el) el.checked = !!checks[id];
           });
         }
-
+        function clearCampaignEditing(shouldResetForm = true){
+          editingCampaignId = '';
+          syncEditingUi();
+          if(shouldResetForm) resetCampaignForm();
+        }
+        function cancelCampaignEditing(){
+          clearCampaignEditing(true);
+          setStatus('Edição cancelada.', 'info');
+        }
+        function csvVal(arr, upper){
+          const base = Array.isArray(arr) ? arr : [];
+          const items = base.map((item) => String(item || '').trim()).filter(Boolean);
+          return upper ? items.map((item) => item.toUpperCase()).join(',') : items.join(',');
+        }
+        function populateCampaignForm(campaign){
+          const c = campaign || {};
+          const setVal = (id, value) => {
+            const el = document.getElementById(id);
+            if(el) el.value = value == null ? '' : String(value);
+          };
+          const setChecked = (id, value) => {
+            const el = document.getElementById(id);
+            if(el) el.checked = !!value;
+          };
+          setVal('cp_name', c.name || '');
+          setVal('cp_code', c.code || '');
+          setVal('cp_description', c.description || '');
+          setVal('cp_category', c.category || '');
+          setVal('cp_channel', c.channel || '');
+          setVal('cp_messageMode', c.messageMode || 'copy_key');
+          setVal('cp_copyKey', c.copyKey || '');
+          setVal('cp_inlineText', c.inlineText || '');
+          setVal('cp_priority', c.priority ?? 100);
+          setVal('cp_delayMinutes', c.delayMinutes ?? 0);
+          setVal('cp_cooldownHours', c.cooldownHours ?? 24);
+          setVal('cp_conflictGroup', c.conflictGroup || '');
+          setVal('cp_triggerType', c.triggerType || '');
+          setVal('cp_triggerEvent', c.triggerEvent || '');
+          setVal('cp_requiredStatuses', csvVal(c.requiredStatuses, true));
+          setVal('cp_excludedStatuses', csvVal(c.excludedStatuses, true));
+          setVal('cp_requiredPlanCodes', csvVal(c.requiredPlanCodes, true));
+          setVal('cp_excludedPlanCodes', csvVal(c.excludedPlanCodes, true));
+          setVal('cp_minTrialUsed', c.minTrialUsed ?? 0);
+          setVal('cp_maxTrialUsed', c.maxTrialUsed ?? 0);
+          setVal('cp_maxSendsPerUser', c.maxSendsPerUser ?? 1);
+          setChecked('cp_isActive', c.isActive);
+          setChecked('cp_sendOncePerUser', c.sendOncePerUser);
+          setChecked('cp_requiresWindow24hOpen', c.requiresWindow24hOpen);
+          setChecked('cp_requiresActivePlan', c.requiresActivePlan);
+          setChecked('cp_requiresNoActivePlan', c.requiresNoActivePlan);
+          setChecked('cp_requiresTrialEnded', c.requiresTrialEnded);
+          setChecked('cp_requiresPlansViewed', c.requiresPlansViewed);
+          setChecked('cp_requiresCheckoutStarted', c.requiresCheckoutStarted);
+          setChecked('cp_requiresPaymentPending', c.requiresPaymentPending);
+          setChecked('cp_blockIfInCheckout', c.blockIfInCheckout);
+          setChecked('cp_blockIfPaymentPending', c.blockIfPaymentPending);
+          setChecked('cp_blockIfBlocked', c.blockIfBlocked);
+          setChecked('cp_businessHoursOnly', c.businessHoursOnly);
+          setVal('cp_startAt', c.startAt || '');
+          setVal('cp_endAt', c.endAt || '');
+          setVal('cp_timezone', c.timezone || 'America/Sao_Paulo');
+          setVal('cp_notes', c.notes || '');
+        }
         function buildPayload(){
           return {
             name: strVal('cp_name'),
@@ -9219,11 +9290,14 @@ router.get("/window24h-ui", async (req, res) => {
           if(payload.messageMode === 'copy_key' && !payload.copyKey){ alert('Informe a copyKey da campanha.'); return; }
           if(payload.messageMode === 'inline_text' && !payload.inlineText){ alert('Informe o texto inline da campanha.'); return; }
 
+          const isEditing = !!editingCampaignId;
           setSaveButtonBusy(true);
-          setStatus('Salvando campanha...', 'info');
+          setStatus(isEditing ? 'Atualizando campanha...' : 'Salvando campanha...', 'info');
           try {
-            const r = await fetch('/admin/campaigns', {
-              method:'POST',
+            const target = isEditing ? ('/admin/campaigns/' + encodeURIComponent(editingCampaignId)) : '/admin/campaigns';
+            const method = isEditing ? 'PUT' : 'POST';
+            const r = await fetch(target, {
+              method,
               headers:{'Content-Type':'application/json'},
               body: JSON.stringify(payload)
             });
@@ -9235,13 +9309,14 @@ router.get("/window24h-ui", async (req, res) => {
               return;
             }
 
-            setStatus(String(j?.message || 'Campanha cadastrada com sucesso.'), 'success');
-            resetCampaignForm();
+            setStatus(String(j?.message || (isEditing ? 'Campanha atualizada com sucesso.' : 'Campanha cadastrada com sucesso.')), 'success');
+            clearCampaignEditing(true);
             await loadCampaigns();
           } catch (err) {
             setStatus('Erro: ' + String(err?.message || err || 'desconhecido'), 'error');
           } finally {
             setSaveButtonBusy(false);
+            syncEditingUi();
           }
         }
 
@@ -9278,9 +9353,11 @@ router.get("/window24h-ui", async (req, res) => {
                   '<td>' + esc(meta.channel || '') + '</td>' +
                   '<td class="row">' +
                     '<a class="pill" href="#" onclick="detailsCampaign(&quot;' + id + '&quot;);return false;">detalhes</a>' +
+                    '<a class="pill" href="#" onclick="editCampaignUi(&quot;' + id + '&quot;);return false;">editar</a>' +
                     '<a class="pill" href="#" onclick="toggleCampaign(&quot;' + id + '&quot;,' + (!meta.isActive ? 'true' : 'false') + ');return false;">' + (meta.isActive ? 'desativar' : 'ativar') + '</a>' +
                     '<a class="pill" href="#" onclick="duplicateCampaignUi(&quot;' + id + '&quot;);return false;">duplicar</a>' +
                     '<a class="pill" href="#" onclick="archiveCampaignUi(&quot;' + id + '&quot;);return false;">arquivar</a>' +
+                    '<a class="pill" href="#" onclick="deleteCampaignUi(&quot;' + id + '&quot;);return false;">excluir</a>' +
                   '</td>' +
                 '</tr>';
               }).join('') +
@@ -9298,6 +9375,20 @@ router.get("/window24h-ui", async (req, res) => {
           alert('Detalhes carregados no JSON bruto.');
         }
 
+        async function editCampaignUi(id){
+          const r = await fetch('/admin/campaigns/' + encodeURIComponent(id));
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          if(!r.ok || !j?.ok || !j?.campaign){
+            setStatus('Erro: ' + String(j?.error || 'não foi possível carregar a campanha'), 'error');
+            return;
+          }
+          editingCampaignId = String(j.campaign.id || id || '');
+          populateCampaignForm(j.campaign);
+          syncEditingUi();
+          setStatus('Editando campanha: ' + String(j.campaign.code || editingCampaignId), 'info');
+        }
+
         async function toggleCampaign(id, active){
           const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/active', {
             method:'POST',
@@ -9306,6 +9397,7 @@ router.get("/window24h-ui", async (req, res) => {
           });
           const j = await r.json().catch(()=>({}));
           document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          setStatus(!r.ok || j?.ok === false ? ('Erro: ' + String(j?.error || 'desconhecido')) : 'Campanha atualizada com sucesso.', !r.ok || j?.ok === false ? 'error' : 'success');
           await loadCampaigns();
         }
 
@@ -9313,6 +9405,7 @@ router.get("/window24h-ui", async (req, res) => {
           const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/duplicate', { method:'POST' });
           const j = await r.json().catch(()=>({}));
           document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          setStatus(!r.ok || j?.ok === false ? ('Erro: ' + String(j?.error || 'desconhecido')) : 'Campanha duplicada com sucesso.', !r.ok || j?.ok === false ? 'error' : 'success');
           await loadCampaigns();
         }
 
@@ -9321,6 +9414,21 @@ router.get("/window24h-ui", async (req, res) => {
           const r = await fetch('/admin/campaigns/' + encodeURIComponent(id) + '/archive', { method:'POST' });
           const j = await r.json().catch(()=>({}));
           document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          setStatus(!r.ok || j?.ok === false ? ('Erro: ' + String(j?.error || 'desconhecido')) : 'Campanha arquivada com sucesso.', !r.ok || j?.ok === false ? 'error' : 'success');
+          await loadCampaigns();
+        }
+
+        async function deleteCampaignUi(id){
+          if(!confirm('Tem certeza que deseja excluir permanentemente esta campanha?')) return;
+          const r = await fetch('/admin/campaigns/' + encodeURIComponent(id), { method:'DELETE' });
+          const j = await r.json().catch(()=>({}));
+          document.getElementById('campaigns_raw').textContent = JSON.stringify(j, null, 2);
+          if(!r.ok || j?.ok === false){
+            setStatus('Erro: ' + String(j?.error || 'desconhecido'), 'error');
+            return;
+          }
+          if(editingCampaignId && editingCampaignId === String(id || '')) clearCampaignEditing(true);
+          setStatus(String(j?.message || 'Campanha excluída com sucesso.'), 'success');
           await loadCampaigns();
         }
 
@@ -9337,6 +9445,7 @@ router.get("/window24h-ui", async (req, res) => {
           document.getElementById('sim_out').textContent = JSON.stringify(j, null, 2);
         }
 
+        syncEditingUi();
         loadCampaigns();
       </script>
     `;
@@ -9435,7 +9544,7 @@ router.get("/window24h-ui", async (req, res) => {
     }
   });
 
-  router.post("/campaigns/:id", async (req, res) => {
+  router.put("/campaigns/:id", async (req, res) => {
     try {
       const id = String(req.params.id || "").trim();
       const actor = getAdminActor(req);
@@ -9454,7 +9563,11 @@ router.get("/window24h-ui", async (req, res) => {
         after: updated?.campaign || {},
       });
 
-      return res.json(updated);
+      return res.json({
+        ok: true,
+        message: "Campanha atualizada com sucesso.",
+        campaign: updated?.campaign || null,
+      });
     } catch (err) {
       return res.status(400).json({ ok: false, error: String(err?.message || err) });
     }
@@ -9525,6 +9638,34 @@ router.get("/window24h-ui", async (req, res) => {
       });
 
       return res.json(duplicated);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.delete("/campaigns/:id", async (req, res) => {
+    try {
+      const id = String(req.params.id || "").trim();
+      const actor = getAdminActor(req);
+      const current = await getManagedCampaign(id);
+      if (!current?.campaign) return res.status(404).json({ ok: false, error: "campaign not found" });
+
+      const deleted = await deleteCampaign(id, { actor });
+
+      await safeRecordCampaignAudit(req, {
+        campaignId: id,
+        campaignCode: current?.campaign?.code || "",
+        action: "DELETE",
+        notes: "Campanha excluída permanentemente pelo Admin.",
+        before: current?.campaign || {},
+        after: {},
+      });
+
+      return res.json({
+        ok: true,
+        message: "Campanha excluída com sucesso.",
+        deleted: deleted?.deleted === true,
+      });
     } catch (err) {
       return res.status(400).json({ ok: false, error: String(err?.message || err) });
     }
