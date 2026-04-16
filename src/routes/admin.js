@@ -1431,12 +1431,13 @@ function formatCouponPlans(plans) {
 
 function formatCouponDiscount(coupon) {
   const type = String(coupon?.discountType || "").trim();
-  const value = Number(coupon?.discountValue || 0);
-  const cap = Number(coupon?.discountCap || 0);
+  const percentValue = Number(coupon?.discountPercent ?? coupon?.discountValue ?? 0);
+  const fixedValue = Number(coupon?.discountAmountCents ?? coupon?.discountValue ?? 0);
+  const cap = Number(coupon?.discountCapCents ?? coupon?.discountCap ?? 0);
   if (type === "percent") {
-    return cap > 0 ? `${value}% (teto ${formatMoneyCents(cap)})` : `${value}%`;
+    return cap > 0 ? `${percentValue}% (teto ${formatMoneyCents(cap)})` : `${percentValue}%`;
   }
-  return formatMoneyCents(value);
+  return formatMoneyCents(fixedValue);
 }
 
 function buildCouponFormInput(input = {}) {
@@ -4602,9 +4603,14 @@ router.get("/coupons", async (req, res) => {
       const name = escapeHtml(String(coupon?.name || "").trim());
       const description = escapeHtml(String(coupon?.description || "").trim());
       const active = Boolean(coupon?.active);
-      const discountType = escapeHtml(String(coupon?.discountType || ""));
-      const discountValue = escapeHtml(String(coupon?.discountValue || 0));
-      const discountCap = escapeHtml(String(coupon?.discountCap || 0));
+      const rawDiscountType = String(coupon?.discountType || "").trim();
+      const discountType = escapeHtml(rawDiscountType);
+      const normalizedDiscountValue = rawDiscountType === "percent"
+        ? Number(coupon?.discountPercent ?? coupon?.discountValue ?? 0)
+        : Number(coupon?.discountAmountCents ?? coupon?.discountValue ?? 0);
+      const normalizedDiscountCap = Number(coupon?.discountCapCents ?? coupon?.discountCap ?? 0);
+      const discountValue = escapeHtml(String(normalizedDiscountValue || 0));
+      const discountCap = escapeHtml(String(normalizedDiscountCap || 0));
       const planCodes = escapeHtml((Array.isArray(coupon?.eligiblePlanCodes) ? coupon.eligiblePlanCodes : []).join(", "));
       const billingCycles = escapeHtml((Array.isArray(coupon?.eligibleBillingCycles) ? coupon.eligibleBillingCycles : []).join(", "));
       const validFrom = coupon?.validFrom ? formatDateTimeLabel(coupon.validFrom) : "";
