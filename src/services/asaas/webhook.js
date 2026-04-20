@@ -26,7 +26,10 @@ import {
   trackPaymentExpired,
   trackSubscriptionActivated,
   trackPlanActivated,
+  trackPaymentError,
+  trackWebhookError,
 } from "../metrics.js";
+import * as audit from "../audit.js";
 import {
   confirmCouponReservation,
   releaseCouponReservation,
@@ -38,6 +41,17 @@ import {
  * Webhook handler do Asaas
  * externalReference = internalUserId (compatível com legado por alias)
  */
+
+const ASAAS_WEBHOOK_ERROR = Object.freeze({
+  PAYLOAD: "ASAAS_WEBHOOK_PAYLOAD_ERROR",
+  USER_RESOLUTION: "ASAAS_WEBHOOK_USER_RESOLUTION_ERROR",
+  STATE: "ASAAS_WEBHOOK_STATE_ERROR",
+  LEDGER: "ASAAS_WEBHOOK_LEDGER_ERROR",
+  COUPON: "ASAAS_WEBHOOK_COUPON_ERROR",
+  NOTIFICATION: "ASAAS_WEBHOOK_NOTIFICATION_ERROR",
+  UNKNOWN_STATUS: "ASAAS_WEBHOOK_UNKNOWN_STATUS",
+  RUNTIME: "ASAAS_WEBHOOK_RUNTIME_ERROR",
+});
 
 function safeStr(value) {
   return String(value ?? "").trim();
@@ -51,6 +65,19 @@ function normalizeCents(value) {
 function normalizeAppliesTo(value) {
   const text = safeStr(value).toLowerCase();
   return text === "entire_subscription" ? "entire_subscription" : "first_charge_only";
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function normalizeWebhookPayload(body) {
+  const payload = body && typeof body === "object" ? body : {};
+  return {
+    event: safeStr(payload?.event),
+    payment: payload?.payment && typeof payload.payment === "object" ? payload.payment : null,
+    subscription: payload?.subscription && typeof payload.subscription === "object" ? payload.subscription : null,
+  };
 }
 
 function buildWebhookTrackingContext({
@@ -74,20 +101,136 @@ function buildWebhookTrackingContext({
   };
 }
 
+function buildWebhookOperationalContext({
+  userId = "",
+  event = "",
+  payment = null,
+  subscription = null,
+  step = "",
+  errorCode = "",
+  message = "",
+  meta = {},
+} = {}) {
+  return {
+    ts: nowIso(),
+    source: "asaas_webhook",
+    event: safeStr(event),
+    userId: safeStr(userId),
+    paymentId: safeStr(payment?.id),
+    subscriptionId: safeStr(subscription?.id),
+    step: safeStr(step),
+    errorCode: safeStr(errorCode),
+    message: safeStr(message),
+    meta: meta && typeof meta === "object" ? meta : {},
+  };
+}
+
+async function logWebhookOperational(level = "info", context = {}) {
+  const payload = {
+    level: safeStr(level) || "info",
+    module: "asaas_webhook",
+    source: "asaas_webhook",
+    ...context,
+  };
+
+  try {
+    if (typeof audit?.logOperationalEvent === "function") {
+      await audit.logOperationalEvent({
+        module: "asaas_webhook",
+        event: safeStr(payload.event || "asaas_webhook_runtime"),
+        level: safeStr(payload.level || "info").toLowerCase(),
+        userId: safeStr(payload.userId),
+        paymentId: safeStr(payload.paymentId),
+        subscriptionId: safeStr(payload.subscriptionId),
+        step: safeStr(payload.step),
+        message: safeStr(payload.message),
+        errorCode: safeStr(payload.errorCode),
+        status: safeStr(payload.status),
+        meta: payload.meta && typeof payload.meta === "object" ? payload.meta : {},
+      });
+      return;
+    }
+    if (
+      typeof audit?.logRuntimeError === "function" &&
+      ["warn", "error", "fatal"].includes(safeStr(payload.level || "info").toLowerCase())
+    ) {
+      await audit.logRuntimeError({
+        module: "asaas_webhook",
+        event: safeStr(payload.event || "asaas_webhook_runtime"),
+        level: safeStr(payload.level || "warn").toLowerCase(),
+        userId: safeStr(payload.userId),
+        paymentId: safeStr(payload.paymentId),
+        subscriptionId: safeStr(payload.subscriptionId),
+        step: safeStr(payload.step),
+        message: safeStr(payload.message),
+        errorCode: safeStr(payload.errorCode),
+        status: safeStr(payload.status),
+        meta: payload.meta && typeof payload.meta === "object" ? payload.meta : {},
+      });
+      return;
+    }
+  } catch {}
+
+  const method = payload.level === "error" ? console.error : payload.level === "warn" ? console.warn : console.log;
+  method(JSON.stringify(payload));
+}
+
+function classifyWebhookRuntimeError(error, fallback = ASAAS_WEBHOOK_ERROR.RUNTIME) {
+  const message = safeStr(error?.message || error);
+  if (!message) return fallback;
+
+  if (/externalreference|no_external_reference|missing.*event|payload/i.test(message)) {
+    return ASAAS_WEBHOOK_ERROR.PAYLOAD;
+  }
+  if (/user|internaluserid|ensureuserexists|identity/i.test(message)) {
+    return ASAAS_WEBHOOK_ERROR.USER_RESOLUTION;
+  }
+  if (/ledger|recordasaasevent/i.test(message)) {
+    return ASAAS_WEBHOOK_ERROR.LEDGER;
+  }
+  if (/coupon|reservation/i.test(message)) {
+    return ASAAS_WEBHOOK_ERROR.COUPON;
+  }
+  if (/recipient|whatsapp|copytext|notification/i.test(message)) {
+    return ASAAS_WEBHOOK_ERROR.NOTIFICATION;
+  }
+  if (/status|state|billing|active|wait_/i.test(message)) {
+    return ASAAS_WEBHOOK_ERROR.STATE;
+  }
+  return fallback;
+}
+
 async function emitWebhookMetricSafe(metricFn, payload = {}) {
   if (typeof metricFn !== "function") return null;
   try {
     return await metricFn(payload);
   } catch (err) {
-    console.error("[ASAAS_WEBHOOK_TRACKING_ERROR]", {
-      metric: safeStr(metricFn?.name),
+    await logWebhookOperational("warn", {
+      event: "asaas_webhook_metric_emit_failed",
+      step: "emit_webhook_metric",
       userId: safeStr(payload?.userId || payload?.waId),
       paymentId: safeStr(payload?.paymentId),
       subscriptionId: safeStr(payload?.subscriptionId),
+      errorCode: safeStr(err?.errorCode || err?.code || ASAAS_WEBHOOK_ERROR.RUNTIME),
       message: err?.message || String(err),
+      meta: {
+        metric: safeStr(metricFn?.name),
+      },
     });
     return null;
   }
+}
+
+async function emitWebhookFailureMetrics({ userId = "", payment = null, subscription = null, event = "", step = "", errorCode = "" } = {}) {
+  const payload = buildWebhookTrackingContext({
+    userId,
+    payment,
+    subscription,
+    step,
+  });
+  payload.errorCode = safeStr(errorCode);
+  await emitWebhookMetricSafe(trackWebhookError, payload);
+  await emitWebhookMetricSafe(trackPaymentError, payload);
 }
 
 function pickQuoteForLedger(quote = {}, userId = "") {
@@ -165,13 +308,46 @@ async function sendCopyText(userId, key, vars = {}, errorTag = "ASAAS_WEBHOOK_SE
   const recipient = await getPreferredOutboundRecipient(userId);
 
   if (!recipient?.recipient) {
-    console.error(`[${errorTag}] Missing outbound recipient`, { userId, key });
-    return;
+    const err = new Error("Missing outbound recipient");
+    err.code = ASAAS_WEBHOOK_ERROR.NOTIFICATION;
+    throw err;
   }
 
-  await sendWhatsAppText({ recipient, text }).catch((err) => {
-    console.error(`[${errorTag}]`, err?.message || err);
-  });
+  try {
+    await sendWhatsAppText({ recipient, text });
+    return { ok: true };
+  } catch (err) {
+    err.code = safeStr(err?.code || err?.errorCode || ASAAS_WEBHOOK_ERROR.NOTIFICATION);
+    err.tag = errorTag;
+    throw err;
+  }
+}
+
+async function sendCopyTextSafe(userId, key, vars = {}, errorTag = "ASAAS_WEBHOOK_SEND_ERROR", context = {}) {
+  try {
+    return await sendCopyText(userId, key, vars, errorTag);
+  } catch (err) {
+    const errorCode = safeStr(err?.code || classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.NOTIFICATION));
+    await logWebhookOperational("warn", buildWebhookOperationalContext({
+      userId,
+      event: context?.event,
+      payment: context?.payment,
+      subscription: context?.subscription,
+      step: safeStr(context?.step || errorTag),
+      errorCode,
+      message: err?.message || String(err),
+      meta: { key, tag: errorTag },
+    }));
+    await emitWebhookFailureMetrics({
+      userId,
+      payment: context?.payment,
+      subscription: context?.subscription,
+      event: context?.event,
+      step: safeStr(context?.step || errorTag),
+      errorCode,
+    });
+    return { ok: false, error: err?.message || String(err), errorCode };
+  }
 }
 
 async function finalizeCheckoutCouponOnWebhook(
@@ -189,7 +365,7 @@ async function finalizeCheckoutCouponOnWebhook(
   try {
     const reservationId = await getCouponReservationId(userId);
     if (!reservationId) {
-      return { ok: true, skipped: true, reason: "no_coupon_reservation" };
+      return { ok: true, skipped: true, reason: "no_coupon_reservation", shouldResetCheckoutState: true };
     }
 
     const payload = {
@@ -220,19 +396,27 @@ async function finalizeCheckoutCouponOnWebhook(
     } else if (mode === "cancel") {
       result = await cancelCouponReservation(reservationId, payload);
     } else {
-      return { ok: false, reason: "invalid_mode", mode };
+      return { ok: false, reason: "invalid_mode", mode, shouldResetCheckoutState: false };
     }
 
-    await resetCheckoutCouponState(userId);
-    return result || { ok: true, reservationId };
+    return { ...(result || { ok: true, reservationId }), shouldResetCheckoutState: true };
   } catch (err) {
-    console.error("[ASAAS_WEBHOOK_COUPON_FINALIZE_ERROR]", {
+    await logWebhookOperational("warn", buildWebhookOperationalContext({
       userId,
-      mode,
       event,
+      payment,
+      subscription,
+      step: "finalize_checkout_coupon",
+      errorCode: classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.COUPON),
       message: err?.message || String(err),
-    });
-    return { ok: false, error: err?.message || String(err) };
+      meta: { mode: safeStr(mode) },
+    }));
+    return {
+      ok: false,
+      error: err?.message || String(err),
+      errorCode: classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.COUPON),
+      shouldResetCheckoutState: false,
+    };
   }
 }
 
@@ -259,26 +443,117 @@ async function recordWebhookLedger({
   });
 }
 
+async function resetCheckoutCouponStateSafe(userId, { event = "", payment = null, subscription = null, step = "" } = {}) {
+  try {
+    await resetCheckoutCouponState(userId);
+    return { ok: true };
+  } catch (err) {
+    const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+    await logWebhookOperational("warn", buildWebhookOperationalContext({
+      userId,
+      event,
+      payment,
+      subscription,
+      step: safeStr(step || "reset_checkout_coupon_state"),
+      errorCode,
+      message: err?.message || String(err),
+    }));
+    await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: safeStr(step || "reset_checkout_coupon_state"), errorCode });
+    return { ok: false, error: err?.message || String(err), errorCode };
+  }
+}
+
+async function recordWebhookLedgerSafe(args = {}) {
+  try {
+    await recordWebhookLedger(args);
+    return { ok: true };
+  } catch (err) {
+    const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.LEDGER);
+    await logWebhookOperational("error", buildWebhookOperationalContext({
+      userId: args?.userId,
+      event: args?.event,
+      payment: args?.payment,
+      subscription: args?.subscription,
+      step: "record_webhook_ledger",
+      errorCode,
+      message: err?.message || String(err),
+    }));
+    await emitWebhookFailureMetrics({
+      userId: args?.userId,
+      payment: args?.payment,
+      subscription: args?.subscription,
+      event: args?.event,
+      step: "record_webhook_ledger",
+      errorCode,
+    });
+    return { ok: false, error: err?.message || String(err), errorCode };
+  }
+}
+
+async function resolveUserForWebhook(userId) {
+  const normalizedUserId = safeStr(userId);
+  if (!normalizedUserId) {
+    const err = new Error("Webhook event missing externalReference/internal user id");
+    err.code = ASAAS_WEBHOOK_ERROR.USER_RESOLUTION;
+    throw err;
+  }
+  await ensureUserExists(normalizedUserId);
+  return normalizedUserId;
+}
+
+function daysLeftUntilIso(iso) {
+  const value = safeStr(iso);
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  const target = new Date(y, mo, d, 23, 59, 59);
+  const now = new Date();
+  const diffMs = target.getTime() - now.getTime();
+  return Math.ceil(diffMs / (24 * 60 * 60 * 1000));
+}
+
 export async function handleAsaasWebhookEvent(body) {
   try {
-    const event = body?.event;
-    const payment = body?.payment;
-    const subscription = body?.subscription;
-
+    const { event, payment, subscription } = normalizeWebhookPayload(body);
     const paymentId = safeStr(payment?.id);
     const subscriptionId = safeStr(subscription?.id);
 
-    const userId =
-      payment?.externalReference ||
-      subscription?.externalReference ||
-      null;
+    if (!event) {
+      const errorCode = ASAAS_WEBHOOK_ERROR.PAYLOAD;
+      await logWebhookOperational("warn", buildWebhookOperationalContext({
+        event,
+        payment,
+        subscription,
+        step: "parse_payload",
+        errorCode,
+        message: "Webhook do Asaas recebido sem event.",
+      }));
+      await emitWebhookFailureMetrics({ event, payment, subscription, step: "parse_payload", errorCode });
+      return { ok: false, reason: "missing_event" };
+    }
 
-    if (!userId) {
-      console.log("[ASAAS_WEBHOOK] Evento sem externalReference ignorado.");
+    const inferredUserId =
+      safeStr(payment?.externalReference) ||
+      safeStr(subscription?.externalReference) ||
+      "";
+
+    if (!inferredUserId) {
+      const errorCode = ASAAS_WEBHOOK_ERROR.USER_RESOLUTION;
+      await logWebhookOperational("warn", buildWebhookOperationalContext({
+        event,
+        payment,
+        subscription,
+        step: "resolve_user",
+        errorCode,
+        message: "Evento sem externalReference/internal user id.",
+      }));
+      await emitWebhookFailureMetrics({ event, payment, subscription, step: "resolve_user", errorCode });
       return { ok: false, reason: "no_external_reference" };
     }
 
-    await ensureUserExists(userId);
+    const userId = await resolveUserForWebhook(inferredUserId);
 
     // ==============================
     // PAGAMENTO CONFIRMADO
@@ -297,7 +572,18 @@ export async function handleAsaasWebhookEvent(body) {
         subscription,
       });
 
-      await recordWebhookLedger({
+      if (!couponFinalize?.ok && !couponFinalize?.skipped) {
+        await emitWebhookFailureMetrics({
+          userId,
+          payment,
+          subscription,
+          event,
+          step: "finalize_coupon_confirm",
+          errorCode: safeStr(couponFinalize?.errorCode || ASAAS_WEBHOOK_ERROR.COUPON),
+        });
+      }
+
+      const ledgerResult = await recordWebhookLedgerSafe({
         event,
         userId,
         payment,
@@ -305,6 +591,15 @@ export async function handleAsaasWebhookEvent(body) {
         couponFinalize,
         storedQuote,
       });
+
+      if (couponFinalize?.shouldResetCheckoutState && ledgerResult?.ok) {
+        await resetCheckoutCouponStateSafe(userId, {
+          event,
+          payment,
+          subscription,
+          step: "payment_confirmed_reset_checkout_state",
+        });
+      }
 
       const trackingContext = buildWebhookTrackingContext({
         userId,
@@ -314,22 +609,36 @@ export async function handleAsaasWebhookEvent(body) {
         step: safeStr(event).toLowerCase(),
       });
 
-      const plan = await getUserPlan(userId);
+      const plan = await getUserPlan(userId).catch(() => "");
 
       if (!plan) {
-        console.log(
-          "[ASAAS_WEBHOOK_WARNING] Payment confirmed but plan missing",
-          { userId, event }
-        );
+        await logWebhookOperational("warn", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "payment_confirmed_plan_lookup",
+          errorCode: ASAAS_WEBHOOK_ERROR.STATE,
+          message: "Payment confirmed but user plan is missing.",
+        }));
       }
 
-      await resetUserQuotaUsed(userId);
-      await resetUserTrialUsed(userId);
-
-      const [billingCityState, billingAddress] = await Promise.all([
-        getBillingCityState(userId),
-        getBillingAddress(userId),
-      ]);
+      try {
+        await resetUserQuotaUsed(userId);
+        await resetUserTrialUsed(userId);
+      } catch (err) {
+        const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+        await logWebhookOperational("warn", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "payment_confirmed_reset_usage",
+          errorCode,
+          message: err?.message || String(err),
+        }));
+        await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_confirmed_reset_usage", errorCode });
+      }
 
       await emitWebhookMetricSafe(trackPaymentConfirmed, trackingContext);
       if (trackingContext.subscriptionId) {
@@ -337,47 +646,136 @@ export async function handleAsaasWebhookEvent(body) {
       }
       await emitWebhookMetricSafe(trackPlanActivated, trackingContext);
 
+      let billingCityState = "";
+      let billingAddress = "";
+      try {
+        [billingCityState, billingAddress] = await Promise.all([
+          getBillingCityState(userId),
+          getBillingAddress(userId),
+        ]);
+      } catch (err) {
+        const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+        await logWebhookOperational("warn", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "payment_confirmed_billing_lookup",
+          errorCode,
+          message: err?.message || String(err),
+        }));
+        await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_confirmed_billing_lookup", errorCode });
+      }
+
       if (!billingCityState) {
-        await setPrevStatus(userId, "ACTIVE");
-        await setUserStatus(userId, "WAIT_BILLING_CITY_STATE");
-        await sendCopyText(
+        try {
+          await setPrevStatus(userId, "ACTIVE");
+          await setUserStatus(userId, "WAIT_BILLING_CITY_STATE");
+        } catch (err) {
+          const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+          await logWebhookOperational("error", buildWebhookOperationalContext({
+            userId,
+            event,
+            payment,
+            subscription,
+            step: "payment_confirmed_set_wait_city",
+            errorCode,
+            message: err?.message || String(err),
+          }));
+          await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_confirmed_set_wait_city", errorCode });
+          return { ok: false, error: err?.message || String(err), errorCode };
+        }
+
+        await sendCopyTextSafe(
           userId,
           "FLOW_ASK_BILLING_CITY_STATE",
           {},
-          "ASAAS_WEBHOOK_SEND_CITY_ERROR"
+          "ASAAS_WEBHOOK_SEND_CITY_ERROR",
+          { event, payment, subscription, step: "payment_confirmed_send_city" }
         );
 
-        console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando cidade/UF:", { userId, event, plan: plan || "NONE" });
+        await logWebhookOperational("info", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "payment_confirmed_wait_city",
+          message: `Usuário ativado e aguardando cidade/UF. Plano: ${safeStr(plan || "NONE")}`,
+        }));
         return { ok: true, statusSetTo: "WAIT_BILLING_CITY_STATE" };
       }
 
       if (!billingAddress) {
-        await setPrevStatus(userId, "ACTIVE");
-        await setUserStatus(userId, "WAIT_BILLING_ADDRESS");
-        await sendCopyText(
+        try {
+          await setPrevStatus(userId, "ACTIVE");
+          await setUserStatus(userId, "WAIT_BILLING_ADDRESS");
+        } catch (err) {
+          const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+          await logWebhookOperational("error", buildWebhookOperationalContext({
+            userId,
+            event,
+            payment,
+            subscription,
+            step: "payment_confirmed_set_wait_address",
+            errorCode,
+            message: err?.message || String(err),
+          }));
+          await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_confirmed_set_wait_address", errorCode });
+          return { ok: false, error: err?.message || String(err), errorCode };
+        }
+
+        await sendCopyTextSafe(
           userId,
           "FLOW_ASK_BILLING_ADDRESS",
           {},
-          "ASAAS_WEBHOOK_SEND_ADDRESS_ERROR"
+          "ASAAS_WEBHOOK_SEND_ADDRESS_ERROR",
+          { event, payment, subscription, step: "payment_confirmed_send_address" }
         );
 
-        console.log("[ASAAS_WEBHOOK] Usuário ativado e aguardando endereço:", { userId, event, plan: plan || "NONE" });
+        await logWebhookOperational("info", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "payment_confirmed_wait_address",
+          message: `Usuário ativado e aguardando endereço. Plano: ${safeStr(plan || "NONE")}`,
+        }));
         return { ok: true, statusSetTo: "WAIT_BILLING_ADDRESS" };
       }
 
-      await setUserStatus(userId, "ACTIVE");
-      await sendCopyText(
+      try {
+        await setUserStatus(userId, "ACTIVE");
+      } catch (err) {
+        const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+        await logWebhookOperational("error", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "payment_confirmed_set_active",
+          errorCode,
+          message: err?.message || String(err),
+        }));
+        await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_confirmed_set_active", errorCode });
+        return { ok: false, error: err?.message || String(err), errorCode };
+      }
+
+      await sendCopyTextSafe(
         userId,
         "FLOW_PLAN_ACTIVATED_WELCOME",
         {},
-        "ASAAS_WEBHOOK_SEND_ACTIVE_WELCOME_ERROR"
+        "ASAAS_WEBHOOK_SEND_ACTIVE_WELCOME_ERROR",
+        { event, payment, subscription, step: "payment_confirmed_send_welcome" }
       );
 
-      console.log("[ASAAS_WEBHOOK] Usuário ativado:", {
+      await logWebhookOperational("info", buildWebhookOperationalContext({
         userId,
         event,
-        plan: plan || "NONE",
-      });
+        payment,
+        subscription,
+        step: "payment_confirmed_active",
+        message: `Usuário ativado com sucesso. Plano: ${safeStr(plan || "NONE")}`,
+      }));
 
       return { ok: true, statusSetTo: "ACTIVE" };
     }
@@ -400,7 +798,7 @@ export async function handleAsaasWebhookEvent(body) {
         subscription,
       });
 
-      await recordWebhookLedger({
+      const ledgerResult = await recordWebhookLedgerSafe({
         event,
         userId,
         payment,
@@ -408,6 +806,15 @@ export async function handleAsaasWebhookEvent(body) {
         couponFinalize,
         storedQuote,
       });
+
+      if (couponFinalize?.shouldResetCheckoutState && ledgerResult?.ok) {
+        await resetCheckoutCouponStateSafe(userId, {
+          event,
+          payment,
+          subscription,
+          step: "payment_failed_reset_checkout_state",
+        });
+      }
 
       await emitWebhookMetricSafe(
         trackPaymentFailed,
@@ -420,18 +827,39 @@ export async function handleAsaasWebhookEvent(body) {
         })
       );
 
-      await setUserStatus(userId, "WAIT_PAYMENT_RECOVERY");
-      await sendCopyText(
+      try {
+        await setUserStatus(userId, "WAIT_PAYMENT_RECOVERY");
+      } catch (err) {
+        const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+        await logWebhookOperational("error", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "payment_failed_set_recovery",
+          errorCode,
+          message: err?.message || String(err),
+        }));
+        await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_failed_set_recovery", errorCode });
+        return { ok: false, error: err?.message || String(err), errorCode };
+      }
+
+      await sendCopyTextSafe(
         userId,
         "FLOW_PAYMENT_RECOVERY",
         {},
-        "ASAAS_WEBHOOK_SEND_PAYMENT_RECOVERY_ERROR"
+        "ASAAS_WEBHOOK_SEND_PAYMENT_RECOVERY_ERROR",
+        { event, payment, subscription, step: "payment_failed_send_recovery" }
       );
 
-      console.log("[ASAAS_WEBHOOK] Falha no cartão / recuperação iniciada:", {
+      await logWebhookOperational("info", buildWebhookOperationalContext({
         userId,
         event,
-      });
+        payment,
+        subscription,
+        step: "payment_failed_wait_recovery",
+        message: "Falha no cartão / recuperação iniciada.",
+      }));
 
       return { ok: true, statusSetTo: "WAIT_PAYMENT_RECOVERY" };
     }
@@ -451,7 +879,7 @@ export async function handleAsaasWebhookEvent(body) {
         subscription,
       });
 
-      await recordWebhookLedger({
+      const ledgerResult = await recordWebhookLedgerSafe({
         event,
         userId,
         payment,
@@ -459,6 +887,15 @@ export async function handleAsaasWebhookEvent(body) {
         couponFinalize,
         storedQuote,
       });
+
+      if (couponFinalize?.shouldResetCheckoutState && ledgerResult?.ok) {
+        await resetCheckoutCouponStateSafe(userId, {
+          event,
+          payment,
+          subscription,
+          step: "payment_overdue_reset_checkout_state",
+        });
+      }
 
       await emitWebhookMetricSafe(
         trackPaymentExpired,
@@ -471,12 +908,31 @@ export async function handleAsaasWebhookEvent(body) {
         })
       );
 
-      await setUserStatus(userId, "PAYMENT_PENDING");
+      try {
+        await setUserStatus(userId, "PAYMENT_PENDING");
+      } catch (err) {
+        const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+        await logWebhookOperational("error", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "payment_overdue_set_pending",
+          errorCode,
+          message: err?.message || String(err),
+        }));
+        await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_overdue_set_pending", errorCode });
+        return { ok: false, error: err?.message || String(err), errorCode };
+      }
 
-      console.log("[ASAAS_WEBHOOK] Pagamento vencido:", {
+      await logWebhookOperational("info", buildWebhookOperationalContext({
         userId,
         event,
-      });
+        payment,
+        subscription,
+        step: "payment_overdue_pending",
+        message: "Pagamento vencido. Usuário mantido em PAYMENT_PENDING.",
+      }));
 
       return { ok: true, statusSetTo: "PAYMENT_PENDING" };
     }
@@ -496,7 +952,7 @@ export async function handleAsaasWebhookEvent(body) {
         subscription,
       });
 
-      await recordWebhookLedger({
+      const ledgerResult = await recordWebhookLedgerSafe({
         event,
         userId,
         payment,
@@ -505,12 +961,40 @@ export async function handleAsaasWebhookEvent(body) {
         storedQuote,
       });
 
-      await setUserStatus(userId, "BLOCKED");
+      if (couponFinalize?.shouldResetCheckoutState && ledgerResult?.ok) {
+        await resetCheckoutCouponStateSafe(userId, {
+          event,
+          payment,
+          subscription,
+          step: "payment_deleted_reset_checkout_state",
+        });
+      }
 
-      console.log("[ASAAS_WEBHOOK] Pagamento deletado:", {
+      try {
+        await setUserStatus(userId, "BLOCKED");
+      } catch (err) {
+        const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+        await logWebhookOperational("error", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "payment_deleted_set_blocked",
+          errorCode,
+          message: err?.message || String(err),
+        }));
+        await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_deleted_set_blocked", errorCode });
+        return { ok: false, error: err?.message || String(err), errorCode };
+      }
+
+      await logWebhookOperational("info", buildWebhookOperationalContext({
         userId,
         event,
-      });
+        payment,
+        subscription,
+        step: "payment_deleted_blocked",
+        message: "Pagamento deletado. Usuário bloqueado.",
+      }));
 
       return { ok: true, statusSetTo: "BLOCKED" };
     }
@@ -534,7 +1018,7 @@ export async function handleAsaasWebhookEvent(body) {
         subscription,
       });
 
-      await recordWebhookLedger({
+      const ledgerResult = await recordWebhookLedgerSafe({
         event,
         userId,
         payment,
@@ -543,52 +1027,98 @@ export async function handleAsaasWebhookEvent(body) {
         storedQuote,
       });
 
-      // Regra do produto:
-      // - Se o usuário cancelou a recorrência, ele mantém acesso até o fim do ciclo atual.
-      // - Portanto, NÃO bloqueamos imediatamente se ainda existir validade futura.
-      const nextDue = String(subscription?.nextDueDate || subscription?.nextPaymentDate || "").trim();
-      if (nextDue) {
-        // best-effort para ter data de renovação disponível no menu
-        await setCardValidUntil(userId, nextDue);
+      if (couponFinalize?.shouldResetCheckoutState && ledgerResult?.ok) {
+        await resetCheckoutCouponStateSafe(userId, {
+          event,
+          payment,
+          subscription,
+          step: "subscription_inactivated_reset_checkout_state",
+        });
       }
 
-      const validUntil = await getCardValidUntil(userId);
-      if (validUntil) {
-        const daysLeft = (() => {
-          const m = String(validUntil).match(/^(\d{4})-(\d{2})-(\d{2})$/);
-          if (!m) return null;
-          const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
-          const target = new Date(y, mo, d, 23, 59, 59);
-          const now = new Date();
-          const diffMs = target.getTime() - now.getTime();
-          return Math.ceil(diffMs / (24 * 60 * 60 * 1000));
-        })();
-
-        // ainda válido => não altera status
-        if (typeof daysLeft === "number" && daysLeft >= 0) {
-          console.log("[ASAAS_WEBHOOK] Assinatura inativada, mas ainda válida até:", {
+      const nextDue = safeStr(subscription?.nextDueDate || subscription?.nextPaymentDate);
+      if (nextDue) {
+        try {
+          await setCardValidUntil(userId, nextDue);
+        } catch (err) {
+          const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+          await logWebhookOperational("warn", buildWebhookOperationalContext({
             userId,
             event,
-            validUntil,
-            daysLeft,
-          });
+            payment,
+            subscription,
+            step: "subscription_inactivated_set_valid_until",
+            errorCode,
+            message: err?.message || String(err),
+          }));
+          await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "subscription_inactivated_set_valid_until", errorCode });
+        }
+      }
+
+      let validUntil = "";
+      try {
+        validUntil = await getCardValidUntil(userId);
+      } catch (err) {
+        const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+        await logWebhookOperational("warn", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "subscription_inactivated_get_valid_until",
+          errorCode,
+          message: err?.message || String(err),
+        }));
+        await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "subscription_inactivated_get_valid_until", errorCode });
+      }
+
+      if (validUntil) {
+        const daysLeft = daysLeftUntilIso(validUntil);
+        if (typeof daysLeft === "number" && daysLeft >= 0) {
+          await logWebhookOperational("info", buildWebhookOperationalContext({
+            userId,
+            event,
+            payment,
+            subscription,
+            step: "subscription_inactivated_still_valid",
+            message: `Assinatura inativada, mas ainda válida até ${validUntil}.`,
+            meta: { validUntil, daysLeft },
+          }));
           return { ok: true, ignored: true, stillValidUntil: validUntil };
         }
       }
 
-      // Sem validade (ou expirado) => força reescolha de plano
-      await setUserStatus(userId, "WAIT_PLAN");
+      try {
+        await setUserStatus(userId, "WAIT_PLAN");
+      } catch (err) {
+        const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
+        await logWebhookOperational("error", buildWebhookOperationalContext({
+          userId,
+          event,
+          payment,
+          subscription,
+          step: "subscription_inactivated_set_wait_plan",
+          errorCode,
+          message: err?.message || String(err),
+        }));
+        await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "subscription_inactivated_set_wait_plan", errorCode });
+        return { ok: false, error: err?.message || String(err), errorCode };
+      }
 
-      console.log("[ASAAS_WEBHOOK] Assinatura inativada (sem validade):", {
+      await logWebhookOperational("info", buildWebhookOperationalContext({
         userId,
         event,
-      });
+        payment,
+        subscription,
+        step: "subscription_inactivated_wait_plan",
+        message: "Assinatura inativada sem validade futura. Usuário enviado para WAIT_PLAN.",
+      }));
 
       return { ok: true, statusSetTo: "WAIT_PLAN" };
     }
 
     // Ledger de eventos ignorados também é útil para reconciliação.
-    await recordWebhookLedger({
+    await recordWebhookLedgerSafe({
       event,
       userId,
       payment,
@@ -597,14 +1127,43 @@ export async function handleAsaasWebhookEvent(body) {
       storedQuote: await getQuoteSnapshotForLedger(userId),
     });
 
-    console.log("[ASAAS_WEBHOOK] Evento ignorado:", {
+    await logWebhookOperational("info", buildWebhookOperationalContext({
       userId,
       event,
-    });
+      payment,
+      subscription,
+      step: "ignored_event",
+      message: "Evento ignorado após reconciliação em ledger.",
+    }));
 
     return { ok: true, ignored: true };
   } catch (err) {
-    console.error("[ASAAS_WEBHOOK_ERROR]", err);
-    return { ok: false, error: err.message };
+    const errorCode = safeStr(err?.code || classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.RUNTIME));
+    const payload = normalizeWebhookPayload(body);
+    const fallbackUserId =
+      safeStr(payload?.payment?.externalReference) ||
+      safeStr(payload?.subscription?.externalReference) ||
+      "";
+
+    await logWebhookOperational("error", buildWebhookOperationalContext({
+      userId: fallbackUserId,
+      event: payload?.event,
+      payment: payload?.payment,
+      subscription: payload?.subscription,
+      step: "handle_asaas_webhook_event",
+      errorCode,
+      message: err?.message || String(err),
+    }));
+
+    await emitWebhookFailureMetrics({
+      userId: fallbackUserId,
+      payment: payload?.payment,
+      subscription: payload?.subscription,
+      event: payload?.event,
+      step: "handle_asaas_webhook_event",
+      errorCode,
+    });
+
+    return { ok: false, error: err?.message || String(err), errorCode };
   }
 }
