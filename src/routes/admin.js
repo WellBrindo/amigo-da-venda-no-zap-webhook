@@ -107,6 +107,8 @@ import {
   getAdminAuditCount,
   logCampaignAudit,
   listCampaignAuditByCampaign,
+  listOperationalAudit,
+  getOperationalAuditCount,
 } from "../services/audit.js";
 import {
   listManagedAdmins,
@@ -1652,6 +1654,210 @@ function buildExecutiveExportRows(data) {
   return rows;
 }
 
+function normalizeOperationalLevel(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (["fatal", "error", "danger"].includes(text)) return "error";
+  if (["warn", "warning"].includes(text)) return "warn";
+  if (["info", "debug", "notice"].includes(text)) return "info";
+  return text || "info";
+}
+
+function normalizeOperationalModule(value) {
+  const text = String(value || "").trim();
+  return text || "unknown";
+}
+
+function normalizeOperationalStep(value) {
+  return String(value || "").trim();
+}
+
+function normalizeOperationalMessage(value) {
+  return limitText(String(value || "").trim(), 220);
+}
+
+function summarizeOperationalHealth({ modules = [], errorsCount = 0, warningsCount = 0, financial = {} } = {}) {
+  const topErrorModule = (Array.isArray(modules) ? modules : []).find((item) => Number(item?.errorCount || 0) > 0);
+  const totalFinancialFailures = Number(financial?.recentFailures || 0) + Number(financial?.recentInconsistencies || 0);
+  let level = "ok";
+  const notes = [];
+
+  if (errorsCount > 0 || totalFinancialFailures > 0) {
+    level = "warning";
+    notes.push(`Há ${errorsCount} erro(s) operacionais recente(s) e ${totalFinancialFailures} ocorrência(s) financeira(s) sensível(is).`);
+  }
+  if (errorsCount >= 10 || totalFinancialFailures >= 10) {
+    level = "danger";
+    notes.unshift("O sistema apresenta volume relevante de falhas recentes e exige leitura operacional prioritária.");
+  }
+  if (topErrorModule) {
+    notes.push(`Módulo mais afetado: ${topErrorModule.module} (${topErrorModule.errorCount} erro(s)).`);
+  }
+  if (warningsCount > 0) {
+    notes.push(`Há ${warningsCount} ocorrência(s) em nível de atenção.`);
+  }
+  if (!notes.length) {
+    notes.push("Sem falhas operacionais recentes relevantes dentro da janela consultada.");
+  }
+
+  return {
+    level,
+    notes,
+    summary: notes[0] || "Leitura operacional indisponível.",
+  };
+}
+
+async function buildOperationalReadModel() {
+  let operationalItems = [];
+  let operationalError = "";
+  let operationalStored = 0;
+  try {
+    const [items, totalStored] = await Promise.all([
+      typeof listOperationalAudit === "function" ? listOperationalAudit({ limit: 200 }) : [],
+      typeof getOperationalAuditCount === "function" ? getOperationalAuditCount() : 0,
+    ]);
+    operationalItems = Array.isArray(items) ? items : [];
+    operationalStored = Number(totalStored || 0);
+  } catch (err) {
+    operationalError = String(err?.message || err);
+    operationalItems = [];
+    operationalStored = 0;
+  }
+
+  let financialItems = [];
+  let financialError = "";
+  try {
+    const ledger = await listAsaasEvents({ limit: 120, offset: 0 });
+    financialItems = Array.isArray(ledger?.items) ? ledger.items : [];
+  } catch (err) {
+    financialError = String(err?.message || err);
+    financialItems = [];
+  }
+
+  const moduleMap = new Map();
+  const recentErrors = [];
+  const recentEvents = [];
+  let errorsCount = 0;
+  let warningsCount = 0;
+
+  for (const raw of operationalItems) {
+    const moduleName = normalizeOperationalModule(raw?.module);
+    const level = normalizeOperationalLevel(raw?.level);
+    const event = String(raw?.event || "").trim();
+    const ts = String(raw?.ts || "").trim();
+    const step = normalizeOperationalStep(raw?.step);
+    const message = normalizeOperationalMessage(raw?.message || raw?.summary || raw?.reason || raw?.errorCode);
+    const userId = String(raw?.userId || "").trim();
+    const waId = String(raw?.waId || "").trim();
+    const status = String(raw?.status || "").trim();
+    const errorCode = String(raw?.errorCode || "").trim();
+
+    const prev = moduleMap.get(moduleName) || {
+      module: moduleName,
+      count: 0,
+      errorCount: 0,
+      warnCount: 0,
+      infoCount: 0,
+      lastTs: "",
+      lastEvent: "",
+      lastLevel: "",
+    };
+    prev.count += 1;
+    if (level === "error") prev.errorCount += 1;
+    else if (level === "warn") prev.warnCount += 1;
+    else prev.infoCount += 1;
+    if (!prev.lastTs || (ts && ts > prev.lastTs)) {
+      prev.lastTs = ts;
+      prev.lastEvent = event;
+      prev.lastLevel = level;
+    }
+    moduleMap.set(moduleName, prev);
+
+    const normalized = {
+      ts,
+      module: moduleName,
+      level,
+      event,
+      step,
+      message,
+      userId,
+      waId,
+      status,
+      errorCode,
+      meta: raw?.meta && typeof raw.meta === "object" ? raw.meta : {},
+    };
+
+    recentEvents.push(normalized);
+    if (level === "error") {
+      errorsCount += 1;
+      recentErrors.push(normalized);
+    } else if (level === "warn") {
+      warningsCount += 1;
+      recentErrors.push(normalized);
+    }
+  }
+
+  const modules = Array.from(moduleMap.values())
+    .sort((a, b) => {
+      if (b.errorCount !== a.errorCount) return b.errorCount - a.errorCount;
+      if (b.warnCount !== a.warnCount) return b.warnCount - a.warnCount;
+      if (b.count !== a.count) return b.count - a.count;
+      return String(a.module).localeCompare(String(b.module));
+    });
+
+  const financialCategories = new Map();
+  const financialStatuses = new Map();
+  let financialFailures = 0;
+  let financialInconsistencies = 0;
+  for (const item of financialItems) {
+    const category = String(item?.category || item?.eventType || item?.event || "unknown").trim() || "unknown";
+    const status = String(item?.status || item?.payment?.status || item?.subscription?.status || "unknown").trim() || "unknown";
+    financialCategories.set(category, (financialCategories.get(category) || 0) + 1);
+    financialStatuses.set(status, (financialStatuses.get(status) || 0) + 1);
+    if (item?.isFailure) financialFailures += 1;
+    if (item?.isInconsistency) financialInconsistencies += 1;
+  }
+
+  const financial = {
+    totalEvents: financialItems.length,
+    recentFailures: financialFailures,
+    recentInconsistencies: financialInconsistencies,
+    categories: Array.from(financialCategories.entries()).map(([category, count]) => ({ category, count })).sort((a, b) => b.count - a.count),
+    statuses: Array.from(financialStatuses.entries()).map(([status, count]) => ({ status, count })).sort((a, b) => b.count - a.count),
+    latest: financialItems.slice(0, 20).map((item) => ({
+      ts: String(item?.ts || ""),
+      event: String(item?.event || ""),
+      eventType: String(item?.eventType || ""),
+      category: String(item?.category || ""),
+      status: String(item?.status || item?.payment?.status || item?.subscription?.status || ""),
+      severity: String(item?.severity || ""),
+      isFailure: Boolean(item?.isFailure),
+      isInconsistency: Boolean(item?.isInconsistency),
+      userId: String(item?.userId || ""),
+      waId: String(item?.waId || ""),
+      paymentId: String(item?.paymentId || item?.payment?.id || ""),
+      subscriptionId: String(item?.subscriptionId || item?.subscription?.id || ""),
+      couponCode: String(item?.couponCode || item?.couponLedger?.couponCode || ""),
+      summary: String(item?.summary || item?.message || item?.event || ""),
+      message: String(item?.message || item?.summary || ""),
+    })),
+    error: financialError || undefined,
+  };
+
+  return {
+    ok: !operationalError,
+    error: operationalError || undefined,
+    totalStored: operationalStored,
+    recentCount: operationalItems.length,
+    errorsCount,
+    warningsCount,
+    modules,
+    recentEvents: recentEvents.slice(0, 25),
+    recentErrors: recentErrors.slice(0, 15),
+    financial,
+    health: summarizeOperationalHealth({ modules, errorsCount, warningsCount, financial }),
+  };
+}
+
 export function adminRouter() {
   const router = Router();
 
@@ -1889,12 +2095,13 @@ export function adminRouter() {
   }
 
   async function buildExecutiveDashboardData() {
-    const [usersRaw, global, window24hCount, systemPlans, inconsistencyData] = await Promise.all([
+    const [usersRaw, global, window24hCount, systemPlans, inconsistencyData, operational] = await Promise.all([
       listUsers(),
       getGlobalDescriptionMetrics(),
       countWindow24hActive(),
       listPlans({ includeInactive: true }),
       collectInconsistencies(),
+      buildOperationalReadModel(),
     ]);
 
     const waIds = Array.isArray(usersRaw) ? usersRaw.slice().sort() : [];
@@ -2039,6 +2246,7 @@ export function adminRouter() {
       plans,
       cities,
       inconsistencies: inconsistencyData,
+      operational,
     };
   }
 
@@ -2302,6 +2510,39 @@ export function adminRouter() {
         </div>
       </div>
 
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;">
+            <h4 style="margin:0;">Eventos operacionais recentes</h4>
+            <span class="muted">Runtime do sistema</span>
+          </div>
+          <div class="hr"></div>
+          <div style="overflow:auto;">
+            <table>
+              <thead>
+                <tr><th>Quando</th><th>Módulo</th><th>Nível</th><th>Evento</th><th>Resumo</th></tr>
+              </thead>
+              <tbody id="exOpsRows"><tr><td colspan="5" class="muted">Carregando...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;">
+            <h4 style="margin:0;">Módulos com falhas recentes</h4>
+            <span class="muted">Leitura operacional</span>
+          </div>
+          <div class="hr"></div>
+          <div style="overflow:auto;">
+            <table>
+              <thead>
+                <tr><th>Módulo</th><th>Ocorrências</th><th>Erros</th><th>Atenções</th><th>Último evento</th></tr>
+              </thead>
+              <tbody id="exModulesRows"><tr><td colspan="5" class="muted">Carregando...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <div class="card pad" style="margin-top:14px;">
         <details>
           <summary class="muted">Ver JSON bruto</summary>
@@ -2444,6 +2685,29 @@ export function adminRouter() {
               '</tr>';
             }).join('');
             renderTableRows('issuesRows', issuesRows, 4, 'Nenhuma inconsistência encontrada.');
+
+            const ops = data.operational || {};
+            const opRows = (Array.isArray(ops.recentEvents) ? ops.recentEvents : []).map(function(item){
+              return '<tr>' +
+                '<td><code>' + esc(item.ts || '') + '</code></td>' +
+                '<td><b>' + esc(item.module || '—') + '</b></td>' +
+                '<td>' + severityBadge(item.level) + '</td>' +
+                '<td>' + esc(item.event || '—') + '</td>' +
+                '<td>' + esc(item.message || item.step || item.errorCode || '—') + '</td>' +
+              '</tr>';
+            }).join('');
+            renderTableRows('exOpsRows', opRows, 5, 'Sem eventos operacionais recentes.');
+
+            const moduleRows = (Array.isArray(ops.modules) ? ops.modules : []).slice(0, 10).map(function(item){
+              return '<tr>' +
+                '<td><b>' + esc(item.module || '—') + '</b></td>' +
+                '<td>' + esc(item.count || 0) + '</td>' +
+                '<td><b>' + esc(item.errorCount || 0) + '</b></td>' +
+                '<td>' + esc(item.warnCount || 0) + '</td>' +
+                '<td>' + esc(item.lastEvent || '—') + '</td>' +
+              '</tr>';
+            }).join('');
+            renderTableRows('exModulesRows', moduleRows, 5, 'Sem módulos com atividade operacional relevante.');
           }
 
           document.addEventListener('DOMContentLoaded', function(){
@@ -2535,6 +2799,20 @@ export function adminRouter() {
       rates: { day: {}, month: {} },
     }));
 
+    const operational = await buildOperationalReadModel().catch((err) => ({
+      ok: false,
+      error: String(err?.message || err),
+      totalStored: 0,
+      recentCount: 0,
+      errorsCount: 0,
+      warningsCount: 0,
+      modules: [],
+      recentEvents: [],
+      recentErrors: [],
+      financial: { totalEvents: 0, recentFailures: 0, recentInconsistencies: 0, categories: [], statuses: [], latest: [] },
+      health: { level: "warning", notes: [String(err?.message || err)], summary: String(err?.message || err) },
+    }));
+
     res.json({
       ok: true,
       ts: Date.now(),
@@ -2549,6 +2827,7 @@ export function adminRouter() {
         plans,
         error: usersError || undefined,
       },
+      operational,
       user,
     });
   });
@@ -2912,6 +3191,58 @@ router.get("/dashboard", async (req, res) => {
 
         <div class="hr"></div>
 
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:8px;">
+          <div>
+            <h4 style="margin:0 0 6px 0;">Observabilidade operacional</h4>
+            <div class="muted">Separação entre auditoria administrativa, métricas do funil e eventos reais de runtime do sistema.</div>
+          </div>
+          <div class="row" style="gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+            <span class="pill">Eventos salvos: <b id="opsStored">—</b></span>
+            <span class="pill">Falhas recentes: <b id="opsErrors">—</b></span>
+            <span class="pill">Atenções recentes: <b id="opsWarns">—</b></span>
+            <span class="pill" id="opsHealthPill">Saúde operacional: —</span>
+          </div>
+        </div>
+
+        <div class="grid cols3" style="margin-top:12px;">
+          <div class="kpi"><div class="t">Eventos operacionais recentes</div><div class="v" id="opsRecentCount">—</div><div class="muted">Janela consultada do runtime</div></div>
+          <div class="kpi"><div class="t">Falhas financeiras recentes</div><div class="v" id="opsFinancialFailures">—</div><div class="muted">Confirmações, falhas, expirações e inconsistências</div></div>
+          <div class="kpi"><div class="t">Inconsistências financeiras</div><div class="v" id="opsFinancialInconsistencies">—</div><div class="muted">Ledger operacional do Asaas</div></div>
+        </div>
+
+        <div class="grid cols2" style="margin-top:12px;">
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Falhas por módulo</h4><div class="muted">Runtime recente</div></div>
+            <div class="hr"></div>
+            <div style="overflow:auto;"><table><thead><tr><th>Módulo</th><th>Total</th><th>Erros</th><th>Atenções</th><th>Último evento</th></tr></thead><tbody id="opsModulesRows"><tr><td colspan="5" class="muted">Carregando...</td></tr></tbody></table></div>
+          </div>
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Erros recentes</h4><div class="muted">Eventos operacionais</div></div>
+            <div class="hr"></div>
+            <div style="overflow:auto;"><table><thead><tr><th>Quando</th><th>Módulo</th><th>Nível</th><th>Etapa</th><th>Resumo</th></tr></thead><tbody id="opsErrorsRows"><tr><td colspan="5" class="muted">Carregando...</td></tr></tbody></table></div>
+          </div>
+        </div>
+
+        <div class="grid cols2" style="margin-top:12px;">
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Eventos operacionais recentes</h4><div class="muted">Visão geral do runtime</div></div>
+            <div class="hr"></div>
+            <div style="overflow:auto;"><table><thead><tr><th>Quando</th><th>Módulo</th><th>Evento</th><th>Nível</th><th>Resumo</th></tr></thead><tbody id="opsEventsRows"><tr><td colspan="5" class="muted">Carregando...</td></tr></tbody></table></div>
+          </div>
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Leitura financeira operacional</h4><div class="muted">Asaas + ledger</div></div>
+            <div class="hr"></div>
+            <div class="row" style="gap:8px; flex-wrap:wrap; margin-bottom:10px;">
+              <span class="pill">Eventos Asaas: <b id="opsFinanceTotal">—</b></span>
+              <span class="pill">Falhas: <b id="opsFinanceFailures">—</b></span>
+              <span class="pill">Inconsistências: <b id="opsFinanceInconsistencies">—</b></span>
+            </div>
+            <div style="overflow:auto;"><table><thead><tr><th>Quando</th><th>Categoria</th><th>Status</th><th>Ref</th><th>Resumo</th></tr></thead><tbody id="opsFinanceRows"><tr><td colspan="5" class="muted">Carregando...</td></tr></tbody></table></div>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
         <details>
           <summary class="muted">Ver JSON bruto</summary>
           <pre id="raw" style="white-space:pre-wrap;"></pre>
@@ -3008,6 +3339,15 @@ router.get("/dashboard", async (req, res) => {
           if(level === 'critical') return '<span class="badge danger">Integridade crítica</span>';
           if(level === 'warning') return '<span class="badge warn">Integridade parcial</span>';
           return '<span class="badge ok">Integridade operacional OK</span>';
+        }
+        function operationalBadge(level){
+          const normalized = String(level || 'info').toLowerCase();
+          const cls = normalized === 'error' || normalized === 'fatal' ? 'danger' : (normalized === 'warn' || normalized === 'warning' ? 'warn' : (normalized === 'ok' ? 'ok' : 'info'));
+          const label = cls === 'danger' ? 'Erro' : (cls === 'warn' ? 'Atenção' : (cls === 'ok' ? 'OK' : 'Info'));
+          return '<span class="badge ' + cls + '">' + label + '</span>';
+        }
+        function renderOperationalRows(containerId, rowsHtml, colspan, emptyText){
+          renderTableRows(containerId, rowsHtml, colspan, emptyText);
         }
 
         function renderFunnelSummary(events){
@@ -3197,6 +3537,64 @@ router.get("/dashboard", async (req, res) => {
           document.getElementById('funnelDaysLabel').textContent = (((funnel?.timelines||{}).trial_started||{}).start && ((funnel?.timelines||{}).trial_started||{}).end) ? ((((funnel?.timelines||{}).trial_started||{}).start) + ' → ' + (((funnel?.timelines||{}).trial_started||{}).end)) : '';
           renderFunnelSummary(fe);
           renderFunnelTimeline(funnel?.timelines || {});
+
+          const operational = j.operational || {};
+          const health = operational.health || {};
+          document.getElementById('opsStored').textContent = operational.totalStored ?? 0;
+          document.getElementById('opsErrors').textContent = operational.errorsCount ?? 0;
+          document.getElementById('opsWarns').textContent = operational.warningsCount ?? 0;
+          document.getElementById('opsRecentCount').textContent = operational.recentCount ?? 0;
+          document.getElementById('opsFinancialFailures').textContent = operational?.financial?.recentFailures ?? 0;
+          document.getElementById('opsFinancialInconsistencies').textContent = operational?.financial?.recentInconsistencies ?? 0;
+          document.getElementById('opsFinanceTotal').textContent = operational?.financial?.totalEvents ?? 0;
+          document.getElementById('opsFinanceFailures').textContent = operational?.financial?.recentFailures ?? 0;
+          document.getElementById('opsFinanceInconsistencies').textContent = operational?.financial?.recentInconsistencies ?? 0;
+          document.getElementById('opsHealthPill').innerHTML = 'Saúde operacional: ' + operationalBadge(health.level || 'info') + ' <span class="muted">' + esc(health.summary || 'Sem leitura consolidada.') + '</span>';
+
+          const modulesRows = (Array.isArray(operational.modules) ? operational.modules : []).slice(0, 12).map(function(item){
+            return '<tr>' +
+              '<td><b>' + esc(item.module || '—') + '</b></td>' +
+              '<td>' + esc(item.count || 0) + '</td>' +
+              '<td><b>' + esc(item.errorCount || 0) + '</b></td>' +
+              '<td>' + esc(item.warnCount || 0) + '</td>' +
+              '<td>' + esc(item.lastEvent || '—') + '</td>' +
+            '</tr>';
+          }).join('');
+          renderOperationalRows('opsModulesRows', modulesRows, 5, 'Sem atividade operacional relevante por módulo.');
+
+          const recentErrorsRows = (Array.isArray(operational.recentErrors) ? operational.recentErrors : []).map(function(item){
+            return '<tr>' +
+              '<td><code>' + esc(item.ts || '') + '</code></td>' +
+              '<td><b>' + esc(item.module || '—') + '</b></td>' +
+              '<td>' + operationalBadge(item.level) + '</td>' +
+              '<td>' + esc(item.step || '—') + '</td>' +
+              '<td>' + esc(item.message || item.errorCode || item.event || '—') + '</td>' +
+            '</tr>';
+          }).join('');
+          renderOperationalRows('opsErrorsRows', recentErrorsRows, 5, 'Sem erros operacionais recentes.');
+
+          const recentEventsRows = (Array.isArray(operational.recentEvents) ? operational.recentEvents : []).map(function(item){
+            return '<tr>' +
+              '<td><code>' + esc(item.ts || '') + '</code></td>' +
+              '<td><b>' + esc(item.module || '—') + '</b></td>' +
+              '<td>' + esc(item.event || '—') + '</td>' +
+              '<td>' + operationalBadge(item.level) + '</td>' +
+              '<td>' + esc(item.message || item.step || item.errorCode || '—') + '</td>' +
+            '</tr>';
+          }).join('');
+          renderOperationalRows('opsEventsRows', recentEventsRows, 5, 'Sem eventos operacionais recentes.');
+
+          const financeRows = (Array.isArray(operational?.financial?.latest) ? operational.financial.latest : []).map(function(item){
+            const ref = item.paymentId || item.subscriptionId || item.couponCode || item.userId || '—';
+            return '<tr>' +
+              '<td><code>' + esc(item.ts || '') + '</code></td>' +
+              '<td><b>' + esc(item.category || item.eventType || item.event || '—') + '</b></td>' +
+              '<td>' + esc(item.status || (item.isFailure ? 'failure' : 'ok') || '—') + '</td>' +
+              '<td><code>' + esc(ref) + '</code></td>' +
+              '<td>' + esc(item.summary || item.message || '—') + '</td>' +
+            '</tr>';
+          }).join('');
+          renderOperationalRows('opsFinanceRows', financeRows, 5, 'Sem eventos financeiros operacionais recentes.');
 
           const hist = await loadHistory();
           return { j, hist };
@@ -8892,9 +9290,19 @@ router.post("/coupons/:code/delete", async (req, res) => {
           <div class="row" style="justify-content:space-between; align-items:flex-end; gap:12px;">
             <div>
               <h3 style="margin:0 0 8px 0;">📜 Histórico (Ledger)</h3>
-              <div class="muted">Eventos recentes recebidos do Asaas.</div>
+              <div class="muted">Eventos recentes recebidos do Asaas com leitura operacional do ledger.</div>
             </div>
-            <button class="ghost" onclick="loadEvents()">Atualizar</button>
+            <div class="row" style="gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+              <label class="pill"><input id="eventsOnlyFailures" type="checkbox" style="margin-right:6px;" /> Somente falhas</label>
+              <label class="pill"><input id="eventsOnlyInconsistencies" type="checkbox" style="margin-right:6px;" /> Inconsistências</label>
+              <button class="ghost" onclick="loadEvents()">Atualizar</button>
+            </div>
+          </div>
+
+          <div class="row" style="gap:8px; flex-wrap:wrap; margin-top:8px;">
+            <span class="pill">Total: <b id="eventsTotal">—</b></span>
+            <span class="pill">Falhas: <b id="eventsFailures">—</b></span>
+            <span class="pill">Inconsistências: <b id="eventsInconsistencies">—</b></span>
           </div>
 
           <div class="hr"></div>
@@ -8941,25 +9349,41 @@ router.post("/coupons/:code/delete", async (req, res) => {
         }
 
         async function loadEvents(){
-          const r = await fetch('/admin/api/finance/asaas/events?limit=50&offset=0');
+          const onlyFailures = !!document.getElementById('eventsOnlyFailures')?.checked;
+          const onlyInconsistencies = !!document.getElementById('eventsOnlyInconsistencies')?.checked;
+          const p = new URLSearchParams({ limit: '50', offset: '0' });
+          if (onlyFailures) p.set('onlyFailures', 'true');
+          if (onlyInconsistencies) p.set('onlyInconsistencies', 'true');
+          const r = await fetch('/admin/api/finance/asaas/events?' + p.toString());
           const j = await r.json().catch(()=>({}));
           document.getElementById('eventsRaw').textContent = JSON.stringify(j, null, 2);
 
           const items = Array.isArray(j.items) ? j.items : [];
+          document.getElementById('eventsTotal').textContent = String(items.length);
+          document.getElementById('eventsFailures').textContent = String(items.filter(it => !!it.isFailure).length);
+          document.getElementById('eventsInconsistencies').textContent = String(items.filter(it => !!it.isInconsistency).length);
           if(!items.length){
             document.getElementById('eventsOut').innerHTML = '<div class="muted">Nenhum evento registrado.</div>';
             return;
           }
 
-          const html = '<table><thead><tr><th>Quando</th><th>Evento</th><th>Ref</th></tr></thead><tbody>' +
+          const html = '<table><thead><tr><th>Quando</th><th>Evento</th><th>Categoria</th><th>Status</th><th>Nível</th><th>Ref</th><th>Resumo</th></tr></thead><tbody>' +
             items.map(it => {
-              const when = it.receivedAt || it.ts || it.dateCreated || it.createdAt || '';
+              const when = it.ts || it.receivedAt || it.dateCreated || it.createdAt || '';
               const ev = it.event || it.type || it.kind || '';
-              const ref = it.paymentId || it.subscriptionId || it.invoiceId || it.id || it.externalReference || '';
+              const category = it.category || it.eventType || '—';
+              const status = it.status || it.payment?.status || it.subscription?.status || '—';
+              const severity = it.severity || (it.isFailure ? 'error' : (it.isInconsistency ? 'warn' : 'info'));
+              const ref = it.paymentId || it.payment?.id || it.subscriptionId || it.subscription?.id || it.invoiceId || it.id || it.externalReference || '';
+              const summary = it.summary || it.message || it.couponCode || it.couponLedger?.couponCode || '—';
               return '<tr>' +
                 '<td><code>'+esc(when)+'</code></td>' +
                 '<td>'+esc(ev)+'</td>' +
+                '<td><b>'+esc(category)+'</b></td>' +
+                '<td>'+esc(status)+'</td>' +
+                '<td>'+esc(severity)+'</td>' +
                 '<td><code>'+esc(ref)+'</code></td>' +
+                '<td>'+esc(summary)+'</td>' +
               '</tr>';
             }).join('') +
             '</tbody></table>';
@@ -9053,7 +9477,13 @@ router.post("/coupons/:code/delete", async (req, res) => {
     const userId = await resolveAdminUserRef(String(req.query?.userId || req.query?.waId || "").trim());
     const limit = Number(req.query?.limit || 50);
     const offset = Number(req.query?.offset || 0);
-    const data = await listAsaasEvents({ userId, limit, offset });
+    const eventType = String(req.query?.eventType || "").trim();
+    const couponCode = String(req.query?.couponCode || "").trim();
+    const paymentId = String(req.query?.paymentId || "").trim();
+    const subscriptionId = String(req.query?.subscriptionId || "").trim();
+    const onlyFailures = normalizeAdminBool(req.query?.onlyFailures, false);
+    const onlyInconsistencies = normalizeAdminBool(req.query?.onlyInconsistencies, false);
+    const data = await listAsaasEvents({ userId, limit, offset, eventType, couponCode, paymentId, subscriptionId, onlyFailures, onlyInconsistencies });
     return res.json(data);
   });
 
