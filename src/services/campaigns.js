@@ -23,12 +23,22 @@ import {
   redisNextCampaignSequence,
   redisNextCampaignExecutionSequence,
 } from "./redis.js";
+import {
+  trackCampaignReceived,
+  trackCampaignClickedIntent,
+  trackCampaignConversionAttributed,
+} from "./metrics.js";
 
 const CAMPAIGN_TTL_LOG_SECONDS = 180 * 24 * 60 * 60;
 const CAMPAIGN_LOG_MAX_ITEMS = 5000;
 const CAMPAIGN_USER_LOG_MAX_ITEMS = 500;
 const CAMPAIGN_CONFLICT_LOG_MAX_ITEMS = 2000;
 const CAMPAIGN_DEFAULT_TIMEZONE = "America/Sao_Paulo";
+const CAMPAIGN_ATTRIBUTION_WINDOW_HOURS = 72;
+
+export const CAMPAIGN_ATTRIBUTION_POLICY = Object.freeze({
+  MINIMUM_RELIABLE: "minimum_reliable",
+});
 
 export const CAMPAIGN_CATEGORY = Object.freeze({
   CREATION_REENGAGEMENT: "creation_reengagement",
@@ -348,11 +358,18 @@ function normalizeCampaignUserState(input = {}) {
     userId: safeStr(input.userId),
     sendCount: toPositiveInt(input.sendCount ?? 0, 0),
     lastSentAt: normalizeDateTime(input.lastSentAt),
+    lastSentSource: safeStr(input.lastSentSource),
     lastEvaluatedAt: normalizeDateTime(input.lastEvaluatedAt),
     lastEligibilityResult: safeStr(input.lastEligibilityResult),
     lastBlockReason: safeStr(input.lastBlockReason),
     cooldownUntil: normalizeDateTime(input.cooldownUntil),
     lastMessageId: safeStr(input.lastMessageId),
+    lastClickedIntentAt: normalizeDateTime(input.lastClickedIntentAt),
+    lastClickedIntentSource: safeStr(input.lastClickedIntentSource),
+    lastConversionAttributedAt: normalizeDateTime(input.lastConversionAttributedAt),
+    lastAttributedConversionType: safeStr(input.lastAttributedConversionType),
+    lastAttributedEventSource: safeStr(input.lastAttributedEventSource),
+    lastAttributedReference: safeStr(input.lastAttributedReference),
   };
 }
 
@@ -405,6 +422,94 @@ async function appendConflictLog(payload) {
   await redisLTrim(redisCampaignConflictGlobalKey(), 0, CAMPAIGN_CONFLICT_LOG_MAX_ITEMS - 1);
   await redisExpire(redisCampaignConflictGlobalKey(), CAMPAIGN_TTL_LOG_SECONDS);
   return payload;
+}
+
+function buildCampaignTrackingContext({
+  campaign = null,
+  campaignId = "",
+  campaignCode = "",
+  userId = "",
+  source = "campaigns",
+  step = "",
+  conversionType = "",
+  reference = "",
+} = {}) {
+  return {
+    userId: safeStr(userId),
+    waId: safeStr(userId),
+    campaignId: safeStr(campaignId || campaign?.id),
+    campaignCode: normalizeCampaignCode(campaignCode || campaign?.code || ""),
+    source: safeStr(source) || "campaigns",
+    step: safeStr(step),
+    type: safeStr(conversionType),
+    by: safeStr(reference),
+  };
+}
+
+async function emitCampaignMetricSafe(metricFn, payload = {}) {
+  if (typeof metricFn !== "function") return { ok: false, skipped: true, reason: "metric_fn_missing" };
+  try {
+    return await metricFn(payload);
+  } catch {
+    return { ok: false, skipped: true, reason: "metric_emit_failed" };
+  }
+}
+
+function getAttributionWindowHours(campaign = null) {
+  const configured = toPositiveInt(campaign?.attributionWindowHours ?? 0, 0);
+  return configured > 0 ? configured : CAMPAIGN_ATTRIBUTION_WINDOW_HOURS;
+}
+
+function isWithinAttributionWindow(lastSentAt, campaign = null, nowMsValue = Date.now()) {
+  const sentAt = normalizeDateTime(lastSentAt);
+  if (!sentAt) return false;
+  const sentMs = Date.parse(sentAt);
+  if (!Number.isFinite(sentMs)) return false;
+  const windowHours = getAttributionWindowHours(campaign);
+  return nowMsValue - sentMs <= windowHours * 60 * 60 * 1000;
+}
+
+function buildSkipResult(reason, { campaignId = "", userId = "", campaign = null, extra = {} } = {}) {
+  return {
+    ok: false,
+    skipped: true,
+    reason: safeStr(reason),
+    campaignId: safeStr(campaignId || campaign?.id),
+    campaignCode: normalizeCampaignCode(campaign?.code || ""),
+    userId: safeStr(userId),
+    ...extra,
+  };
+}
+
+async function getCampaignAttributionContext(campaignId, userId) {
+  const campaign = (await getCampaign(campaignId))?.campaign || null;
+  const current = (await getCampaignUserState(campaignId, userId))?.state || normalizeCampaignUserState({ campaignId, userId });
+  const now = nowIso();
+  const nowMsValue = Date.parse(now);
+
+  return {
+    campaign,
+    current,
+    now,
+    nowMs: nowMsValue,
+    hasSentAt: Boolean(safeStr(current?.lastSentAt)),
+    withinAttributionWindow: isWithinAttributionWindow(current?.lastSentAt, campaign, nowMsValue),
+  };
+}
+
+export async function getCampaignAttributableContext(campaignId, userId) {
+  const context = await getCampaignAttributionContext(campaignId, userId);
+  return {
+    ok: true,
+    policy: CAMPAIGN_ATTRIBUTION_POLICY.MINIMUM_RELIABLE,
+    attributionWindowHours: getAttributionWindowHours(context.campaign),
+    campaign: context.campaign,
+    state: context.current,
+    hasSentAt: context.hasSentAt,
+    withinAttributionWindow: context.withinAttributionWindow,
+    eligibleForClickedIntent: context.hasSentAt && context.withinAttributionWindow,
+    eligibleForConversionAttribution: context.hasSentAt && context.withinAttributionWindow,
+  };
 }
 
 async function upsertCampaignIndexes(campaign, previous = null) {
@@ -761,14 +866,16 @@ export async function logCampaignConflict({ userId, evaluations = [], winner = n
   return payload;
 }
 
-export async function markCampaignSent(campaignId, userId, { messageId = "", details = null } = {}) {
+export async function markCampaignSent(campaignId, userId, { messageId = "", details = null, source = "campaigns" } = {}) {
   const current = (await getCampaignUserState(campaignId, userId))?.state;
+  const campaign = (await getCampaign(campaignId))?.campaign || {};
   const now = nowIso();
-  const cooldownUntil = deriveCooldownUntil(Date.now(), (await getCampaign(campaignId))?.campaign || {});
+  const cooldownUntil = deriveCooldownUntil(Date.now(), campaign);
 
   const next = await setCampaignUserState(campaignId, userId, {
     sendCount: toPositiveInt(current?.sendCount ?? 0, 0) + 1,
     lastSentAt: now,
+    lastSentSource: safeStr(source) || "campaigns",
     cooldownUntil,
     lastMessageId: safeStr(messageId),
     lastEligibilityResult: "sent",
@@ -786,6 +893,14 @@ export async function markCampaignSent(campaignId, userId, { messageId = "", det
     cooldownUntil,
   });
 
+  await emitCampaignMetricSafe(trackCampaignReceived, buildCampaignTrackingContext({
+    campaign,
+    campaignId,
+    userId,
+    source,
+    step: "campaign_sent",
+  }));
+
   return next;
 }
 
@@ -802,6 +917,140 @@ export async function markCampaignError(campaignId, userId, error) {
   };
   await appendCampaignLog(payload);
   return payload;
+}
+
+export async function markCampaignClickedIntent(campaignId, userId, { details = null, source = "campaigns", reference = "" } = {}) {
+  const context = await getCampaignAttributionContext(campaignId, userId);
+  const { campaign, current, now, hasSentAt, withinAttributionWindow } = context;
+
+  if (!hasSentAt) {
+    return buildSkipResult("campaign_not_sent_for_user", {
+      campaignId,
+      userId,
+      campaign,
+    });
+  }
+
+  if (!withinAttributionWindow) {
+    return buildSkipResult("campaign_outside_attribution_window", {
+      campaignId,
+      userId,
+      campaign,
+      extra: { attributionWindowHours: getAttributionWindowHours(campaign) },
+    });
+  }
+
+  const next = await setCampaignUserState(campaignId, userId, {
+    lastClickedIntentAt: now,
+    lastClickedIntentSource: safeStr(source) || "campaigns",
+  });
+
+  await appendCampaignLog({
+    executionId: await nextExecutionId(),
+    campaignId: safeStr(campaignId),
+    userId: safeStr(userId),
+    action: CAMPAIGN_EXECUTION_ACTION.SKIPPED,
+    reason: "campaign_clicked_intent",
+    details: {
+      reference: safeStr(reference),
+      ...(details && typeof details === "object" ? details : {}),
+    },
+    evaluatedAt: now,
+  });
+
+  await emitCampaignMetricSafe(trackCampaignClickedIntent, buildCampaignTrackingContext({
+    campaign,
+    campaignId,
+    userId,
+    source,
+    step: "clicked_intent_registered",
+    reference,
+  }));
+
+  return {
+    ok: true,
+    state: next?.state || next,
+    campaign,
+    policy: CAMPAIGN_ATTRIBUTION_POLICY.MINIMUM_RELIABLE,
+    attributionWindowHours: getAttributionWindowHours(campaign),
+  };
+}
+
+export async function attributeCampaignConversion(campaignId, userId, {
+  conversionType = "",
+  details = null,
+  source = "campaigns",
+  eventSource = "",
+  reference = "",
+} = {}) {
+  const context = await getCampaignAttributionContext(campaignId, userId);
+  const { campaign, current, now, hasSentAt, withinAttributionWindow } = context;
+  const normalizedConversionType = safeStr(conversionType);
+
+  if (!hasSentAt) {
+    return buildSkipResult("campaign_not_sent_for_user", {
+      campaignId,
+      userId,
+      campaign,
+    });
+  }
+
+  if (!withinAttributionWindow) {
+    return buildSkipResult("campaign_outside_attribution_window", {
+      campaignId,
+      userId,
+      campaign,
+      extra: { attributionWindowHours: getAttributionWindowHours(campaign) },
+    });
+  }
+
+  if (!normalizedConversionType) {
+    return buildSkipResult("conversion_type_required", {
+      campaignId,
+      userId,
+      campaign,
+    });
+  }
+
+  const next = await setCampaignUserState(campaignId, userId, {
+    lastConversionAttributedAt: now,
+    lastAttributedConversionType: normalizedConversionType,
+    lastAttributedEventSource: safeStr(eventSource || source),
+    lastAttributedReference: safeStr(reference),
+  });
+
+  await appendCampaignLog({
+    executionId: await nextExecutionId(),
+    campaignId: safeStr(campaignId),
+    userId: safeStr(userId),
+    action: CAMPAIGN_EXECUTION_ACTION.SKIPPED,
+    reason: "campaign_conversion_attributed",
+    details: {
+      conversionType: normalizedConversionType,
+      eventSource: safeStr(eventSource || source),
+      reference: safeStr(reference),
+      ...(details && typeof details === "object" ? details : {}),
+    },
+    evaluatedAt: now,
+  });
+
+  await emitCampaignMetricSafe(trackCampaignConversionAttributed, buildCampaignTrackingContext({
+    campaign,
+    campaignId,
+    userId,
+    source,
+    step: "conversion_attributed",
+    conversionType: normalizedConversionType,
+    reference: safeStr(reference) || safeStr(eventSource || source),
+  }));
+
+  return {
+    ok: true,
+    state: next?.state || next,
+    campaign,
+    policy: CAMPAIGN_ATTRIBUTION_POLICY.MINIMUM_RELIABLE,
+    attributionWindowHours: getAttributionWindowHours(campaign),
+  };
 }
 
 export async function listCampaignLogs({ campaignId = "", userId = "", limit = 100 } = {}) {
