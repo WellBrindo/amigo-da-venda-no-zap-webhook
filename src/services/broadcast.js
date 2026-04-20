@@ -198,6 +198,40 @@ async function writeRuntimeMeta(campaignId, meta = {}) {
   return normalized;
 }
 
+function buildCampaignDispatchDetails({
+  dispatchSource = "",
+  recipient = "",
+  channel = "",
+  runtimeMeta = {},
+  campaign = null,
+  extra = {},
+} = {}) {
+  const normalizedExtra = extra && typeof extra === "object" ? { ...extra } : {};
+  return {
+    dispatchSource: safeStr(dispatchSource),
+    recipient: safeStr(recipient),
+    channel: safeStr(channel || "WHATSAPP"),
+    campaignCode: safeStr(campaign?.code),
+    triggerType: safeStr(campaign?.triggerType),
+    category: safeStr(campaign?.category),
+    messageMode: safeStr(campaign?.messageMode),
+    runtimeCreatedAt: safeStr(runtimeMeta?.createdAt),
+    runtimeTotalTargets: Math.max(0, Number(runtimeMeta?.totalTargets || 0) || 0),
+    runtimeSendNow: Math.max(0, Number(runtimeMeta?.sendNow || 0) || 0),
+    runtimePending: Math.max(0, Number(runtimeMeta?.pending || 0) || 0),
+    attributionPolicy: "clicked_intent_and_conversion_must_be_recorded_from_real_user_interaction_points",
+    ...normalizedExtra,
+  };
+}
+
+/**
+ * Importante:
+ * - este módulo é o orquestrador de disparo operacional
+ * - ele confirma envio real e delega campaign_received ao campaigns.js via markCampaignSent(...)
+ * - campaign_clicked_intent / campaign_conversion_attributed NÃO devem ser inferidos aqui apenas porque houve inbound
+ * - esses eventos precisam nascer em pontos de interação real do usuário (ex.: flow inbound, ação explícita, conversão reconhecida)
+ */
+
 async function getCampaignStats(campaignId) {
   const [sentCount, pendingCount, errs] = await Promise.all([
     redisSCard(campaignKeySent(campaignId)).catch(() => 0),
@@ -360,7 +394,16 @@ export async function createCampaignAndDispatch({
     try {
       await sendWhatsAppText({ to: recipient, text: msg });
       await redisSAdd(campaignKeySent(campaign.id), userId);
-      await markCampaignSent(campaign.id, userId, { details: { source: "manual_dispatch", recipient } }).catch(() => ({}));
+      await markCampaignSent(campaign.id, userId, {
+        source: "broadcast",
+        details: buildCampaignDispatchDetails({
+          dispatchSource: "manual_dispatch",
+          recipient,
+          channel: entry?.channel,
+          runtimeMeta,
+          campaign,
+        }),
+      }).catch(() => ({}));
     } catch (err) {
       await recordError(campaign.id, userId || recipient, err?.message || err);
       await markCampaignError(campaign.id, userId, err).catch(() => ({}));
@@ -457,7 +500,16 @@ export async function reprocessCampaignForActiveWindow(campaignId, { limit = 500
       await sendWhatsAppText({ to: recipient, text: msg });
       await redisSAdd(campaignKeySent(id), userId);
       await redisSRem(campaignKeyPending(id), userId);
-      await markCampaignSent(id, userId, { details: { source: "reprocess_active_window", recipient } }).catch(() => ({}));
+      await markCampaignSent(id, userId, {
+        source: "broadcast",
+        details: buildCampaignDispatchDetails({
+          dispatchSource: "reprocess_active_window",
+          recipient,
+          channel: recipientInfo?.channel,
+          runtimeMeta,
+          campaign,
+        }),
+      }).catch(() => ({}));
       sent += 1;
     } catch (err) {
       errors += 1;
@@ -485,6 +537,9 @@ export async function reprocessCampaignForActiveWindow(campaignId, { limit = 500
   };
 }
 
+// Este ponto reage à reabertura da janela 24h e ao envio pendente.
+// A reentrada do usuário, por si só, NÃO é interpretada aqui como clicked_intent.
+// O registro de intenção/clique deve ocorrer no ponto que interpreta a ação real do usuário.
 export async function processPendingForWaId(waId) {
   const inboundWaId = safeStr(waId);
   if (!inboundWaId) return { ok: true, processed: 0 };
@@ -506,6 +561,7 @@ export async function processPendingForWaId(waId) {
     if (!Number(isPending)) continue;
 
     const runtimeMeta = await readRuntimeMeta(cpId);
+    const campaign = (await getCampaignCore(cpId))?.campaign || null;
     const msg = buildMessage({ subject: runtimeMeta.subject, text: runtimeMeta.text });
 
     if (!msg) {
@@ -528,7 +584,17 @@ export async function processPendingForWaId(waId) {
       await sendWhatsAppText({ to: recipient, text: msg });
       await redisSAdd(campaignKeySent(cpId), id);
       await redisSRem(campaignKeyPending(cpId), id);
-      await markCampaignSent(cpId, id, { details: { source: "pending_after_inbound", recipient } }).catch(() => ({}));
+      await markCampaignSent(cpId, id, {
+        source: "broadcast",
+        details: buildCampaignDispatchDetails({
+          dispatchSource: "pending_after_inbound",
+          recipient,
+          channel: recipientInfo?.channel,
+          runtimeMeta,
+          campaign: { id: cpId },
+          extra: { inboundWaId },
+        }),
+      }).catch(() => ({}));
       processed += 1;
     } catch (err) {
       await recordError(cpId, id, err?.message || err);
@@ -728,12 +794,17 @@ async function dispatchLifecycleWinner(userId, evaluation) {
   try {
     await sendWhatsAppText({ to: recipient, text });
     await markCampaignSent(campaign.id, userId, {
-      details: {
-        source: "lifecycle_automation",
+      source: "broadcast",
+      details: buildCampaignDispatchDetails({
+        dispatchSource: "lifecycle_automation",
         recipient,
-        triggerType: campaign.triggerType,
-        category: campaign.category,
-      },
+        channel: recipientInfo?.channel,
+        campaign,
+        extra: {
+          evaluationReason: safeStr(evaluation?.primaryReason),
+          evaluationAt: safeStr(evaluation?.evaluatedAt),
+        },
+      }),
     }).catch(() => ({}));
     return { sent: true, campaignId: campaign.id };
   } catch (err) {
