@@ -7,12 +7,21 @@
 
 import { getPlan, getPlanBillingOption, formatBRLFromCents } from "./plans.js";
 import { getCoupon, validateCouponEligibility } from "./coupons.js";
-import { trackPricingQuoteGenerated, trackPricingError } from "./metrics.js";
+import { trackPricingQuoteGenerated, trackPricingError, trackPaymentError } from "./metrics.js";
+import * as audit from "./audit.js";
 
 const BILLING_CYCLES = Object.freeze(["monthly", "annual"]);
 const APPLIES_TO = Object.freeze({
   FIRST_CHARGE_ONLY: "first_charge_only",
   ENTIRE_SUBSCRIPTION: "entire_subscription",
+});
+
+const PRICING_ERROR_CODE = Object.freeze({
+  INPUT: "PRICING_INPUT_ERROR",
+  PLAN: "PRICING_PLAN_ERROR",
+  BILLING_CYCLE: "PRICING_BILLING_CYCLE_ERROR",
+  COUPON: "PRICING_COUPON_ERROR",
+  RUNTIME: "PRICING_RUNTIME_ERROR",
 });
 
 function safeStr(value) {
@@ -116,6 +125,7 @@ function buildPricingTrackingContext({
   couponCode = "",
   source = "pricing",
   step = "",
+  errorCode = "",
 } = {}) {
   return {
     userId: safeStr(internalUserId),
@@ -125,6 +135,7 @@ function buildPricingTrackingContext({
     couponCode: normalizeCouponCode(couponCode),
     source: safeStr(source) || "pricing",
     step: safeStr(step),
+    errorCode: safeStr(errorCode),
   };
 }
 
@@ -145,6 +156,7 @@ async function maybeTrackPricingError({
   couponCode = "",
   step = "",
   source = "pricing",
+  errorCode = "",
 } = {}) {
   if (!shouldEmitOfficialPricingTracking(trackingMode)) return { ok: true, skipped: true };
   return emitPricingMetricSafe(trackPricingError, buildPricingTrackingContext({
@@ -154,6 +166,29 @@ async function maybeTrackPricingError({
     couponCode,
     source,
     step,
+    errorCode,
+  }));
+}
+
+async function maybeTrackPaymentError({
+  trackingMode = PRICING_TRACKING_MODE.NONE,
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "monthly",
+  couponCode = "",
+  step = "",
+  source = "pricing",
+  errorCode = "",
+} = {}) {
+  if (!shouldEmitOfficialPricingTracking(trackingMode)) return { ok: true, skipped: true };
+  return emitPricingMetricSafe(trackPaymentError, buildPricingTrackingContext({
+    internalUserId,
+    planCode,
+    billingCycle,
+    couponCode,
+    source,
+    step,
+    errorCode,
   }));
 }
 
@@ -175,6 +210,67 @@ async function maybeTrackPricingQuoteGenerated({
     source,
     step,
   }));
+}
+
+async function logPricingOperationalEvent({
+  level = "warn",
+  event = "pricing_runtime_event",
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "",
+  couponCode = "",
+  source = "pricing",
+  step = "",
+  errorCode = "",
+  message = "",
+  meta = {},
+} = {}) {
+  const payload = {
+    module: "pricing",
+    source: safeStr(source) || "pricing",
+    event: safeStr(event) || "pricing_runtime_event",
+    level: safeStr(level) || "warn",
+    userId: safeStr(internalUserId),
+    step: safeStr(step),
+    errorCode: safeStr(errorCode),
+    message: safeStr(message),
+    meta: {
+      planCode: normalizePlanCode(planCode),
+      billingCycle: safeStr(billingCycle),
+      couponCode: normalizeCouponCode(couponCode),
+      ...(meta && typeof meta === "object" ? meta : {}),
+    },
+  };
+
+  try {
+    if (typeof audit?.logOperationalEvent === "function") {
+      await audit.logOperationalEvent(payload);
+      return;
+    }
+    if (typeof audit?.logRuntimeError === "function") {
+      await audit.logRuntimeError(payload);
+      return;
+    }
+  } catch {
+    // fallback para console abaixo
+  }
+
+  try {
+    console[payload.level === "error" ? "error" : "warn"](
+      JSON.stringify({
+        level: payload.level,
+        tag: payload.event,
+        source: payload.source,
+        userId: payload.userId || null,
+        step: payload.step || null,
+        errorCode: payload.errorCode || null,
+        message: payload.message || null,
+        meta: payload.meta,
+      })
+    );
+  } catch {
+    // best effort
+  }
 }
 
 function buildFailure(code, message, extra = {}) {
@@ -260,25 +356,136 @@ function buildPricingExplanation({
   };
 }
 
+function buildStructuredPricingError({
+  errorCode = PRICING_ERROR_CODE.RUNTIME,
+  code = "pricing_error",
+  reason = "Pricing error",
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "monthly",
+  couponCode = "",
+  source = "pricing",
+  step = "",
+  cause = null,
+  extra = {},
+} = {}) {
+  const err = new Error(safeStr(reason) || "Pricing error");
+  err.ok = false;
+  err.errorCode = safeStr(errorCode) || PRICING_ERROR_CODE.RUNTIME;
+  err.code = safeStr(code) || "pricing_error";
+  err.reason = safeStr(reason) || "Pricing error";
+  err.retryable = false;
+  err.source = safeStr(source) || "pricing";
+  err.step = safeStr(step);
+  err.internalUserId = safeStr(internalUserId);
+  err.planCode = normalizePlanCode(planCode);
+  err.billingCycle = safeStr(billingCycle);
+  err.couponCode = normalizeCouponCode(couponCode);
+  err.cause = cause || null;
+  err.extra = extra && typeof extra === "object" ? extra : {};
+  return err;
+}
+
+async function runPricingStage(stageName, fn, context = {}) {
+  try {
+    return await fn();
+  } catch (error) {
+    const structured = buildStructuredPricingError({
+      errorCode: safeStr(context.errorCode) || PRICING_ERROR_CODE.RUNTIME,
+      code: safeStr(context.code) || "pricing_runtime_error",
+      reason: safeStr(error?.reason || error?.message) || "Pricing runtime error",
+      internalUserId: context.internalUserId,
+      planCode: context.planCode,
+      billingCycle: context.billingCycle,
+      couponCode: context.couponCode,
+      source: context.source,
+      step: safeStr(context.step || stageName),
+      cause: error,
+      extra: {
+        stageName: safeStr(stageName),
+        ...(context.extra && typeof context.extra === "object" ? context.extra : {}),
+      },
+    });
+
+    await logPricingOperationalEvent({
+      level: "warn",
+      event: "pricing_stage_failed",
+      internalUserId: context.internalUserId,
+      planCode: context.planCode,
+      billingCycle: context.billingCycle,
+      couponCode: context.couponCode,
+      source: context.source,
+      step: safeStr(context.step || stageName),
+      errorCode: structured.errorCode,
+      message: structured.reason,
+      meta: { stageName: safeStr(stageName), code: structured.code },
+    });
+
+    throw structured;
+  }
+}
+
+function failureFromStructuredError(error, extra = {}) {
+  return buildFailure(
+    safeStr(error?.code) || "pricing_runtime_error",
+    safeStr(error?.reason || error?.message) || "Pricing runtime error",
+    {
+      errorCode: safeStr(error?.errorCode) || PRICING_ERROR_CODE.RUNTIME,
+      retryable: Boolean(error?.retryable),
+      ...extra,
+    }
+  );
+}
+
 export async function getBasePlanPricing({ planCode = "", billingCycle = "monthly", trackMetrics = false, trackingMode = "", source = "pricing" } = {}) {
   const normalizedPlanCode = normalizePlanCode(planCode);
-  const normalizedBillingCycle = normalizeBillingCycle(billingCycle);
+  const normalizedBillingCycle = normalizeBillingCycle(billingCycle, { fallback: "monthly" });
 
   if (!normalizedPlanCode) {
-    return buildFailure("plan_code_required", "planCode required");
+    return buildFailure("plan_code_required", "planCode required", {
+      errorCode: PRICING_ERROR_CODE.INPUT,
+    });
   }
 
-  const plan = await getPlan(normalizedPlanCode);
+  void trackMetrics;
+  void trackingMode;
+  void source;
+
+  const plan = await runPricingStage("load_plan", async () => {
+    return getPlan(normalizedPlanCode);
+  }, {
+    errorCode: PRICING_ERROR_CODE.PLAN,
+    code: "plan_not_found",
+    internalUserId: "",
+    planCode: normalizedPlanCode,
+    billingCycle: normalizedBillingCycle,
+    source,
+    step: "load_plan",
+  });
+
   if (!plan || !safeStr(plan.code)) {
     return buildFailure("plan_not_found", "Plan not found", {
+      errorCode: PRICING_ERROR_CODE.PLAN,
       planCode: normalizedPlanCode,
       billingCycle: normalizedBillingCycle,
     });
   }
 
-  const billingOption = getPlanBillingOption(plan, normalizedBillingCycle);
+  const billingOption = await runPricingStage("load_billing_option", async () => {
+    return getPlanBillingOption(plan, normalizedBillingCycle);
+  }, {
+    errorCode: PRICING_ERROR_CODE.BILLING_CYCLE,
+    code: "billing_cycle_not_available",
+    internalUserId: "",
+    planCode: normalizedPlanCode,
+    billingCycle: normalizedBillingCycle,
+    source,
+    step: "load_billing_option",
+  });
+
   if (!billingOption || billingOption.enabled === false) {
     return buildFailure("billing_cycle_not_available", "Billing cycle not available", {
+      errorCode: PRICING_ERROR_CODE.BILLING_CYCLE,
       planCode: normalizedPlanCode,
       billingCycle: normalizedBillingCycle,
       plan,
@@ -297,7 +504,7 @@ export async function getBasePlanPricing({ planCode = "", billingCycle = "monthl
     discountCapCents: null,
   });
 
-  const result = buildSuccess({
+  return buildSuccess({
     quoteType: "base",
     internalUserId: "",
     planCode: normalizedPlanCode,
@@ -321,12 +528,6 @@ export async function getBasePlanPricing({ planCode = "", billingCycle = "monthl
       calculation,
     }),
   });
-
-  void trackMetrics;
-  void trackingMode;
-  void source;
-
-  return result;
 }
 
 export async function buildPricingQuote({
@@ -340,19 +541,11 @@ export async function buildPricingQuote({
 } = {}) {
   const normalizedInternalUserId = safeStr(internalUserId);
   const normalizedPlanCode = normalizePlanCode(planCode);
-  const normalizedBillingCycle = normalizeBillingCycle(billingCycle);
+  const normalizedBillingCycle = normalizeBillingCycle(billingCycle, { fallback: "monthly" });
   const normalizedCouponCode = normalizeCouponCode(couponCode);
   const resolvedTrackingMode = resolvePricingTrackingMode({ trackingMode, trackMetrics, source });
 
-  const baseQuote = await getBasePlanPricing({
-    planCode: normalizedPlanCode,
-    billingCycle: normalizedBillingCycle,
-    trackMetrics: false,
-    trackingMode: PRICING_TRACKING_MODE.NONE,
-    source,
-  });
-
-  if (!baseQuote.ok) {
+  const emitFailureObservability = async ({ step, errorCode }) => {
     await maybeTrackPricingError({
       trackingMode: resolvedTrackingMode,
       internalUserId: normalizedInternalUserId,
@@ -360,16 +553,76 @@ export async function buildPricingQuote({
       billingCycle: normalizedBillingCycle,
       couponCode: normalizedCouponCode,
       source,
-      step: safeStr(baseQuote?.code) === "billing_cycle_not_available"
-        ? "invalid_plan_or_cycle"
-        : safeStr(baseQuote?.code) === "plan_not_found"
-          ? "invalid_plan_or_cycle"
-          : safeStr(baseQuote?.code) || "build_base_quote_failed",
+      step,
+      errorCode,
     });
+    await maybeTrackPaymentError({
+      trackingMode: resolvedTrackingMode,
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+      source,
+      step,
+      errorCode,
+    });
+    await logPricingOperationalEvent({
+      level: "warn",
+      event: "pricing_quote_failed",
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+      source,
+      step,
+      errorCode,
+      message: step,
+    });
+  };
+
+  let baseQuote;
+  try {
+    baseQuote = await getBasePlanPricing({
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      trackMetrics: false,
+      trackingMode: PRICING_TRACKING_MODE.NONE,
+      source,
+    });
+  } catch (error) {
+    const failure = failureFromStructuredError(error, {
+      quoteType: "checkout",
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+    });
+    await emitFailureObservability({
+      step: "build_base_quote_failed",
+      errorCode: safeStr(error?.errorCode) || PRICING_ERROR_CODE.RUNTIME,
+    });
+    return failure;
+  }
+
+  if (!baseQuote.ok) {
+    const errorCode =
+      safeStr(baseQuote?.errorCode) ||
+      (safeStr(baseQuote?.code) === "plan_not_found" ? PRICING_ERROR_CODE.PLAN
+        : safeStr(baseQuote?.code) === "billing_cycle_not_available" ? PRICING_ERROR_CODE.BILLING_CYCLE
+        : PRICING_ERROR_CODE.INPUT);
+
+    await emitFailureObservability({
+      step: ["billing_cycle_not_available", "plan_not_found"].includes(safeStr(baseQuote?.code))
+        ? "invalid_plan_or_cycle"
+        : safeStr(baseQuote?.code) || "build_base_quote_failed",
+      errorCode,
+    });
+
     return {
       ...baseQuote,
       internalUserId: normalizedInternalUserId,
       couponCode: normalizedCouponCode,
+      errorCode,
     };
   }
 
@@ -423,16 +676,105 @@ export async function buildPricingQuote({
     return result;
   }
 
-  const coupon = await getCoupon(normalizedCouponCode);
-  const eligibility = await validateCouponEligibility({
-    internalUserId: normalizedInternalUserId,
-    couponCode: normalizedCouponCode,
-    planCode: normalizedPlanCode,
-    billingCycle: normalizedBillingCycle,
-    basePriceCents: baseCalculation.basePriceCents,
-  });
+  let coupon = null;
+  try {
+    coupon = await runPricingStage("get_coupon", async () => {
+      return getCoupon(normalizedCouponCode);
+    }, {
+      errorCode: PRICING_ERROR_CODE.COUPON,
+      code: "coupon_lookup_failed",
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+      source,
+      step: "get_coupon",
+    });
+  } catch (error) {
+    const failure = failureFromStructuredError(error, {
+      quoteType: "checkout",
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+      plan,
+      billingOption,
+      coupon: null,
+      calculation: baseCalculation,
+      chargeMode: buildChargeMode({
+        billingCycle: normalizedBillingCycle,
+        appliesTo: baseCalculation.appliesTo,
+      }),
+      explanation: buildPricingExplanation({
+        plan,
+        billingOption,
+        coupon: null,
+        couponCode: normalizedCouponCode,
+        billingCycle: normalizedBillingCycle,
+        calculation: baseCalculation,
+      }),
+    });
+    await emitFailureObservability({ step: "invalid_coupon", errorCode: safeStr(error?.errorCode) || PRICING_ERROR_CODE.COUPON });
+    return failure;
+  }
+
+  let eligibility;
+  try {
+    eligibility = await runPricingStage("validate_coupon_eligibility", async () => {
+      return validateCouponEligibility({
+        internalUserId: normalizedInternalUserId,
+        couponCode: normalizedCouponCode,
+        planCode: normalizedPlanCode,
+        billingCycle: normalizedBillingCycle,
+        basePriceCents: baseCalculation.basePriceCents,
+        trackingMode: "none",
+        trackConversion: false,
+        source,
+      });
+    }, {
+      errorCode: PRICING_ERROR_CODE.COUPON,
+      code: "coupon_validation_failed",
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+      source,
+      step: "validate_coupon_eligibility",
+    });
+  } catch (error) {
+    const failure = failureFromStructuredError(error, {
+      quoteType: "checkout",
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+      plan,
+      billingOption,
+      coupon,
+      calculation: baseCalculation,
+      chargeMode: buildChargeMode({
+        billingCycle: normalizedBillingCycle,
+        appliesTo: baseCalculation.appliesTo,
+      }),
+      explanation: buildPricingExplanation({
+        plan,
+        billingOption,
+        coupon,
+        couponCode: normalizedCouponCode,
+        billingCycle: normalizedBillingCycle,
+        calculation: baseCalculation,
+      }),
+    });
+    await emitFailureObservability({ step: "invalid_coupon", errorCode: safeStr(error?.errorCode) || PRICING_ERROR_CODE.COUPON });
+    return failure;
+  }
 
   if (!eligibility?.ok || !eligibility?.eligible) {
+    const step = ["plan_or_cycle_invalid", "coupon_plan_not_allowed", "coupon_cycle_not_allowed"].includes(safeStr(eligibility?.code))
+      ? "invalid_plan_or_cycle"
+      : "invalid_coupon";
+    const errorCode = step === "invalid_plan_or_cycle" ? PRICING_ERROR_CODE.BILLING_CYCLE : PRICING_ERROR_CODE.COUPON;
+
     const failure = buildFailure(
       safeStr(eligibility?.code) || "coupon_invalid",
       safeStr(eligibility?.reason) || "Coupon invalid",
@@ -459,21 +801,11 @@ export async function buildPricingQuote({
           billingCycle: normalizedBillingCycle,
           calculation: baseCalculation,
         }),
+        errorCode,
       }
     );
 
-    await maybeTrackPricingError({
-      trackingMode: resolvedTrackingMode,
-      internalUserId: normalizedInternalUserId,
-      planCode: normalizedPlanCode,
-      billingCycle: normalizedBillingCycle,
-      couponCode: normalizedCouponCode,
-      source,
-      step: ["plan_or_cycle_invalid", "coupon_plan_not_allowed", "coupon_cycle_not_allowed"].includes(safeStr(eligibility?.code))
-        ? "invalid_plan_or_cycle"
-        : "invalid_coupon",
-    });
-
+    await emitFailureObservability({ step, errorCode });
     return failure;
   }
 
