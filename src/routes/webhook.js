@@ -1,5 +1,5 @@
 // src/routes/webhook.js
-// ✅ V16.5.0 — Webhook robusto + integração com orquestrador de campanhas
+// ✅ V16.6.0 — Webhook hardened for malformed payloads, per-message isolation and operational failure tracking
 import { Router } from "express";
 
 import { touch24hWindow } from "../services/window24h.js";
@@ -8,9 +8,362 @@ import { handleInboundText } from "../services/flow.js";
 import { resolveOrCreateUserFromInbound } from "../services/identity.js";
 import { processPendingForWaId } from "../services/broadcast.js";
 import { redisGet, redisSet, redisExpire } from "../services/redis.js";
+import * as audit from "../services/audit.js";
+import {
+  trackWebhookError,
+  trackFlowError,
+  trackWhatsappSendError,
+} from "../services/metrics.js";
+
+const WEBHOOK_ERROR = Object.freeze({
+  PAYLOAD_ERROR: "WEBHOOK_PAYLOAD_ERROR",
+  IDENTITY_ERROR: "WEBHOOK_IDENTITY_ERROR",
+  DEDUPE_ERROR: "WEBHOOK_DEDUPE_ERROR",
+  FLOW_ERROR: "WEBHOOK_FLOW_ERROR",
+  SEND_ERROR: "WEBHOOK_SEND_ERROR",
+  PENDING_PROCESS_ERROR: "WEBHOOK_PENDING_PROCESS_ERROR",
+  WINDOW24H_ERROR: "WEBHOOK_WINDOW24H_ERROR",
+  RUNTIME_ERROR: "WEBHOOK_RUNTIME_ERROR",
+});
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function safeStr(value) {
+  return String(value ?? "").trim();
+}
+
+function safeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function buildWebhookMetricContext(extra = {}) {
+  const context = {
+    source: "webhook_route",
+    ...extra,
+  };
+
+  Object.keys(context).forEach((key) => {
+    if (context[key] === undefined || context[key] === null || context[key] === "") {
+      delete context[key];
+    }
+  });
+
+  return context;
+}
+
+async function emitMetricSafe(tracker, payload = {}) {
+  if (typeof tracker !== "function") return null;
+  try {
+    return await tracker(payload);
+  } catch {
+    return null;
+  }
+}
+
+async function logWebhookEvent(level, event, payload = {}) {
+  const entry = {
+    ts: new Date().toISOString(),
+    level: safeStr(level || "info").toLowerCase(),
+    source: "webhook_route",
+    module: "webhook_route",
+    event: safeStr(event),
+    ...payload,
+  };
+
+  try {
+    if (typeof audit?.logOperationalEvent === "function") {
+      await audit.logOperationalEvent({
+        module: "webhook_route",
+        event: entry.event,
+        level: entry.level,
+        userId: safeStr(entry.internalUserId || entry.userId),
+        waId: safeStr(entry.waId || entry.deliveryId),
+        step: safeStr(entry.step),
+        message: safeStr(entry.message || entry.reason),
+        errorCode: safeStr(entry.errorCode),
+        status: safeStr(entry.status),
+        meta: {
+          messageId: safeStr(entry.messageId),
+          deliveryId: safeStr(entry.deliveryId),
+          ...((entry.meta && typeof entry.meta === "object") ? entry.meta : {}),
+        },
+      });
+      return;
+    }
+    if (typeof audit?.logRuntimeError === "function" && (entry.level === "warn" || entry.level === "error" || entry.level === "fatal")) {
+      await audit.logRuntimeError({
+        module: "webhook_route",
+        event: entry.event,
+        level: entry.level,
+        userId: safeStr(entry.internalUserId || entry.userId),
+        waId: safeStr(entry.waId || entry.deliveryId),
+        step: safeStr(entry.step),
+        message: safeStr(entry.message || entry.reason),
+        errorCode: safeStr(entry.errorCode),
+        status: safeStr(entry.status),
+        meta: {
+          messageId: safeStr(entry.messageId),
+          deliveryId: safeStr(entry.deliveryId),
+          ...((entry.meta && typeof entry.meta === "object") ? entry.meta : {}),
+        },
+      });
+      return;
+    }
+  } catch {
+    // fallback below
+  }
+
+  const line = JSON.stringify(entry);
+  if (entry.level === "error" || entry.level === "fatal") {
+    console.error(line);
+    return;
+  }
+  if (entry.level === "warn") {
+    console.warn(line);
+    return;
+  }
+  console.log(line);
+}
+
+async function reportWebhookError({
+  errorCode = WEBHOOK_ERROR.RUNTIME_ERROR,
+  message = "",
+  step = "",
+  userId = "",
+  waId = "",
+  deliveryId = "",
+  messageId = "",
+  internalUserId = "",
+  metric = trackWebhookError,
+  extra = {},
+} = {}) {
+  const context = buildWebhookMetricContext({
+    userId: safeStr(userId || internalUserId || waId),
+    waId: safeStr(waId || deliveryId),
+    step: safeStr(step),
+    errorCode: safeStr(errorCode),
+    messageId: safeStr(messageId),
+    ...extra,
+  });
+
+  await emitMetricSafe(metric, context);
+  await logWebhookEvent("warn", "webhook_error", {
+    errorCode: safeStr(errorCode),
+    message: safeStr(message),
+    step: safeStr(step),
+    messageId: safeStr(messageId),
+    waId: safeStr(waId),
+    deliveryId: safeStr(deliveryId),
+    internalUserId: safeStr(internalUserId || userId),
+    ...extra,
+  });
+}
+
+async function markMessageSeen(messageId) {
+  const dedupeKey = `wa:msg:${messageId}`;
+  const seen = await redisGet(dedupeKey);
+  if (seen) return true;
+  await redisSet(dedupeKey, "1");
+  await redisExpire(dedupeKey, 60 * 60 * 24 * 2);
+  return false;
+}
+
+async function sendReplies({ replies = [], deliveryId = "", inboundWaId = "", inboundBsuid = "", internalUserId = "", messageId = "" } = {}) {
+  for (const reply of safeArray(replies)) {
+    const msgText = safeStr(reply);
+    if (!msgText) continue;
+
+    try {
+      await sendWhatsAppText({ to: deliveryId, text: msgText });
+    } catch (err) {
+      await reportWebhookError({
+        errorCode: WEBHOOK_ERROR.SEND_ERROR,
+        message: err?.message || String(err),
+        step: "send_reply",
+        waId: inboundWaId,
+        deliveryId,
+        messageId,
+        internalUserId,
+        metric: trackWhatsappSendError,
+        extra: {
+          bsuid: safeStr(inboundBsuid),
+        },
+      });
+    }
+
+    await sleep(80);
+  }
+}
+
+async function processInboundMessage({ value = {}, msg = {} } = {}) {
+  const messageId = safeStr(msg?.id);
+  const rawWaId = safeStr(msg?.from || value?.contacts?.[0]?.wa_id);
+  const messageType = safeStr(msg?.type).toLowerCase();
+
+  let identity = null;
+  let internalUserId = "";
+  let inboundWaId = rawWaId;
+  let inboundBsuid = "";
+  let deliveryId = "";
+
+  try {
+    identity = await resolveOrCreateUserFromInbound({
+      value,
+      message: msg,
+      messages: [msg],
+      waId: rawWaId || null,
+    });
+
+    internalUserId = safeStr(identity?.internalUserId);
+    inboundWaId = safeStr(identity?.inbound?.waId || rawWaId);
+    inboundBsuid = safeStr(identity?.inbound?.bsuid);
+    deliveryId = safeStr(identity?.inbound?.deliveryId || inboundWaId || inboundBsuid);
+  } catch (err) {
+    await reportWebhookError({
+      errorCode: WEBHOOK_ERROR.IDENTITY_ERROR,
+      message: err?.message || String(err),
+      step: "resolve_identity",
+      waId: rawWaId,
+      messageId,
+      extra: { messageType },
+    });
+    return;
+  }
+
+  if (!internalUserId || !deliveryId) {
+    await reportWebhookError({
+      errorCode: WEBHOOK_ERROR.IDENTITY_ERROR,
+      message: "Identity resolution returned incomplete identifiers",
+      step: "validate_identity",
+      waId: inboundWaId || rawWaId,
+      deliveryId,
+      messageId,
+      internalUserId,
+      extra: { messageType },
+    });
+    return;
+  }
+
+  if (messageId) {
+    try {
+      const seen = await markMessageSeen(messageId);
+      if (seen) return;
+    } catch (err) {
+      await reportWebhookError({
+        errorCode: WEBHOOK_ERROR.DEDUPE_ERROR,
+        message: err?.message || String(err),
+        step: "message_dedupe",
+        waId: inboundWaId,
+        deliveryId,
+        messageId,
+        internalUserId,
+      });
+      // fallback explícito: processa a mensagem mesmo sem dedupe confirmado
+    }
+  }
+
+  if (inboundWaId) {
+    try {
+      await touch24hWindow(inboundWaId);
+    } catch (err) {
+      await reportWebhookError({
+        errorCode: WEBHOOK_ERROR.WINDOW24H_ERROR,
+        message: err?.message || String(err),
+        step: "touch_24h_window",
+        waId: inboundWaId,
+        deliveryId,
+        messageId,
+        internalUserId,
+      });
+    }
+  }
+
+  if (messageType !== "text") {
+    await logWebhookEvent("info", "webhook_message_skipped", {
+      step: "message_type_filter",
+      messageType,
+      messageId,
+      waId: inboundWaId,
+      internalUserId,
+    });
+    return;
+  }
+
+  const inboundText = safeStr(msg?.text?.body);
+  if (!inboundText) {
+    await logWebhookEvent("info", "webhook_message_skipped", {
+      step: "empty_text_message",
+      messageType,
+      messageId,
+      waId: inboundWaId,
+      internalUserId,
+    });
+    return;
+  }
+
+  let flowResult = null;
+  try {
+    flowResult = await handleInboundText({ waId: internalUserId, text: inboundText });
+  } catch (err) {
+    await reportWebhookError({
+      errorCode: WEBHOOK_ERROR.FLOW_ERROR,
+      message: err?.message || String(err),
+      step: "handle_inbound_text",
+      waId: inboundWaId,
+      deliveryId,
+      messageId,
+      internalUserId,
+      metric: trackFlowError,
+    });
+
+    await reportWebhookError({
+      errorCode: WEBHOOK_ERROR.FLOW_ERROR,
+      message: err?.message || String(err),
+      step: "handle_inbound_text",
+      waId: inboundWaId,
+      deliveryId,
+      messageId,
+      internalUserId,
+      metric: trackWebhookError,
+    });
+    return;
+  }
+
+  if (flowResult?.shouldReply) {
+    const replies = safeArray(flowResult?.replies).length
+      ? safeArray(flowResult.replies)
+      : (flowResult?.replyText ? [flowResult.replyText] : []);
+
+    await sendReplies({
+      replies,
+      deliveryId,
+      inboundWaId,
+      inboundBsuid,
+      internalUserId,
+      messageId,
+    });
+  }
+
+  if (inboundWaId) {
+    try {
+      await processPendingForWaId(inboundWaId);
+    } catch (err) {
+      await reportWebhookError({
+        errorCode: WEBHOOK_ERROR.PENDING_PROCESS_ERROR,
+        message: err?.message || String(err),
+        step: "process_pending_campaigns",
+        waId: inboundWaId,
+        deliveryId,
+        messageId,
+        internalUserId,
+        extra: {
+          bsuid: safeStr(inboundBsuid),
+        },
+      });
+    }
+  }
 }
 
 export function webhookRouter() {
@@ -40,122 +393,75 @@ export function webhookRouter() {
     // responde rápido para a Meta
     res.status(200).json({ ok: true });
 
-    try {
-      const body = req.body || {};
-      const entry = Array.isArray(body.entry) ? body.entry : [];
+    const body = req.body || {};
+    const entries = safeArray(body.entry);
 
-      for (const e of entry) {
-        const changes = Array.isArray(e.changes) ? e.changes : [];
+    if (!entries.length) {
+      await reportWebhookError({
+        errorCode: WEBHOOK_ERROR.PAYLOAD_ERROR,
+        message: "Webhook payload received without entry array",
+        step: "parse_body_entry",
+        metric: trackWebhookError,
+      });
+      return;
+    }
 
-        for (const ch of changes) {
-          const value = ch.value || {};
-          const messages = Array.isArray(value.messages) ? value.messages : [];
+    for (const entry of entries) {
+      try {
+        const changes = safeArray(entry?.changes);
+        if (!changes.length) {
+          await reportWebhookError({
+            errorCode: WEBHOOK_ERROR.PAYLOAD_ERROR,
+            message: "Webhook entry received without changes array",
+            step: "parse_entry_changes",
+            metric: trackWebhookError,
+          });
+          continue;
+        }
 
-          for (const msg of messages) {
-            const rawWaId = String(msg?.from || value?.contacts?.[0]?.wa_id || "").trim();
-            const identity = await resolveOrCreateUserFromInbound({
-              value,
-              message: msg,
-              messages: [msg],
-              waId: rawWaId || null,
-            });
-            const internalUserId = String(identity?.internalUserId || "").trim();
-            const inboundWaId = String(identity?.inbound?.waId || rawWaId || "").trim();
-            const inboundBsuid = String(identity?.inbound?.bsuid || "").trim();
-            const deliveryId = String(identity?.inbound?.deliveryId || inboundWaId || inboundBsuid || "").trim();
-            if (!internalUserId || !deliveryId) continue;
-            // ✅ Deduplicação (Meta pode reenviar o mesmo message.id)
-            const messageId = String(msg?.id || "").trim();
-            if (messageId) {
-              const dedupeKey = `wa:msg:${messageId}`;
+        for (const change of changes) {
+          try {
+            const value = change?.value && typeof change.value === "object" ? change.value : {};
+            const messages = safeArray(value?.messages);
+
+            if (!messages.length) {
+              await logWebhookEvent("info", "webhook_change_skipped", {
+                step: "parse_change_messages",
+                reason: "no_messages",
+              });
+              continue;
+            }
+
+            for (const msg of messages) {
               try {
-                const seen = await redisGet(dedupeKey);
-                if (seen) continue;
-                await redisSet(dedupeKey, "1");
-                await redisExpire(dedupeKey, 60 * 60 * 24 * 2); // 2 dias
+                await processInboundMessage({ value, msg });
               } catch (err) {
-                console.warn(
-                  JSON.stringify({
-                    level: "warn",
-                    tag: "wa_dedupe_failed",
-                    waId: inboundWaId || null,
-                    bsuid: inboundBsuid || null,
-                    internalUserId,
-                    messageId,
-                    error: String(err?.message || err),
-                  })
-                );
+                await reportWebhookError({
+                  errorCode: WEBHOOK_ERROR.RUNTIME_ERROR,
+                  message: err?.message || String(err),
+                  step: "process_single_message",
+                  waId: safeStr(msg?.from || value?.contacts?.[0]?.wa_id),
+                  messageId: safeStr(msg?.id),
+                });
               }
             }
-
-            // 1) marca janela 24h
-            if (inboundWaId) {
-              await touch24hWindow(inboundWaId);
-            }
-
-            // 2) pega texto inbound (só texto por enquanto)
-            let inboundText = "";
-            if (msg?.type === "text") {
-              inboundText = String(msg?.text?.body || "").trim();
-            }
-            if (!inboundText) continue;
-
-            // 3) roteia para o motor de fluxo
-            const r = await handleInboundText({ waId: internalUserId, text: inboundText });
-
-            // 4) responde se necessário (suporta múltiplas mensagens)
-            if (r?.shouldReply) {
-              const replies = Array.isArray(r?.replies) && r.replies.length
-                ? r.replies
-                : (r?.replyText ? [r.replyText] : []);
-
-              for (const t of replies) {
-                const msgText = String(t || "").trim();
-                if (!msgText) continue;
-
-                try {
-                  await sendWhatsAppText({ to: deliveryId, text: msgText });
-                } catch (err) {
-                  console.warn(
-                    JSON.stringify({
-                      level: "warn",
-                      tag: "send_whatsapp_reply_failed",
-                      waId: inboundWaId || null,
-                    bsuid: inboundBsuid || null,
-                    internalUserId,
-                      error: String(err?.message || err),
-                    })
-                  );
-                }
-
-                // pequena pausa para evitar rate-limit e manter a ordem
-                await sleep(80);
-              }
-            }
-
-            // 5) processa campanhas pendentes pelo novo orquestrador,
-            // somente depois do fluxo inbound principal já ter sido tratado
-            try {
-              if (inboundWaId) {
-                await processPendingForWaId(inboundWaId);
-              }
-            } catch (err) {
-              console.warn(
-                JSON.stringify({
-                  level: "warn",
-                  tag: "process_pending_campaigns_failed",
-                  waId: inboundWaId || null,
-                  bsuid: inboundBsuid || null,
-                  internalUserId,
-                  error: String(err?.message || err),
-                })
-              );
-            }
+          } catch (err) {
+            await reportWebhookError({
+              errorCode: WEBHOOK_ERROR.RUNTIME_ERROR,
+              message: err?.message || String(err),
+              step: "process_change",
+              metric: trackWebhookError,
+            });
           }
         }
+      } catch (err) {
+        await reportWebhookError({
+          errorCode: WEBHOOK_ERROR.RUNTIME_ERROR,
+          message: err?.message || String(err),
+          step: "process_entry",
+          metric: trackWebhookError,
+        });
       }
-    } catch (err) {
-      console.error("Webhook error:", err?.message || err);
     }
   });
 
