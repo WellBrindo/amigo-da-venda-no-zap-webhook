@@ -19,7 +19,27 @@
  */
 
 import { generateAdText } from "./openai/generate.js";
-import { incDescriptionMetrics } from "./metrics.js";
+import {
+  incDescriptionMetrics,
+  trackFirstInboundReceived,
+  trackTrialStarted,
+  trackFirstAdGenerationStarted,
+  trackFirstAdGenerated,
+  trackAdGenerated,
+  trackAdRefined,
+  trackTrialLimitReached,
+  trackPlansViewed,
+  trackPlanSelected,
+  trackBillingCycleSelected,
+  trackCouponCodeEntered,
+  trackCouponApplied,
+  trackCouponRejected,
+  trackCouponRemoved,
+  trackPricingQuoteGenerated,
+  trackCheckoutStarted,
+  trackCheckoutConfirmed,
+  trackPaymentAbandoned,
+} from "./metrics.js";
 import { getCopyText } from "./copy.js";
 import { redisGet } from "./redis.js";
 
@@ -133,6 +153,12 @@ import {
   getSubscription,
   cancelSubscription,
 } from "./asaas/client.js";
+import {
+  markCampaignClickedIntent,
+  attributeCampaignConversion,
+  getCampaignAttributableContext,
+  listCampaigns as listCampaignDefinitions,
+} from "./campaigns.js";
 
 // -------------------- Config --------------------
 const TRIAL_LIMIT_DEFAULT = 5;
@@ -442,13 +468,127 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function buildFlowTrackingContext(waId, extra = {}) {
+  const context = {
+    userId: cleanText(waId),
+    waId: cleanText(waId),
+    source: "flow",
+    ...extra,
+  };
+
+  Object.keys(context).forEach((key) => {
+    if (context[key] === undefined || context[key] === null || context[key] === "") {
+      delete context[key];
+    }
+  });
+
+  return context;
+}
+
+async function trackFlowMetricSafe(tracker, waId, extra = {}) {
+  if (typeof tracker !== "function") return null;
+  try {
+    return await tracker(buildFlowTrackingContext(waId, extra));
+  } catch (_) {
+    return null;
+  }
+}
+
+function isoMsSafe(value) {
+  const ms = Date.parse(String(value || ""));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+async function resolveFlowCampaignAttributionContext(waId, { purpose = "click" } = {}) {
+  try {
+    const listResult = await listCampaignDefinitions({ includeInactive: true, limit: 1000 });
+    const campaigns = Array.isArray(listResult?.campaigns) ? listResult.campaigns : [];
+    if (!campaigns.length) return null;
+
+    const contexts = await Promise.all(
+      campaigns.map(async (campaign) => {
+        const ctx = await getCampaignAttributableContext(campaign?.id, waId).catch(() => null);
+        if (!ctx?.campaign || !ctx?.hasSentAt || !ctx?.withinAttributionWindow) return null;
+
+        const state = ctx?.state || {};
+        const lastSentMs = isoMsSafe(state.lastSentAt);
+        const lastClickedMs = isoMsSafe(state.lastClickedIntentAt);
+        const lastConvertedMs = isoMsSafe(state.lastConversionAttributedAt);
+
+        if (purpose === "click" && lastClickedMs > 0) return null;
+        if (purpose === "conversion" && lastConvertedMs > 0) return null;
+
+        return {
+          campaign: ctx.campaign,
+          state,
+          lastSentMs,
+          lastClickedMs,
+          lastConvertedMs,
+        };
+      })
+    );
+
+    const eligible = contexts.filter(Boolean);
+    if (!eligible.length) return null;
+
+    eligible.sort((a, b) => {
+      const aPrimary = purpose === "conversion" ? Math.max(a.lastClickedMs, a.lastSentMs) : a.lastSentMs;
+      const bPrimary = purpose === "conversion" ? Math.max(b.lastClickedMs, b.lastSentMs) : b.lastSentMs;
+      return bPrimary - aPrimary;
+    });
+
+    return eligible[0];
+  } catch (_) {
+    return null;
+  }
+}
+
+async function resolveAndTrackCampaignClick(waId) {
+  try {
+    const resolved = await resolveFlowCampaignAttributionContext(waId, { purpose: "click" });
+    if (!resolved?.campaign?.id) return null;
+
+    return await markCampaignClickedIntent(resolved.campaign.id, waId, {
+      source: "flow",
+      reference: "inbound_message",
+      details: {
+        step: "handleInboundText",
+      },
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
+async function resolveAndTrackCampaignConversion(waId, conversionType, reference, extraDetails = {}) {
+  try {
+    const resolved = await resolveFlowCampaignAttributionContext(waId, { purpose: "conversion" });
+    if (!resolved?.campaign?.id) return null;
+
+    return await attributeCampaignConversion(resolved.campaign.id, waId, {
+      conversionType: cleanText(conversionType),
+      source: "flow",
+      eventSource: "flow",
+      reference: cleanText(reference),
+      details: {
+        step: "createCurrentPlanPayment",
+        ...extraDetails,
+      },
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
 async function markPlansPrompted(waId, { trialEnded = false } = {}) {
   const ts = nowIso();
   await setPlansViewedAt(waId, ts);
   await setLastPlanPromptAt(waId, ts);
   if (trialEnded) {
     await setTrialEndedAt(waId, ts);
+    await trackFlowMetricSafe(trackTrialLimitReached, waId, { step: ST.WAIT_PLAN });
   }
+  await trackFlowMetricSafe(trackPlansViewed, waId, { step: ST.WAIT_PLAN, date: new Date(ts) });
 }
 
 async function markCheckoutInteraction(waId, { started = false } = {}) {
@@ -2454,6 +2594,13 @@ async function prepareCheckoutQuote(waId, { planCode = "", billingCycle = "month
     reservation,
   });
 
+  await trackFlowMetricSafe(trackPricingQuoteGenerated, waId, {
+    planCode,
+    billingCycle,
+    couponCode,
+    step: ST.WAIT_COUPON_CODE,
+  });
+
   return { ok: true, quote, reservation };
 }
 
@@ -3215,6 +3362,11 @@ async function createCurrentPlanPayment(waId) {
       name: `Plano ${plan.name} (${billingLabel})`,
     });
 
+    await resolveAndTrackCampaignConversion(waId, "checkout_completed", "checkout_flow_pix", {
+      paymentMethod: "PIX",
+      planCode: planCodeLabel,
+      billingCycle,
+    });
     await markCheckoutInteraction(waId);
     await setUserStatus(waId, ST.PAYMENT_PENDING);
 
@@ -3243,6 +3395,11 @@ async function createCurrentPlanPayment(waId) {
       name: `Assinatura ${plan.name} (${billingLabel})`,
     });
 
+    await resolveAndTrackCampaignConversion(waId, "checkout_completed", "checkout_flow_credit_card", {
+      paymentMethod: "CREDIT_CARD",
+      planCode: planCodeLabel,
+      billingCycle,
+    });
     await markCheckoutInteraction(waId);
     await setUserStatus(waId, ST.PAYMENT_PENDING);
 
@@ -3280,6 +3437,7 @@ async function createCurrentPlanPayment(waId) {
 // -------------------- Core --------------------
 async function trackInboundActivity({ waId, status }) {
   const currentMeta = (await getActivityMeta(waId)) || {};
+  const hadLastInbound = Boolean(String(currentMeta?.lastInboundAt || "").trim());
   const now = nowIso();
   const flood = currentMeta?.flood || {};
   const lastMessageAt = flood?.lastMessageAt || currentMeta?.lastInboundAt || "";
@@ -3319,6 +3477,7 @@ async function trackInboundActivity({ waId, status }) {
   return {
     shouldWarnFlood: shouldWarn,
     shouldPrefixIdleNudge: wasIdleLongEnough,
+    isFirstInbound: !hadLastInbound,
   };
 }
 
@@ -3333,6 +3492,10 @@ export async function handleInboundText({ waId, userId, text }) {
 
   const currentStatus = await getUserStatus(id);
   const activity = await trackInboundActivity({ waId: id, status: currentStatus });
+  await resolveAndTrackCampaignClick(id);
+  if (activity?.isFirstInbound) {
+    await trackFlowMetricSafe(trackFirstInboundReceived, id, { step: currentStatus || ST.WAIT_NAME });
+  }
   const outcome = await handleInboundTextCore({ userId: id, text: inbound });
 
   const prefixes = [];
@@ -4016,6 +4179,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     if (name.length < 3) return reply(await getCopyText("FLOW_NAME_TOO_SHORT", { waId: id }));
     await setUserFullName(id, name);
     await setUserStatus(id, ST.WAIT_PRODUCT);
+    await trackFlowMetricSafe(trackTrialStarted, id, { step: ST.WAIT_PRODUCT });
     return reply(await msgAskProduct(id));
   }
 
@@ -4046,6 +4210,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     await setSelectedPlanCode(id, plan.code);
     await setUserPlan(id, plan.code);
     await markCheckoutInteraction(id, { started: true });
+    await trackFlowMetricSafe(trackPlanSelected, id, { planCode: plan.code, step: ST.WAIT_PLAN });
     await setUserStatus(id, ST.WAIT_BILLING_CYCLE);
 
     return reply(await msgAskBillingCycle(id, plan));
@@ -4076,6 +4241,11 @@ async function handleInboundTextCore({ waId, userId, text }) {
     });
     await setSelectedBillingCycle(id, billingCycle);
     await markCheckoutInteraction(id);
+    await trackFlowMetricSafe(trackBillingCycleSelected, id, {
+      planCode: plan.code,
+      billingCycle,
+      step: ST.WAIT_BILLING_CYCLE,
+    });
     await setUserStatus(id, ST.WAIT_COUPON_CODE);
     return reply(await msgAskCouponCode(id, plan, billingCycle));
   }
@@ -4091,6 +4261,14 @@ async function handleInboundTextCore({ waId, userId, text }) {
     const billingCycle = selection.billingCycle || "monthly";
 
     if (wantsNoCouponCommand(inbound)) {
+      if (selection.couponCode) {
+        await trackFlowMetricSafe(trackCouponRemoved, id, {
+          planCode: selection.planCode,
+          billingCycle,
+          couponCode: selection.couponCode,
+          step: ST.WAIT_COUPON_CODE,
+        });
+      }
       const prepared = await prepareCheckoutQuote(id, {
         planCode: selection.planCode,
         billingCycle,
@@ -4099,12 +4277,24 @@ async function handleInboundTextCore({ waId, userId, text }) {
       if (!prepared?.ok) {
         return reply(await msgCouponInvalid(id, prepared?.quote));
       }
+      await trackFlowMetricSafe(trackCheckoutStarted, id, {
+        planCode: selection.planCode,
+        billingCycle,
+        step: ST.WAIT_CHECKOUT_CONFIRMATION,
+      });
       await setUserStatus(id, ST.WAIT_CHECKOUT_CONFIRMATION);
       return reply(await msgCheckoutSummary(id, prepared.quote));
     }
 
     const couponCode = cleanText(inbound).toUpperCase();
     if (!couponCode) return reply(await msgAskCouponCode(id, selection.plan, billingCycle));
+
+    await trackFlowMetricSafe(trackCouponCodeEntered, id, {
+      planCode: selection.planCode,
+      billingCycle,
+      couponCode,
+      step: ST.WAIT_COUPON_CODE,
+    });
 
     const prepared = await prepareCheckoutQuote(id, {
       planCode: selection.planCode,
@@ -4113,8 +4303,27 @@ async function handleInboundTextCore({ waId, userId, text }) {
     });
 
     if (!prepared?.ok) {
+      await trackFlowMetricSafe(trackCouponRejected, id, {
+        planCode: selection.planCode,
+        billingCycle,
+        couponCode,
+        step: ST.WAIT_COUPON_CODE,
+      });
       return reply(await msgCouponInvalid(id, prepared?.quote));
     }
+
+    await trackFlowMetricSafe(trackCouponApplied, id, {
+      planCode: selection.planCode,
+      billingCycle,
+      couponCode,
+      step: ST.WAIT_COUPON_CODE,
+    });
+    await trackFlowMetricSafe(trackCheckoutStarted, id, {
+      planCode: selection.planCode,
+      billingCycle,
+      couponCode,
+      step: ST.WAIT_CHECKOUT_CONFIRMATION,
+    });
 
     await setUserStatus(id, ST.WAIT_CHECKOUT_CONFIRMATION);
     return reply(await msgCheckoutSummary(id, prepared.quote));
@@ -4133,6 +4342,12 @@ async function handleInboundTextCore({ waId, userId, text }) {
 
     if (wantsConfirmCheckoutCommand(inbound)) {
       await markCheckoutInteraction(id);
+      await trackFlowMetricSafe(trackCheckoutConfirmed, id, {
+        planCode: selection.planCode,
+        billingCycle: selection.billingCycle || quote?.billingCycle || "monthly",
+        couponCode: selection.couponCode || quote?.couponCode || "",
+        step: ST.WAIT_CHECKOUT_CONFIRMATION,
+      });
       await setUserStatus(id, ST.WAIT_PAYMENT_METHOD);
       return reply(await msgAskPaymentMethod(id, plan, quote));
     }
@@ -4257,6 +4472,13 @@ async function handleInboundTextCore({ waId, userId, text }) {
   // 7) Pagamento pendente
   if (status === ST.PAYMENT_PENDING) {
     if (wantsChangePaymentCommand(inbound)) {
+      const quote = await getStoredPricingQuote(id);
+      await trackFlowMetricSafe(trackPaymentAbandoned, id, {
+        planCode: quote?.planCode || (await getUserPlan(id)) || "",
+        billingCycle: quote?.billingCycle || "monthly",
+        couponCode: quote?.couponCode || "",
+        step: ST.PAYMENT_PENDING,
+      });
       const planCode = await getUserPlan(id);
       const plan = (await getMenuPlans()).find((p) => p.code === planCode) || null;
       if (!plan) {
@@ -4500,6 +4722,9 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     const used = await getUserTrialUsed(id);
     const trialLimit = await getTrialMaxDescriptions();
     if (creditsNeeded > 0 && used >= trialLimit) {
+      await trackFlowMetricSafe(trackTrialLimitReached, id, {
+        step: currentStatus || ST.TRIAL,
+      });
       await setUserStatus(id, ST.WAIT_PLAN);
       return replyMulti([
         await getCopyText("FLOW_PLAN_VALUE_REINFORCEMENT", { waId: id }),
@@ -4545,6 +4770,16 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     : detectAdIntentDecision({ text: userText, schema: resolvedSchema }).intentKey;
 
   // OpenAI
+  const alreadyUsedCredits = isTrial
+    ? Number(await getUserTrialUsed(id) || 0)
+    : Number(await getUserQuotaUsed(id) || 0);
+  const isFirstPaidGenerationAttempt = !isRefinement && creditsNeeded > 0 && alreadyUsedCredits === 0;
+  if (isFirstPaidGenerationAttempt) {
+    await trackFlowMetricSafe(trackFirstAdGenerationStarted, id, {
+      step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+    });
+  }
+
   let ad = "";
   try {
     const bizContext = buildBizProfileContext(bizProfile);
@@ -4604,6 +4839,20 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
   await markUserAdCreated(id);
   await setLastCampaignInteractionAt(id, nowIso());
+
+  if (isFirstPaidGenerationAttempt) {
+    await trackFlowMetricSafe(trackFirstAdGenerated, id, {
+      step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+    });
+  }
+  await trackFlowMetricSafe(trackAdGenerated, id, {
+    step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+  });
+  if (isRefinement) {
+    await trackFlowMetricSafe(trackAdRefined, id, {
+      step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+    });
+  }
 
   let formattedAd = enforceAdFormatting(ad);
   formattedAd = sanitizeGeneratedAd(formattedAd, bizProfile);
