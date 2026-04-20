@@ -16,6 +16,163 @@ import {
   redisType,
   redisUserKey,
 } from "./redis.js";
+import { trackStateError } from "./metrics.js";
+import * as audit from "./audit.js";
+
+
+const STATE_ERROR_CODE = Object.freeze({
+  READ: "STATE_READ_ERROR",
+  WRITE: "STATE_WRITE_ERROR",
+  PARSE: "STATE_PARSE_ERROR",
+  DELETE: "STATE_DELETE_ERROR",
+  INDEX: "STATE_INDEX_ERROR",
+  RUNTIME: "STATE_RUNTIME_ERROR",
+});
+
+async function logStateOperationalError({
+  userId = "",
+  key = "",
+  step = "",
+  errorCode = STATE_ERROR_CODE.RUNTIME,
+  error = null,
+  meta = null,
+  level = "warn",
+  event = "state_runtime_error",
+} = {}) {
+  const payload = {
+    module: "state",
+    level: safeStr(level) || "warn",
+    source: "state",
+    event: safeStr(event) || "state_runtime_error",
+    userId: safeStr(userId),
+    step: safeStr(step),
+    errorCode: safeStr(errorCode) || STATE_ERROR_CODE.RUNTIME,
+    message: safeStr(error?.message || error || ""),
+    meta: {
+      key: safeStr(key),
+      ...(meta && typeof meta === "object" && !Array.isArray(meta) ? meta : {}),
+    },
+  };
+
+  try {
+    if (typeof trackStateError === "function") {
+      await trackStateError({
+        userId: payload.userId,
+        waId: payload.userId,
+        source: "state",
+        step: payload.step || payload.meta.key || "state_runtime",
+        errorCode: payload.errorCode,
+      });
+    }
+  } catch (_) {}
+
+  try {
+    if (audit && typeof audit.logOperationalEvent === "function") {
+      await audit.logOperationalEvent(payload);
+      return;
+    }
+    if (audit && typeof audit.logRuntimeError === "function") {
+      await audit.logRuntimeError(payload);
+      return;
+    }
+  } catch (_) {}
+
+  console.warn(JSON.stringify({
+    level: payload.level,
+    source: "state",
+    event: payload.event,
+    userId: payload.userId,
+    step: payload.step,
+    errorCode: payload.errorCode,
+    message: payload.message,
+    meta: payload.meta,
+  }));
+}
+
+async function safeStateRedisGet(keyName, { userId = "", step = "", fallback = "" } = {}) {
+  try {
+    const value = await redisGet(keyName);
+    return value == null ? fallback : value;
+  } catch (error) {
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.READ,
+      error,
+      event: "state_read_failed",
+    });
+    return fallback;
+  }
+}
+
+async function safeStateRedisSet(keyName, value, { userId = "", step = "" } = {}) {
+  try {
+    await redisSet(keyName, value);
+    return true;
+  } catch (error) {
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.WRITE,
+      error,
+      event: "state_write_failed",
+    });
+    throw error;
+  }
+}
+
+async function safeStateRedisDel(keyName, { userId = "", step = "" } = {}) {
+  try {
+    await redisDel(keyName);
+    return true;
+  } catch (error) {
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.DELETE,
+      error,
+      event: "state_delete_failed",
+    });
+    throw error;
+  }
+}
+
+async function safeStateIndexUser(userRef, step = "index_user") {
+  try {
+    return await indexUser(userRef);
+  } catch (error) {
+    await logStateOperationalError({
+      userId: userRef,
+      key: USERS_INDEX_KEY,
+      step,
+      errorCode: STATE_ERROR_CODE.INDEX,
+      error,
+      event: "state_index_failed",
+    });
+    throw error;
+  }
+}
+
+function safeStateJsonParse(raw, fallback = null, { userId = "", key = "", step = "" } = {}) {
+  const s = safeStr(raw);
+  if (!s) return fallback;
+  try {
+    return JSON.parse(s);
+  } catch (error) {
+    void logStateOperationalError({
+      userId,
+      key,
+      step,
+      errorCode: STATE_ERROR_CODE.PARSE,
+      error,
+      event: "state_parse_failed",
+    });
+    return fallback;
+  }
+}
 
 /**
  * ✅ Estado do usuário (Redis)
@@ -683,38 +840,55 @@ export async function listUserIds() {
 
 // ===================== Status / Plan =====================
 export async function getUserStatus(waId) {
-  const v = await redisGet(keyStatus(waId));
+  const v = await safeStateRedisGet(keyStatus(waId), {
+    userId: waId,
+    key: keyStatus(waId),
+    step: "get_user_status",
+    fallback: "",
+  });
   return safeStr(v) || "TRIAL";
 }
 
 export async function setUserStatus(waId, status) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_user_status:index");
   const s = safeStr(status).toUpperCase();
-  await redisSet(keyStatus(waId), s);
+  await safeStateRedisSet(keyStatus(waId), s, {
+    userId: waId,
+    step: "set_user_status",
+  });
   return s;
 }
 
 export async function getUserPlan(waId) {
-  const v = await redisGet(keyPlan(waId));
+  const v = await safeStateRedisGet(keyPlan(waId), {
+    userId: waId,
+    key: keyPlan(waId),
+    step: "get_user_plan",
+    fallback: "",
+  });
   const normalized = normalizeMaybeJsonString(v);
-  // Se estiver vazio ou sujo, tratamos como sem plano
   const p = safeStr(normalized).toUpperCase();
   return p === '""' ? "" : p;
 }
 
 export async function setUserPlan(waId, planCode) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_user_plan:index");
 
   const normalized = normalizeMaybeJsonString(planCode);
   const p = safeStr(normalized).toUpperCase();
 
-  // ✅ V16.4.2: Sem plano => DEL (não SET "")
   if (!p || p === '""') {
-    await redisDel(keyPlan(waId));
+    await safeStateRedisDel(keyPlan(waId), {
+      userId: waId,
+      step: "set_user_plan:clear",
+    });
     return "";
   }
 
-  await redisSet(keyPlan(waId), p);
+  await safeStateRedisSet(keyPlan(waId), p, {
+    userId: waId,
+    step: "set_user_plan",
+  });
   return p;
 }
 
@@ -967,26 +1141,36 @@ async function migrateLegacyDocIfNeeded(waId) {
 
 // ===================== Payment Method =====================
 export async function getPaymentMethod(waId) {
-  const v = await redisGet(keyPaymentMethod(waId));
+  const v = await safeStateRedisGet(keyPaymentMethod(waId), {
+    userId: waId,
+    key: keyPaymentMethod(waId),
+    step: "get_payment_method",
+    fallback: "",
+  });
   const normalized = normalizeMaybeJsonString(v);
   const m = safeStr(normalized).toUpperCase();
   return m === "PIX" ? "PIX" : m === "CARD" ? "CARD" : "";
 }
 
 export async function setPaymentMethod(waId, method) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_payment_method:index");
 
   const normalized = normalizeMaybeJsonString(method);
   const m = safeStr(normalized).toUpperCase();
   const v = m === "PIX" ? "PIX" : m === "CARD" ? "CARD" : "";
 
-  // ✅ V16.4.2: Sem método => DEL (não SET "")
   if (!v) {
-    await redisDel(keyPaymentMethod(waId));
+    await safeStateRedisDel(keyPaymentMethod(waId), {
+      userId: waId,
+      step: "set_payment_method:clear",
+    });
     return "";
   }
 
-  await redisSet(keyPaymentMethod(waId), v);
+  await safeStateRedisSet(keyPaymentMethod(waId), v, {
+    userId: waId,
+    step: "set_payment_method",
+  });
   return v;
 }
 
@@ -999,17 +1183,28 @@ export async function clearPaymentMethod(waId) {
 
 // ===================== Dados fiscais (emissão de cobrança) =====================
 export async function getBillingCityState(waId) {
-  return safeStr(await redisGet(keyBillingCityState(waId)));
+  return safeStr(await safeStateRedisGet(keyBillingCityState(waId), {
+    userId: waId,
+    key: keyBillingCityState(waId),
+    step: "get_billing_city_state",
+    fallback: "",
+  }));
 }
 
 export async function setBillingCityState(waId, value) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_billing_city_state:index");
   const v = normalizeCityState(value);
   if (!v) {
-    await redisDel(keyBillingCityState(waId));
+    await safeStateRedisDel(keyBillingCityState(waId), {
+      userId: waId,
+      step: "set_billing_city_state:clear",
+    });
     return "";
   }
-  await redisSet(keyBillingCityState(waId), v);
+  await safeStateRedisSet(keyBillingCityState(waId), v, {
+    userId: waId,
+    step: "set_billing_city_state",
+  });
   return v;
 }
 
@@ -1020,18 +1215,29 @@ export async function clearBillingCityState(waId) {
 }
 
 export async function getBillingAddress(waId) {
-  return safeStr(await redisGet(keyBillingAddress(waId)));
+  return safeStr(await safeStateRedisGet(keyBillingAddress(waId), {
+    userId: waId,
+    key: keyBillingAddress(waId),
+    step: "get_billing_address",
+    fallback: "",
+  }));
 }
 
 export async function setBillingAddress(waId, value) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_billing_address:index");
   const raw = compactInnerWhitespace(value);
   const v = /^apenas\s+online$/i.test(raw) ? "APENAS ONLINE" : normalizeAddressText(raw);
   if (!v) {
-    await redisDel(keyBillingAddress(waId));
+    await safeStateRedisDel(keyBillingAddress(waId), {
+      userId: waId,
+      step: "set_billing_address:clear",
+    });
     return "";
   }
-  await redisSet(keyBillingAddress(waId), v);
+  await safeStateRedisSet(keyBillingAddress(waId), v, {
+    userId: waId,
+    step: "set_billing_address",
+  });
   return v;
 }
 
@@ -1043,34 +1249,56 @@ export async function clearBillingAddress(waId) {
 
 // ===================== Asaas IDs =====================
 export async function setAsaasCustomerId(waId, customerId) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_asaas_customer_id:index");
   const id = safeStr(customerId);
   if (!id) {
-    await redisDel(keyAsaasCustomerId(waId));
+    await safeStateRedisDel(keyAsaasCustomerId(waId), {
+      userId: waId,
+      step: "set_asaas_customer_id:clear",
+    });
     return "";
   }
-  await redisSet(keyAsaasCustomerId(waId), id);
+  await safeStateRedisSet(keyAsaasCustomerId(waId), id, {
+    userId: waId,
+    step: "set_asaas_customer_id",
+  });
   return id;
 }
 
 export async function getAsaasCustomerId(waId) {
-  const v = await redisGet(keyAsaasCustomerId(waId));
+  const v = await safeStateRedisGet(keyAsaasCustomerId(waId), {
+    userId: waId,
+    key: keyAsaasCustomerId(waId),
+    step: "get_asaas_customer_id",
+    fallback: "",
+  });
   return safeStr(v);
 }
 
 export async function setAsaasSubscriptionId(waId, subId) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_asaas_subscription_id:index");
   const id = safeStr(subId);
   if (!id) {
-    await redisDel(keyAsaasSubscriptionId(waId));
+    await safeStateRedisDel(keyAsaasSubscriptionId(waId), {
+      userId: waId,
+      step: "set_asaas_subscription_id:clear",
+    });
     return "";
   }
-  await redisSet(keyAsaasSubscriptionId(waId), id);
+  await safeStateRedisSet(keyAsaasSubscriptionId(waId), id, {
+    userId: waId,
+    step: "set_asaas_subscription_id",
+  });
   return id;
 }
 
 export async function getAsaasSubscriptionId(waId) {
-  const v = await redisGet(keyAsaasSubscriptionId(waId));
+  const v = await safeStateRedisGet(keyAsaasSubscriptionId(waId), {
+    userId: waId,
+    key: keyAsaasSubscriptionId(waId),
+    step: "get_asaas_subscription_id",
+    fallback: "",
+  });
   return safeStr(v);
 }
 
@@ -1099,19 +1327,34 @@ export async function clearMenuPrevStatus(waId) {
 }
 
 export async function setMenuEditContext(waId, context) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_menu_edit_context:index");
   const payload = context && typeof context === "object" ? context : {};
   if (!Object.keys(payload).length) {
-    await redisDel(keyMenuEditContext(waId));
+    await safeStateRedisDel(keyMenuEditContext(waId), {
+      userId: waId,
+      step: "set_menu_edit_context:clear",
+    });
     return null;
   }
-  await redisSet(keyMenuEditContext(waId), safeJsonStringify(payload));
+  await safeStateRedisSet(keyMenuEditContext(waId), safeJsonStringify(payload), {
+    userId: waId,
+    step: "set_menu_edit_context",
+  });
   return payload;
 }
 
 export async function getMenuEditContext(waId) {
-  const raw = await redisGet(keyMenuEditContext(waId));
-  const parsed = safeJsonParse(raw);
+  const raw = await safeStateRedisGet(keyMenuEditContext(waId), {
+    userId: waId,
+    key: keyMenuEditContext(waId),
+    step: "get_menu_edit_context:read",
+    fallback: "",
+  });
+  const parsed = safeStateJsonParse(raw, null, {
+    userId: waId,
+    key: keyMenuEditContext(waId),
+    step: "get_menu_edit_context:parse",
+  });
   return parsed && typeof parsed === "object" ? parsed : null;
 }
 
@@ -1147,80 +1390,141 @@ export async function clearPrevStatus(waId) {
 
 // ===================== Biz Profile (salvo) =====================
 export async function getBizProfile(waId) {
-  const raw = await redisGet(keyBizProfile(waId));
-  const obj = safeJsonParse(raw);
+  const raw = await safeStateRedisGet(keyBizProfile(waId), {
+    userId: waId,
+    key: keyBizProfile(waId),
+    step: "get_biz_profile:read",
+    fallback: "",
+  });
+  const obj = safeStateJsonParse(raw, null, {
+    userId: waId,
+    key: keyBizProfile(waId),
+    step: "get_biz_profile:parse",
+  });
   return obj && typeof obj === "object" ? obj : null;
 }
 
 export async function setBizProfile(waId, profileObj) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_biz_profile:index");
   const normalized = normalizeBizProfileData(profileObj);
   const s = safeJsonStringify(normalized);
-  await redisSet(keyBizProfile(waId), s);
+  await safeStateRedisSet(keyBizProfile(waId), s, {
+    userId: waId,
+    step: "set_biz_profile",
+  });
   return true;
 }
 
 export async function clearBizProfile(waId) {
-  await indexUser(waId);
-  await redisDel(keyBizProfile(waId));
+  await safeStateIndexUser(waId, "clear_biz_profile:index");
+  await safeStateRedisDel(keyBizProfile(waId), {
+    userId: waId,
+    step: "clear_biz_profile",
+  });
   return true;
 }
 
 // ===================== Biz Profile (pendente) =====================
 export async function getPendingBizProfile(waId) {
-  const raw = await redisGet(keyPendingBizProfile(waId));
-  const obj = safeJsonParse(raw);
+  const raw = await safeStateRedisGet(keyPendingBizProfile(waId), {
+    userId: waId,
+    key: keyPendingBizProfile(waId),
+    step: "get_pending_biz_profile:read",
+    fallback: "",
+  });
+  const obj = safeStateJsonParse(raw, null, {
+    userId: waId,
+    key: keyPendingBizProfile(waId),
+    step: "get_pending_biz_profile:parse",
+  });
   return obj && typeof obj === "object" ? obj : null;
 }
 
 export async function setPendingBizProfile(waId, profileObj) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_pending_biz_profile:index");
   const normalized = normalizeBizProfileData(profileObj);
   const s = safeJsonStringify(normalized);
-  await redisSet(keyPendingBizProfile(waId), s);
+  await safeStateRedisSet(keyPendingBizProfile(waId), s, {
+    userId: waId,
+    step: "set_pending_biz_profile",
+  });
   return true;
 }
 
 export async function clearPendingBizProfile(waId) {
-  await indexUser(waId);
-  await redisDel(keyPendingBizProfile(waId));
+  await safeStateIndexUser(waId, "clear_pending_biz_profile:index");
+  await safeStateRedisDel(keyPendingBizProfile(waId), {
+    userId: waId,
+    step: "clear_pending_biz_profile",
+  });
   return true;
 }
 
 // ===================== Ad Session (anúncio atual) =====================
 export async function getCurrentAdSession(waId) {
-  const raw = await redisGet(keyCurrentAdSession(waId));
-  const obj = safeJsonParse(raw);
+  const raw = await safeStateRedisGet(keyCurrentAdSession(waId), {
+    userId: waId,
+    key: keyCurrentAdSession(waId),
+    step: "get_current_ad_session:read",
+    fallback: "",
+  });
+  const obj = safeStateJsonParse(raw, null, {
+    userId: waId,
+    key: keyCurrentAdSession(waId),
+    step: "get_current_ad_session:parse",
+  });
   return obj && typeof obj === "object" ? obj : null;
 }
 
 export async function setCurrentAdSession(waId, sessionObj) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_current_ad_session:index");
   const s = safeJsonStringify(sessionObj);
-  await redisSet(keyCurrentAdSession(waId), s);
+  await safeStateRedisSet(keyCurrentAdSession(waId), s, {
+    userId: waId,
+    step: "set_current_ad_session",
+  });
   return true;
 }
 
 export async function clearCurrentAdSession(waId) {
-  await indexUser(waId);
-  await redisDel(keyCurrentAdSession(waId));
+  await safeStateIndexUser(waId, "clear_current_ad_session:index");
+  await safeStateRedisDel(keyCurrentAdSession(waId), {
+    userId: waId,
+    step: "clear_current_ad_session",
+  });
   return true;
 }
 
 // ===================== Checkout / Coupon =====================
 export async function getCheckoutDraft(waId) {
-  const parsed = safeJsonParse(await redisGet(keyCheckoutDraft(waId)));
+  const raw = await safeStateRedisGet(keyCheckoutDraft(waId), {
+    userId: waId,
+    key: keyCheckoutDraft(waId),
+    step: "get_checkout_draft:read",
+    fallback: "",
+  });
+  const parsed = safeStateJsonParse(raw, null, {
+    userId: waId,
+    key: keyCheckoutDraft(waId),
+    step: "get_checkout_draft:parse",
+  });
   return normalizeCheckoutDraft(parsed);
 }
 
 export async function setCheckoutDraft(waId, draftObj) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_checkout_draft:index");
   const normalized = normalizeCheckoutDraft(draftObj);
   if (!normalized) {
-    await redisDel(keyCheckoutDraft(waId));
+    await safeStateRedisDel(keyCheckoutDraft(waId), {
+      userId: waId,
+      step: "set_checkout_draft:clear",
+    });
     return null;
   }
-  await redisSet(keyCheckoutDraft(waId), safeJsonStringify(normalized));
+  await safeStateRedisSet(keyCheckoutDraft(waId), safeJsonStringify(normalized), {
+    userId: waId,
+    step: "set_checkout_draft",
+  });
   return normalized;
 }
 
@@ -1231,17 +1535,28 @@ export async function clearCheckoutDraft(waId) {
 }
 
 export async function getSelectedPlanCode(waId) {
-  return normalizePlanCode(await redisGet(keySelectedPlanCode(waId)));
+  return normalizePlanCode(await safeStateRedisGet(keySelectedPlanCode(waId), {
+    userId: waId,
+    key: keySelectedPlanCode(waId),
+    step: "get_selected_plan_code",
+    fallback: "",
+  }));
 }
 
 export async function setSelectedPlanCode(waId, planCode) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_selected_plan_code:index");
   const normalized = normalizePlanCode(planCode);
   if (!normalized) {
-    await redisDel(keySelectedPlanCode(waId));
+    await safeStateRedisDel(keySelectedPlanCode(waId), {
+      userId: waId,
+      step: "set_selected_plan_code:clear",
+    });
     return "";
   }
-  await redisSet(keySelectedPlanCode(waId), normalized);
+  await safeStateRedisSet(keySelectedPlanCode(waId), normalized, {
+    userId: waId,
+    step: "set_selected_plan_code",
+  });
   return normalized;
 }
 
@@ -1252,17 +1567,28 @@ export async function clearSelectedPlanCode(waId) {
 }
 
 export async function getSelectedBillingCycle(waId) {
-  return normalizeBillingCycle(await redisGet(keySelectedBillingCycle(waId)));
+  return normalizeBillingCycle(await safeStateRedisGet(keySelectedBillingCycle(waId), {
+    userId: waId,
+    key: keySelectedBillingCycle(waId),
+    step: "get_selected_billing_cycle",
+    fallback: "",
+  }));
 }
 
 export async function setSelectedBillingCycle(waId, billingCycle) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_selected_billing_cycle:index");
   const normalized = normalizeBillingCycle(billingCycle);
   if (!normalized) {
-    await redisDel(keySelectedBillingCycle(waId));
+    await safeStateRedisDel(keySelectedBillingCycle(waId), {
+      userId: waId,
+      step: "set_selected_billing_cycle:clear",
+    });
     return "";
   }
-  await redisSet(keySelectedBillingCycle(waId), normalized);
+  await safeStateRedisSet(keySelectedBillingCycle(waId), normalized, {
+    userId: waId,
+    step: "set_selected_billing_cycle",
+  });
   return normalized;
 }
 
@@ -1273,17 +1599,28 @@ export async function clearSelectedBillingCycle(waId) {
 }
 
 export async function getSelectedCouponCode(waId) {
-  return normalizeCouponCode(await redisGet(keySelectedCouponCode(waId)));
+  return normalizeCouponCode(await safeStateRedisGet(keySelectedCouponCode(waId), {
+    userId: waId,
+    key: keySelectedCouponCode(waId),
+    step: "get_selected_coupon_code",
+    fallback: "",
+  }));
 }
 
 export async function setSelectedCouponCode(waId, couponCode) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_selected_coupon_code:index");
   const normalized = normalizeCouponCode(couponCode);
   if (!normalized) {
-    await redisDel(keySelectedCouponCode(waId));
+    await safeStateRedisDel(keySelectedCouponCode(waId), {
+      userId: waId,
+      step: "set_selected_coupon_code:clear",
+    });
     return "";
   }
-  await redisSet(keySelectedCouponCode(waId), normalized);
+  await safeStateRedisSet(keySelectedCouponCode(waId), normalized, {
+    userId: waId,
+    step: "set_selected_coupon_code",
+  });
   return normalized;
 }
 
@@ -1294,18 +1631,34 @@ export async function clearSelectedCouponCode(waId) {
 }
 
 export async function getPricingQuote(waId) {
-  const parsed = safeJsonParse(await redisGet(keyPricingQuote(waId)));
+  const raw = await safeStateRedisGet(keyPricingQuote(waId), {
+    userId: waId,
+    key: keyPricingQuote(waId),
+    step: "get_pricing_quote:read",
+    fallback: "",
+  });
+  const parsed = safeStateJsonParse(raw, null, {
+    userId: waId,
+    key: keyPricingQuote(waId),
+    step: "get_pricing_quote:parse",
+  });
   return normalizePricingQuote(parsed);
 }
 
 export async function setPricingQuote(waId, pricingQuote) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_pricing_quote:index");
   const normalized = normalizePricingQuote(pricingQuote);
   if (!normalized) {
-    await redisDel(keyPricingQuote(waId));
+    await safeStateRedisDel(keyPricingQuote(waId), {
+      userId: waId,
+      step: "set_pricing_quote:clear",
+    });
     return null;
   }
-  await redisSet(keyPricingQuote(waId), safeJsonStringify(normalized));
+  await safeStateRedisSet(keyPricingQuote(waId), safeJsonStringify(normalized), {
+    userId: waId,
+    step: "set_pricing_quote",
+  });
   return normalized;
 }
 
@@ -1316,17 +1669,28 @@ export async function clearPricingQuote(waId) {
 }
 
 export async function getCouponReservationId(waId) {
-  return safeStr(await redisGet(keyCouponReservationId(waId)));
+  return safeStr(await safeStateRedisGet(keyCouponReservationId(waId), {
+    userId: waId,
+    key: keyCouponReservationId(waId),
+    step: "get_coupon_reservation_id",
+    fallback: "",
+  }));
 }
 
 export async function setCouponReservationId(waId, reservationId) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_coupon_reservation_id:index");
   const normalized = safeStr(reservationId);
   if (!normalized) {
-    await redisDel(keyCouponReservationId(waId));
+    await safeStateRedisDel(keyCouponReservationId(waId), {
+      userId: waId,
+      step: "set_coupon_reservation_id:clear",
+    });
     return "";
   }
-  await redisSet(keyCouponReservationId(waId), normalized);
+  await safeStateRedisSet(keyCouponReservationId(waId), normalized, {
+    userId: waId,
+    step: "set_coupon_reservation_id",
+  });
   return normalized;
 }
 
@@ -1337,13 +1701,21 @@ export async function clearCouponReservationId(waId) {
 }
 
 export async function getCouponReservationCreatedAt(waId) {
-  return normalizeIsoTimestamp(await redisGet(keyCouponReservationCreatedAt(waId)));
+  return normalizeIsoTimestamp(await safeStateRedisGet(keyCouponReservationCreatedAt(waId), {
+    userId: waId,
+    key: keyCouponReservationCreatedAt(waId),
+    step: "get_coupon_reservation_created_at",
+    fallback: "",
+  }));
 }
 
 export async function setCouponReservationCreatedAt(waId, isoTs) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_coupon_reservation_created_at:index");
   const normalized = normalizeIsoTimestamp(isoTs || new Date().toISOString()) || new Date().toISOString();
-  await redisSet(keyCouponReservationCreatedAt(waId), normalized);
+  await safeStateRedisSet(keyCouponReservationCreatedAt(waId), normalized, {
+    userId: waId,
+    step: "set_coupon_reservation_created_at",
+  });
   return normalized;
 }
 
@@ -1354,17 +1726,28 @@ export async function clearCouponReservationCreatedAt(waId) {
 }
 
 export async function getCheckoutCouponStatus(waId) {
-  return normalizeCheckoutCouponStatus(await redisGet(keyCheckoutCouponStatus(waId)));
+  return normalizeCheckoutCouponStatus(await safeStateRedisGet(keyCheckoutCouponStatus(waId), {
+    userId: waId,
+    key: keyCheckoutCouponStatus(waId),
+    step: "get_checkout_coupon_status",
+    fallback: "",
+  }));
 }
 
 export async function setCheckoutCouponStatus(waId, status) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_checkout_coupon_status:index");
   const normalized = normalizeCheckoutCouponStatus(status);
   if (!normalized) {
-    await redisDel(keyCheckoutCouponStatus(waId));
+    await safeStateRedisDel(keyCheckoutCouponStatus(waId), {
+      userId: waId,
+      step: "set_checkout_coupon_status:clear",
+    });
     return "";
   }
-  await redisSet(keyCheckoutCouponStatus(waId), normalized);
+  await safeStateRedisSet(keyCheckoutCouponStatus(waId), normalized, {
+    userId: waId,
+    step: "set_checkout_coupon_status",
+  });
   return normalized;
 }
 
@@ -1375,74 +1758,137 @@ export async function clearCheckoutCouponStatus(waId) {
 }
 
 export async function resetCheckoutCouponState(waId) {
-  await indexUser(waId);
-  await Promise.all([
-    clearCheckoutDraft(waId),
-    clearSelectedPlanCode(waId),
-    clearSelectedBillingCycle(waId),
-    clearSelectedCouponCode(waId),
-    clearPricingQuote(waId),
-    clearCouponReservationId(waId),
-    clearCouponReservationCreatedAt(waId),
-    clearCheckoutCouponStatus(waId),
-  ]);
+  await safeStateIndexUser(waId, "reset_checkout_coupon_state:index");
+
+  const jobs = [
+    ["checkout_draft", () => clearCheckoutDraft(waId)],
+    ["selected_plan_code", () => clearSelectedPlanCode(waId)],
+    ["selected_billing_cycle", () => clearSelectedBillingCycle(waId)],
+    ["selected_coupon_code", () => clearSelectedCouponCode(waId)],
+    ["pricing_quote", () => clearPricingQuote(waId)],
+    ["coupon_reservation_id", () => clearCouponReservationId(waId)],
+    ["coupon_reservation_created_at", () => clearCouponReservationCreatedAt(waId)],
+    ["checkout_coupon_status", () => clearCheckoutCouponStatus(waId)],
+  ];
+
+  const results = await Promise.allSettled(jobs.map(([, run]) => run()));
+  const failures = results
+    .map((result, index) => ({ result, key: jobs[index][0] }))
+    .filter(({ result }) => result.status === "rejected");
+
+  if (failures.length) {
+    await logStateOperationalError({
+      userId: waId,
+      key: "checkout_coupon_state",
+      step: "reset_checkout_coupon_state",
+      errorCode: STATE_ERROR_CODE.RUNTIME,
+      error: failures[0].result.reason,
+      event: "state_reset_partial_failure",
+      meta: {
+        failedKeys: failures.map((item) => item.key),
+        failureCount: failures.length,
+      },
+    });
+    throw failures[0].result.reason;
+  }
+
   return true;
 }
 
 // ===================== Card Validity / Cancel =====================
 export async function setCardValidUntil(waId, isoDate) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_card_valid_until:index");
   const d = safeStr(isoDate);
   if (!d) {
-    await redisDel(keyCardValidUntil(waId));
+    await safeStateRedisDel(keyCardValidUntil(waId), {
+      userId: waId,
+      step: "set_card_valid_until:clear",
+    });
     return "";
   }
-  // formato esperado: YYYY-MM-DD (não validar pesado aqui)
-  await redisSet(keyCardValidUntil(waId), d);
+  await safeStateRedisSet(keyCardValidUntil(waId), d, {
+    userId: waId,
+    step: "set_card_valid_until",
+  });
   return d;
 }
 
 export async function getCardValidUntil(waId) {
-  const v = await redisGet(keyCardValidUntil(waId));
+  const v = await safeStateRedisGet(keyCardValidUntil(waId), {
+    userId: waId,
+    key: keyCardValidUntil(waId),
+    step: "get_card_valid_until",
+    fallback: "",
+  });
   return safeStr(v);
 }
 
 export async function setCardCanceledAt(waId, isoTs) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_card_canceled_at:index");
   const ts = safeStr(isoTs);
   if (!ts) {
-    await redisDel(keyCardCanceledAt(waId));
+    await safeStateRedisDel(keyCardCanceledAt(waId), {
+      userId: waId,
+      step: "set_card_canceled_at:clear",
+    });
     return "";
   }
-  await redisSet(keyCardCanceledAt(waId), ts);
+  await safeStateRedisSet(keyCardCanceledAt(waId), ts, {
+    userId: waId,
+    step: "set_card_canceled_at",
+  });
   return ts;
 }
 
 export async function getCardCanceledAt(waId) {
-  const v = await redisGet(keyCardCanceledAt(waId));
+  const v = await safeStateRedisGet(keyCardCanceledAt(waId), {
+    userId: waId,
+    key: keyCardCanceledAt(waId),
+    step: "get_card_canceled_at",
+    fallback: "",
+  });
   return safeStr(v);
 }
 
 // ===================== Activity / Growth Meta =====================
 export async function getActivityMeta(waId) {
-  const parsed = safeJsonParse(await redisGet(keyActivityMeta(waId)));
+  const raw = await safeStateRedisGet(keyActivityMeta(waId), {
+    userId: waId,
+    key: keyActivityMeta(waId),
+    step: "get_activity_meta:read",
+    fallback: "",
+  });
+  const parsed = safeStateJsonParse(raw, null, {
+    userId: waId,
+    key: keyActivityMeta(waId),
+    step: "get_activity_meta:parse",
+  });
   return normalizeActivityMeta(parsed);
 }
 
 export async function setActivityMeta(waId, metaObj) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_activity_meta:index");
   const normalized = normalizeActivityMeta(metaObj);
   if (!Object.keys(normalized).length) {
-    await redisDel(keyActivityMeta(waId));
+    await safeStateRedisDel(keyActivityMeta(waId), {
+      userId: waId,
+      step: "set_activity_meta:clear",
+    });
     return {};
   }
-  await redisSet(keyActivityMeta(waId), safeJsonStringify(normalized));
+  await safeStateRedisSet(keyActivityMeta(waId), safeJsonStringify(normalized), {
+    userId: waId,
+    step: "set_activity_meta",
+  });
   return normalized;
 }
 
 export async function clearActivityMeta(waId) {
-  await indexUser(waId);
-  await redisDel(keyActivityMeta(waId));
+  await safeStateIndexUser(waId, "clear_activity_meta:index");
+  await safeStateRedisDel(keyActivityMeta(waId), {
+    userId: waId,
+    step: "clear_activity_meta",
+  });
   return true;
 }
 
@@ -1600,24 +2046,43 @@ export async function clearPostAdIdleReminder(waId) {
 }
 
 export async function getGrowthMeta(waId) {
-  const parsed = safeJsonParse(await redisGet(keyGrowthMeta(waId)));
+  const raw = await safeStateRedisGet(keyGrowthMeta(waId), {
+    userId: waId,
+    key: keyGrowthMeta(waId),
+    step: "get_growth_meta:read",
+    fallback: "",
+  });
+  const parsed = safeStateJsonParse(raw, null, {
+    userId: waId,
+    key: keyGrowthMeta(waId),
+    step: "get_growth_meta:parse",
+  });
   return normalizeGrowthMeta(parsed);
 }
 
 export async function setGrowthMeta(waId, metaObj) {
-  await indexUser(waId);
+  await safeStateIndexUser(waId, "set_growth_meta:index");
   const normalized = normalizeGrowthMeta(metaObj);
   if (!Object.keys(normalized).length) {
-    await redisDel(keyGrowthMeta(waId));
+    await safeStateRedisDel(keyGrowthMeta(waId), {
+      userId: waId,
+      step: "set_growth_meta:clear",
+    });
     return {};
   }
-  await redisSet(keyGrowthMeta(waId), safeJsonStringify(normalized));
+  await safeStateRedisSet(keyGrowthMeta(waId), safeJsonStringify(normalized), {
+    userId: waId,
+    step: "set_growth_meta",
+  });
   return normalized;
 }
 
 export async function clearGrowthMeta(waId) {
-  await indexUser(waId);
-  await redisDel(keyGrowthMeta(waId));
+  await safeStateIndexUser(waId, "clear_growth_meta:index");
+  await safeStateRedisDel(keyGrowthMeta(waId), {
+    userId: waId,
+    step: "clear_growth_meta",
+  });
   return true;
 }
 
