@@ -21,6 +21,13 @@ import { sendWhatsAppText } from "../meta/whatsapp.js";
 import { recordAsaasEvent } from "./ledger.js";
 import { getPreferredOutboundRecipient } from "../identity.js";
 import {
+  trackPaymentConfirmed,
+  trackPaymentFailed,
+  trackPaymentExpired,
+  trackSubscriptionActivated,
+  trackPlanActivated,
+} from "../metrics.js";
+import {
   confirmCouponReservation,
   releaseCouponReservation,
   failCouponReservation,
@@ -44,6 +51,43 @@ function normalizeCents(value) {
 function normalizeAppliesTo(value) {
   const text = safeStr(value).toLowerCase();
   return text === "entire_subscription" ? "entire_subscription" : "first_charge_only";
+}
+
+function buildWebhookTrackingContext({
+  userId = "",
+  payment = null,
+  subscription = null,
+  storedQuote = null,
+  step = "",
+} = {}) {
+  const quote = pickQuoteForLedger(storedQuote || {}, userId);
+  return {
+    userId: safeStr(userId),
+    waId: safeStr(userId),
+    paymentId: safeStr(payment?.id),
+    subscriptionId: safeStr(subscription?.id),
+    planCode: safeStr(quote?.planCode),
+    billingCycle: safeStr(quote?.billingCycle),
+    couponCode: safeStr(quote?.couponCode),
+    source: "asaas_webhook",
+    step: safeStr(step),
+  };
+}
+
+async function emitWebhookMetricSafe(metricFn, payload = {}) {
+  if (typeof metricFn !== "function") return null;
+  try {
+    return await metricFn(payload);
+  } catch (err) {
+    console.error("[ASAAS_WEBHOOK_TRACKING_ERROR]", {
+      metric: safeStr(metricFn?.name),
+      userId: safeStr(payload?.userId || payload?.waId),
+      paymentId: safeStr(payload?.paymentId),
+      subscriptionId: safeStr(payload?.subscriptionId),
+      message: err?.message || String(err),
+    });
+    return null;
+  }
 }
 
 function pickQuoteForLedger(quote = {}, userId = "") {
@@ -262,6 +306,14 @@ export async function handleAsaasWebhookEvent(body) {
         storedQuote,
       });
 
+      const trackingContext = buildWebhookTrackingContext({
+        userId,
+        payment,
+        subscription,
+        storedQuote,
+        step: safeStr(event).toLowerCase(),
+      });
+
       const plan = await getUserPlan(userId);
 
       if (!plan) {
@@ -278,6 +330,12 @@ export async function handleAsaasWebhookEvent(body) {
         getBillingCityState(userId),
         getBillingAddress(userId),
       ]);
+
+      await emitWebhookMetricSafe(trackPaymentConfirmed, trackingContext);
+      if (trackingContext.subscriptionId) {
+        await emitWebhookMetricSafe(trackSubscriptionActivated, trackingContext);
+      }
+      await emitWebhookMetricSafe(trackPlanActivated, trackingContext);
 
       if (!billingCityState) {
         await setPrevStatus(userId, "ACTIVE");
@@ -351,6 +409,17 @@ export async function handleAsaasWebhookEvent(body) {
         storedQuote,
       });
 
+      await emitWebhookMetricSafe(
+        trackPaymentFailed,
+        buildWebhookTrackingContext({
+          userId,
+          payment,
+          subscription,
+          storedQuote,
+          step: safeStr(event).toLowerCase(),
+        })
+      );
+
       await setUserStatus(userId, "WAIT_PAYMENT_RECOVERY");
       await sendCopyText(
         userId,
@@ -390,6 +459,17 @@ export async function handleAsaasWebhookEvent(body) {
         couponFinalize,
         storedQuote,
       });
+
+      await emitWebhookMetricSafe(
+        trackPaymentExpired,
+        buildWebhookTrackingContext({
+          userId,
+          payment,
+          subscription,
+          storedQuote,
+          step: safeStr(event).toLowerCase(),
+        })
+      );
 
       await setUserStatus(userId, "PAYMENT_PENDING");
 
