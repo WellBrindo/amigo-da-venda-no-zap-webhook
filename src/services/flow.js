@@ -5349,9 +5349,6 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
 // -------------------- Asaas helpers --------------------
 async function ensureAsaasCustomer({ waId, fullName, cpfCnpj }) {
-
-// -------------------- Asaas helpers --------------------
-async function ensureAsaasCustomer({ waId, fullName, cpfCnpj }) {
   let existing = "";
   try {
     existing = await getAsaasCustomerId(waId);
