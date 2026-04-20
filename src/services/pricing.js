@@ -7,6 +7,7 @@
 
 import { getPlan, getPlanBillingOption, formatBRLFromCents } from "./plans.js";
 import { getCoupon, validateCouponEligibility } from "./coupons.js";
+import { trackPricingQuoteGenerated, trackPricingError } from "./metrics.js";
 
 const BILLING_CYCLES = Object.freeze(["monthly", "annual"]);
 const APPLIES_TO = Object.freeze({
@@ -71,6 +72,109 @@ function cloneCalculation(calc = {}) {
     discountAmountCentsConfigured: normalizeCurrencyCents(calc.discountAmountCentsConfigured),
     discountCapCents: calc.discountCapCents == null ? null : normalizeCurrencyCents(calc.discountCapCents),
   };
+}
+
+const PRICING_TRACKING_MODE = Object.freeze({
+  NONE: "none",
+  PREVIEW: "preview",
+  CHECKOUT: "checkout",
+  INTERNAL: "internal",
+});
+
+export const PRICING_TRACKING_MODE_VALUES = PRICING_TRACKING_MODE;
+
+function normalizePricingTrackingMode(value) {
+  const mode = safeStr(value).toLowerCase();
+  if (mode === PRICING_TRACKING_MODE.PREVIEW) return PRICING_TRACKING_MODE.PREVIEW;
+  if (mode === PRICING_TRACKING_MODE.CHECKOUT) return PRICING_TRACKING_MODE.CHECKOUT;
+  if (mode === PRICING_TRACKING_MODE.INTERNAL) return PRICING_TRACKING_MODE.INTERNAL;
+  return PRICING_TRACKING_MODE.NONE;
+}
+
+function resolvePricingTrackingMode({ trackingMode = "", trackMetrics = false, source = "pricing" } = {}) {
+  const explicit = normalizePricingTrackingMode(trackingMode);
+  if (explicit !== PRICING_TRACKING_MODE.NONE) return explicit;
+
+  const normalizedSource = safeStr(source).toLowerCase();
+  if (normalizedSource === "pricing_preview") return PRICING_TRACKING_MODE.PREVIEW;
+  if (normalizedSource === "pricing_matrix") return PRICING_TRACKING_MODE.INTERNAL;
+  if (["pricing_checkout", "checkout", "flow", "flow_checkout", "asaas_client", "asaas_checkout"].includes(normalizedSource)) {
+    return PRICING_TRACKING_MODE.CHECKOUT;
+  }
+  if (trackMetrics) return PRICING_TRACKING_MODE.CHECKOUT;
+  return PRICING_TRACKING_MODE.NONE;
+}
+
+function shouldEmitOfficialPricingTracking(mode) {
+  return normalizePricingTrackingMode(mode) === PRICING_TRACKING_MODE.CHECKOUT;
+}
+
+function buildPricingTrackingContext({
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "monthly",
+  couponCode = "",
+  source = "pricing",
+  step = "",
+} = {}) {
+  return {
+    userId: safeStr(internalUserId),
+    waId: safeStr(internalUserId),
+    planCode: normalizePlanCode(planCode),
+    billingCycle: normalizeBillingCycle(billingCycle, { fallback: "monthly" }),
+    couponCode: normalizeCouponCode(couponCode),
+    source: safeStr(source) || "pricing",
+    step: safeStr(step),
+  };
+}
+
+async function emitPricingMetricSafe(metricFn, payload = {}) {
+  if (typeof metricFn !== "function") return { ok: false, skipped: true, error: "metric_fn_missing" };
+  try {
+    return await metricFn(payload);
+  } catch {
+    return { ok: false, skipped: true, error: "metric_emit_failed" };
+  }
+}
+
+async function maybeTrackPricingError({
+  trackingMode = PRICING_TRACKING_MODE.NONE,
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "monthly",
+  couponCode = "",
+  step = "",
+  source = "pricing",
+} = {}) {
+  if (!shouldEmitOfficialPricingTracking(trackingMode)) return { ok: true, skipped: true };
+  return emitPricingMetricSafe(trackPricingError, buildPricingTrackingContext({
+    internalUserId,
+    planCode,
+    billingCycle,
+    couponCode,
+    source,
+    step,
+  }));
+}
+
+async function maybeTrackPricingQuoteGenerated({
+  trackingMode = PRICING_TRACKING_MODE.NONE,
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "monthly",
+  couponCode = "",
+  step = "",
+  source = "pricing",
+} = {}) {
+  if (!shouldEmitOfficialPricingTracking(trackingMode)) return { ok: true, skipped: true };
+  return emitPricingMetricSafe(trackPricingQuoteGenerated, buildPricingTrackingContext({
+    internalUserId,
+    planCode,
+    billingCycle,
+    couponCode,
+    source,
+    step,
+  }));
 }
 
 function buildFailure(code, message, extra = {}) {
@@ -156,7 +260,7 @@ function buildPricingExplanation({
   };
 }
 
-export async function getBasePlanPricing({ planCode = "", billingCycle = "monthly" } = {}) {
+export async function getBasePlanPricing({ planCode = "", billingCycle = "monthly", trackMetrics = false, trackingMode = "", source = "pricing" } = {}) {
   const normalizedPlanCode = normalizePlanCode(planCode);
   const normalizedBillingCycle = normalizeBillingCycle(billingCycle);
 
@@ -193,7 +297,7 @@ export async function getBasePlanPricing({ planCode = "", billingCycle = "monthl
     discountCapCents: null,
   });
 
-  return buildSuccess({
+  const result = buildSuccess({
     quoteType: "base",
     internalUserId: "",
     planCode: normalizedPlanCode,
@@ -217,6 +321,12 @@ export async function getBasePlanPricing({ planCode = "", billingCycle = "monthl
       calculation,
     }),
   });
+
+  void trackMetrics;
+  void trackingMode;
+  void source;
+
+  return result;
 }
 
 export async function buildPricingQuote({
@@ -224,18 +334,38 @@ export async function buildPricingQuote({
   planCode = "",
   billingCycle = "monthly",
   couponCode = "",
+  trackMetrics = false,
+  trackingMode = "",
+  source = "pricing",
 } = {}) {
   const normalizedInternalUserId = safeStr(internalUserId);
   const normalizedPlanCode = normalizePlanCode(planCode);
   const normalizedBillingCycle = normalizeBillingCycle(billingCycle);
   const normalizedCouponCode = normalizeCouponCode(couponCode);
+  const resolvedTrackingMode = resolvePricingTrackingMode({ trackingMode, trackMetrics, source });
 
   const baseQuote = await getBasePlanPricing({
     planCode: normalizedPlanCode,
     billingCycle: normalizedBillingCycle,
+    trackMetrics: false,
+    trackingMode: PRICING_TRACKING_MODE.NONE,
+    source,
   });
 
   if (!baseQuote.ok) {
+    await maybeTrackPricingError({
+      trackingMode: resolvedTrackingMode,
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+      source,
+      step: safeStr(baseQuote?.code) === "billing_cycle_not_available"
+        ? "invalid_plan_or_cycle"
+        : safeStr(baseQuote?.code) === "plan_not_found"
+          ? "invalid_plan_or_cycle"
+          : safeStr(baseQuote?.code) || "build_base_quote_failed",
+    });
     return {
       ...baseQuote,
       internalUserId: normalizedInternalUserId,
@@ -250,7 +380,7 @@ export async function buildPricingQuote({
   } = baseQuote;
 
   if (!normalizedCouponCode) {
-    return buildSuccess({
+    const result = buildSuccess({
       quoteType: "checkout",
       internalUserId: normalizedInternalUserId,
       planCode: normalizedPlanCode,
@@ -279,6 +409,18 @@ export async function buildPricingQuote({
         calculation: baseCalculation,
       }),
     });
+
+    await maybeTrackPricingQuoteGenerated({
+      trackingMode: resolvedTrackingMode,
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: "",
+      source,
+      step: "checkout_quote_generated_without_coupon",
+    });
+
+    return result;
   }
 
   const coupon = await getCoupon(normalizedCouponCode);
@@ -291,7 +433,7 @@ export async function buildPricingQuote({
   });
 
   if (!eligibility?.ok || !eligibility?.eligible) {
-    return buildFailure(
+    const failure = buildFailure(
       safeStr(eligibility?.code) || "coupon_invalid",
       safeStr(eligibility?.reason) || "Coupon invalid",
       {
@@ -319,11 +461,25 @@ export async function buildPricingQuote({
         }),
       }
     );
+
+    await maybeTrackPricingError({
+      trackingMode: resolvedTrackingMode,
+      internalUserId: normalizedInternalUserId,
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+      source,
+      step: ["plan_or_cycle_invalid", "coupon_plan_not_allowed", "coupon_cycle_not_allowed"].includes(safeStr(eligibility?.code))
+        ? "invalid_plan_or_cycle"
+        : "invalid_coupon",
+    });
+
+    return failure;
   }
 
   const calculation = cloneCalculation(eligibility?.calculation || baseCalculation);
 
-  return buildSuccess({
+  const result = buildSuccess({
     quoteType: "checkout",
     internalUserId: normalizedInternalUserId,
     planCode: normalizedPlanCode,
@@ -347,6 +503,18 @@ export async function buildPricingQuote({
       calculation,
     }),
   });
+
+  await maybeTrackPricingQuoteGenerated({
+    trackingMode: resolvedTrackingMode,
+    internalUserId: normalizedInternalUserId,
+    planCode: normalizedPlanCode,
+    billingCycle: normalizedBillingCycle,
+    couponCode: normalizedCouponCode,
+    source,
+    step: "checkout_quote_generated_with_coupon",
+  });
+
+  return result;
 }
 
 export async function previewPricingForCoupon({
@@ -360,6 +528,9 @@ export async function previewPricingForCoupon({
     planCode,
     billingCycle,
     couponCode,
+    trackMetrics: false,
+    trackingMode: PRICING_TRACKING_MODE.PREVIEW,
+    source: "pricing_preview",
   });
 }
 
@@ -386,6 +557,9 @@ export async function buildPricingMatrix({
         couponCode,
         planCode,
         billingCycle,
+        trackMetrics: false,
+        trackingMode: PRICING_TRACKING_MODE.INTERNAL,
+        source: "pricing_matrix",
       });
 
       rows.push({
