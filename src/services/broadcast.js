@@ -33,6 +33,8 @@ import {
 } from "./state.js";
 import { listWindow24hActive, nowMs } from "./window24h.js";
 import { sendWhatsAppText } from "./meta/whatsapp.js";
+import * as metrics from "./metrics.js";
+import * as audit from "./audit.js";
 import { getCopyText } from "./copy.js";
 import { pushSystemAlert } from "./alerts.js";
 import { getInternalUserIdByWaId, getPreferredOutboundRecipient } from "./identity.js";
@@ -69,6 +71,136 @@ const COUPON_REMOVAL_FALLBACK = [
   "Seu cupom de desconto foi removido porque o pagamento não foi confirmado dentro do prazo.",
   "Se quiser, você pode escolher novamente seu plano e aplicar um novo cupom válido na contratação.",
 ].join("\n\n");
+
+
+const BROADCAST_ERROR = Object.freeze({
+  RECIPIENT: "BROADCAST_RECIPIENT_ERROR",
+  SEND: "BROADCAST_SEND_ERROR",
+  PERSISTENCE: "BROADCAST_PERSISTENCE_ERROR",
+  CAMPAIGN_LOOKUP: "BROADCAST_CAMPAIGN_LOOKUP_ERROR",
+  COUPON_EXPIRATION: "BROADCAST_COUPON_EXPIRATION_ERROR",
+  RUNTIME: "BROADCAST_RUNTIME_ERROR",
+});
+
+function extractErrorMessage(err) {
+  return safeStr(err?.message || err?.reason || err?.error || err) || "Unknown broadcast error";
+}
+
+function buildBroadcastErrorContext({
+  errorCode = BROADCAST_ERROR.RUNTIME,
+  campaignId = "",
+  campaignCode = "",
+  userId = "",
+  recipient = "",
+  step = "",
+  source = "broadcast",
+  extra = {},
+} = {}) {
+  return {
+    source: safeStr(source) || "broadcast",
+    campaignId: safeStr(campaignId),
+    campaignCode: safeStr(campaignCode),
+    userId: safeStr(userId),
+    waId: safeStr(recipient),
+    recipient: safeStr(recipient),
+    step: safeStr(step),
+    errorCode: safeStr(errorCode) || BROADCAST_ERROR.RUNTIME,
+    ...(extra && typeof extra === "object" ? extra : {}),
+  };
+}
+
+async function emitBroadcastMetricSafe(metricFn, payload = {}) {
+  if (typeof metricFn !== "function") return null;
+  try {
+    return await metricFn(payload);
+  } catch {
+    return null;
+  }
+}
+
+async function logBroadcastOperational(entry = {}) {
+  const payload = {
+    module: "broadcast",
+    event: safeStr(entry.event) || "broadcast_runtime",
+    level: safeStr(entry.level) || "warn",
+    status: safeStr(entry.status),
+    message: safeStr(entry.message),
+    errorCode: safeStr(entry.errorCode),
+    userId: safeStr(entry.userId),
+    waId: safeStr(entry.waId || entry.recipient),
+    campaignId: safeStr(entry.campaignId),
+    campaignCode: safeStr(entry.campaignCode),
+    step: safeStr(entry.step),
+    meta: entry.meta && typeof entry.meta === "object" ? entry.meta : {},
+  };
+
+  try {
+    if (typeof audit.logOperationalEvent === "function") {
+      await audit.logOperationalEvent(payload);
+      return;
+    }
+    if (typeof audit.logRuntimeError === "function") {
+      await audit.logRuntimeError(payload);
+      return;
+    }
+  } catch {}
+
+  try {
+    console.warn(JSON.stringify({ level: payload.level, tag: payload.event, ...payload }));
+  } catch {}
+}
+
+async function reportBroadcastFailure({
+  error,
+  errorCode = BROADCAST_ERROR.RUNTIME,
+  campaignId = "",
+  campaignCode = "",
+  userId = "",
+  recipient = "",
+  step = "",
+  metricsKind = "campaign",
+  extra = {},
+} = {}) {
+  const context = buildBroadcastErrorContext({
+    errorCode, campaignId, campaignCode, userId, recipient, step, extra,
+  });
+  const message = extractErrorMessage(error);
+
+  await logBroadcastOperational({
+    event: safeStr(step) || "broadcast_failure",
+    level: "warn",
+    status: "error",
+    message,
+    ...context,
+    meta: extra,
+  });
+
+  if (metricsKind === "whatsapp") {
+    await emitBroadcastMetricSafe(metrics.trackWhatsappSendError, context);
+  } else {
+    await emitBroadcastMetricSafe(metrics.trackCampaignError, context);
+  }
+
+  return { ...context, message };
+}
+
+async function redisBestEffort(action, fallback, failureContext = {}) {
+  try {
+    return await action();
+  } catch (error) {
+    await reportBroadcastFailure({
+      error,
+      errorCode: BROADCAST_ERROR.PERSISTENCE,
+      step: failureContext.step || "redis_operation",
+      campaignId: failureContext.campaignId,
+      campaignCode: failureContext.campaignCode,
+      userId: failureContext.userId,
+      recipient: failureContext.recipient,
+      extra: failureContext.extra,
+    });
+    return fallback;
+  }
+}
 
 function safeStr(v) {
   return String(v ?? "").trim();
@@ -107,11 +239,34 @@ function buildMessage({ subject, text }) {
 
 async function getRecipientForUser(userId) {
   const id = safeStr(userId);
-  if (!id) return null;
-  const outbound = await getPreferredOutboundRecipient(id).catch(() => null);
-  const recipient = safeStr(outbound?.recipient);
-  if (!recipient) return null;
-  return { userId: id, recipient, channel: safeStr(outbound?.channel || "WHATSAPP") };
+  if (!id) {
+    return { ok: false, userId: id, recipient: "", channel: "", errorCode: BROADCAST_ERROR.RECIPIENT, error: "Missing userId" };
+  }
+
+  try {
+    const outbound = await getPreferredOutboundRecipient(id);
+    const recipient = safeStr(outbound?.recipient);
+    if (!recipient) {
+      return {
+        ok: false,
+        userId: id,
+        recipient: "",
+        channel: safeStr(outbound?.channel || ""),
+        errorCode: BROADCAST_ERROR.RECIPIENT,
+        error: "Missing outbound recipient",
+      };
+    }
+    return { ok: true, userId: id, recipient, channel: safeStr(outbound?.channel || "WHATSAPP") };
+  } catch (error) {
+    return {
+      ok: false,
+      userId: id,
+      recipient: "",
+      channel: "",
+      errorCode: BROADCAST_ERROR.RECIPIENT,
+      error,
+    };
+  }
 }
 
 function campaignKeyMeta(id) {
@@ -134,20 +289,22 @@ async function setWithTTL(key, value, ttlSeconds = CAMPAIGNS_TTL_SECONDS) {
 
 async function ensureCampaignTTL(id) {
   const ttl = CAMPAIGNS_TTL_SECONDS;
-  try {
+  return await redisBestEffort(async () => {
     await redisExpire(campaignKeyMeta(id), ttl);
     await redisExpire(campaignKeyErrors(id), ttl);
     await redisExpire(campaignKeySent(id), ttl);
     await redisExpire(campaignKeyPending(id), ttl);
-  } catch (_) {
-    // best effort
-  }
+    return true;
+  }, false, { campaignId: safeStr(id), step: "ensure_campaign_ttl" });
 }
 
 async function addCampaignToList(id) {
-  await redisLPush(CAMPAIGNS_LIST_KEY, id);
-  await redisLTrim(CAMPAIGNS_LIST_KEY, 0, CAMPAIGNS_MAX_LIST - 1);
-  await redisExpire(CAMPAIGNS_LIST_KEY, CAMPAIGNS_TTL_SECONDS);
+  return await redisBestEffort(async () => {
+    await redisLPush(CAMPAIGNS_LIST_KEY, id);
+    await redisLTrim(CAMPAIGNS_LIST_KEY, 0, CAMPAIGNS_MAX_LIST - 1);
+    await redisExpire(CAMPAIGNS_LIST_KEY, CAMPAIGNS_TTL_SECONDS);
+    return true;
+  }, false, { campaignId: safeStr(id), step: "add_campaign_to_list" });
 }
 
 async function recordError(id, userRef, errorMsg) {
@@ -156,9 +313,23 @@ async function recordError(id, userRef, errorMsg) {
     userRef: safeStr(userRef),
     error: safeStr(errorMsg).slice(0, 500),
   };
-  await redisLPush(campaignKeyErrors(id), JSON.stringify(entry));
-  await redisLTrim(campaignKeyErrors(id), 0, 199);
-  await ensureCampaignTTL(id);
+
+  try {
+    await redisLPush(campaignKeyErrors(id), JSON.stringify(entry));
+    await redisLTrim(campaignKeyErrors(id), 0, 199);
+    await ensureCampaignTTL(id);
+    return true;
+  } catch (error) {
+    await reportBroadcastFailure({
+      error,
+      errorCode: BROADCAST_ERROR.PERSISTENCE,
+      campaignId: safeStr(id),
+      userId: safeStr(userRef),
+      step: "record_campaign_error",
+      extra: { originalError: entry.error },
+    });
+    return false;
+  }
 }
 
 async function computeTargetsByPlan({ planTargets = [] }) {
@@ -177,24 +348,43 @@ async function computeTargetsByPlan({ planTargets = [] }) {
         filtered.push(userId);
       }
     } catch (_) {
-      // campanha manual não pode quebrar por um usuário isolado
+      await reportBroadcastFailure({
+        error: _,
+        errorCode: BROADCAST_ERROR.RUNTIME,
+        userId: safeStr(userId),
+        step: "compute_targets_by_plan",
+      });
     }
   }
   return filtered;
 }
 
 async function readRuntimeMeta(campaignId) {
-  const raw = await redisGet(campaignKeyMeta(campaignId)).catch(() => "");
+  const raw = await redisBestEffort(
+    () => redisGet(campaignKeyMeta(campaignId)),
+    "",
+    { campaignId: safeStr(campaignId), step: "read_runtime_meta" }
+  );
   try {
     return normalizeRuntimeMeta(raw ? JSON.parse(raw) : {});
-  } catch {
+  } catch (error) {
+    await reportBroadcastFailure({
+      error,
+      errorCode: BROADCAST_ERROR.PERSISTENCE,
+      campaignId: safeStr(campaignId),
+      step: "parse_runtime_meta",
+    });
     return normalizeRuntimeMeta({});
   }
 }
 
 async function writeRuntimeMeta(campaignId, meta = {}) {
   const normalized = normalizeRuntimeMeta(meta);
-  await setWithTTL(campaignKeyMeta(campaignId), JSON.stringify(normalized));
+  await redisBestEffort(
+    () => setWithTTL(campaignKeyMeta(campaignId), JSON.stringify(normalized)),
+    null,
+    { campaignId: safeStr(campaignId), step: "write_runtime_meta" }
+  );
   return normalized;
 }
 
@@ -234,9 +424,9 @@ function buildCampaignDispatchDetails({
 
 async function getCampaignStats(campaignId) {
   const [sentCount, pendingCount, errs] = await Promise.all([
-    redisSCard(campaignKeySent(campaignId)).catch(() => 0),
-    redisSCard(campaignKeyPending(campaignId)).catch(() => 0),
-    redisLRange(campaignKeyErrors(campaignId), 0, 199).catch(() => []),
+    redisBestEffort(() => redisSCard(campaignKeySent(campaignId)), 0, { campaignId: safeStr(campaignId), step: "stats_sent_count" }),
+    redisBestEffort(() => redisSCard(campaignKeyPending(campaignId)), 0, { campaignId: safeStr(campaignId), step: "stats_pending_count" }),
+    redisBestEffort(() => redisLRange(campaignKeyErrors(campaignId), 0, 199), [], { campaignId: safeStr(campaignId), step: "stats_error_range" }),
   ]);
 
   return {
@@ -328,49 +518,88 @@ export async function createCampaignAndDispatch({
   const body = safeStr(text);
   if (!subj && !body) throw new Error("Missing subject or text");
 
-  const campaignResult = await createCampaign(
-    {
-      code: `MANUAL_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
-      name: subj || "Campanha manual",
-      description: subj || body.slice(0, 120),
-      isActive: true,
-      category: CAMPAIGN_CATEGORY.GENERIC_NURTURE,
-      channel: CAMPAIGN_CHANNEL.WHATSAPP_WINDOW24H,
-      messageMode: CAMPAIGN_MESSAGE_MODE.INLINE_TEXT,
-      inlineText: body,
-      priority: 100,
-      conflictGroup: CAMPAIGN_CONFLICT_GROUP.GENERIC,
-      triggerType: CAMPAIGN_TRIGGER_TYPE.MANUAL,
-      triggerEvent: "manual_dispatch",
-      requiredStatuses: [],
-      excludedStatuses: [],
-      requiredPlanCodes: normalizePlanTargets(planTargets),
-      excludedPlanCodes: [],
-      requiresWindow24hOpen: false,
-      notes: subj,
-    },
-    { actor: "broadcast.createCampaignAndDispatch" }
-  );
+  let campaignResult;
+  try {
+    campaignResult = await createCampaign(
+      {
+        code: `MANUAL_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
+        name: subj || "Campanha manual",
+        description: subj || body.slice(0, 120),
+        isActive: true,
+        category: CAMPAIGN_CATEGORY.GENERIC_NURTURE,
+        channel: CAMPAIGN_CHANNEL.WHATSAPP_WINDOW24H,
+        messageMode: CAMPAIGN_MESSAGE_MODE.INLINE_TEXT,
+        inlineText: body,
+        priority: 100,
+        conflictGroup: CAMPAIGN_CONFLICT_GROUP.GENERIC,
+        triggerType: CAMPAIGN_TRIGGER_TYPE.MANUAL,
+        triggerEvent: "manual_dispatch",
+        requiredStatuses: [],
+        excludedStatuses: [],
+        requiredPlanCodes: normalizePlanTargets(planTargets),
+        excludedPlanCodes: [],
+        requiresWindow24hOpen: false,
+        notes: subj,
+      },
+      { actor: "broadcast.createCampaignAndDispatch" }
+    );
+  } catch (error) {
+    await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.CAMPAIGN_LOOKUP, step: "create_campaign" });
+    throw error;
+  }
 
   const campaign = campaignResult?.campaign;
   if (!campaign?.id) throw new Error("failed to create campaign");
 
-  const targetUserIds = await computeTargetsByPlan({ planTargets });
-  const windowWaIds = await listWindow24hActive(nowMs(), 20000);
+  let targetUserIds = [];
+  try {
+    targetUserIds = await computeTargetsByPlan({ planTargets });
+  } catch (error) {
+    await reportBroadcastFailure({
+      error,
+      errorCode: BROADCAST_ERROR.RUNTIME,
+      campaignId: campaign.id,
+      campaignCode: campaign.code,
+      step: "compute_targets",
+    });
+    targetUserIds = [];
+  }
+
+  const windowWaIds = await redisBestEffort(
+    () => listWindow24hActive(nowMs(), 20000),
+    [],
+    { campaignId: campaign.id, campaignCode: campaign.code, step: "list_window24h_active" }
+  );
   const windowSet = new Set((windowWaIds || []).map((x) => String(x)));
 
   const sendNow = [];
   const pending = [];
 
   for (const userId of targetUserIds) {
-    const recipientInfo = await getRecipientForUser(userId);
-    if (!recipientInfo?.recipient) {
-      await recordError(campaign.id, userId, "Missing outbound recipient for campaign target");
-      await markCampaignError(campaign.id, userId, "Missing outbound recipient for campaign target").catch(() => ({}));
-      continue;
+    try {
+      const recipientInfo = await getRecipientForUser(userId);
+      if (!recipientInfo?.ok || !recipientInfo?.recipient) {
+        await reportBroadcastFailure({
+          error: recipientInfo?.error || "Missing outbound recipient for campaign target",
+          errorCode: recipientInfo?.errorCode || BROADCAST_ERROR.RECIPIENT,
+          campaignId: campaign.id,
+          campaignCode: campaign.code,
+          userId,
+          step: "resolve_campaign_recipient",
+        });
+        await recordError(campaign.id, userId, "Missing outbound recipient for campaign target");
+        await markCampaignError(campaign.id, userId, "Missing outbound recipient for campaign target").catch(() => ({}));
+        continue;
+      }
+      if (windowSet.has(String(recipientInfo.recipient))) sendNow.push(recipientInfo);
+      else pending.push(String(userId));
+    } catch (error) {
+      await reportBroadcastFailure({
+        error, errorCode: BROADCAST_ERROR.RECIPIENT, campaignId: campaign.id, campaignCode: campaign.code, userId, step: "queue_target_resolution",
+      });
+      await recordError(campaign.id, userId, extractErrorMessage(error));
+      await markCampaignError(campaign.id, userId, error).catch(() => ({}));
     }
-    if (windowSet.has(String(recipientInfo.recipient))) sendNow.push(recipientInfo);
-    else pending.push(String(userId));
   }
 
   const runtimeMeta = await writeRuntimeMeta(campaign.id, {
@@ -393,7 +622,7 @@ export async function createCampaignAndDispatch({
     const recipient = safeStr(entry?.recipient);
     try {
       await sendWhatsAppText({ to: recipient, text: msg });
-      await redisSAdd(campaignKeySent(campaign.id), userId);
+      await redisBestEffort(() => redisSAdd(campaignKeySent(campaign.id), userId), 0, { campaignId: campaign.id, campaignCode: campaign.code, userId, recipient, step: "mark_campaign_sent" });
       await markCampaignSent(campaign.id, userId, {
         source: "broadcast",
         details: buildCampaignDispatchDetails({
@@ -404,27 +633,41 @@ export async function createCampaignAndDispatch({
           campaign,
         }),
       }).catch(() => ({}));
-    } catch (err) {
-      await recordError(campaign.id, userId || recipient, err?.message || err);
-      await markCampaignError(campaign.id, userId, err).catch(() => ({}));
+    } catch (error) {
+      await reportBroadcastFailure({
+        error,
+        errorCode: BROADCAST_ERROR.SEND,
+        campaignId: campaign.id,
+        campaignCode: campaign.code,
+        userId: userId || recipient,
+        recipient,
+        step: "manual_dispatch_send",
+        metricsKind: "whatsapp",
+      });
+      await recordError(campaign.id, userId || recipient, extractErrorMessage(error));
+      await markCampaignError(campaign.id, userId, error).catch(() => ({}));
     }
   }
 
   if (pending.length > 0) {
-    await redisSAdd(campaignKeyPending(campaign.id), pending);
-    await redisSAdd(PENDING_CAMPAIGNS_SET, campaign.id);
+    await redisBestEffort(() => redisSAdd(campaignKeyPending(campaign.id), pending), 0, { campaignId: campaign.id, campaignCode: campaign.code, step: "queue_campaign_pending" });
+    await redisBestEffort(() => redisSAdd(PENDING_CAMPAIGNS_SET, campaign.id), 0, { campaignId: campaign.id, campaignCode: campaign.code, step: "queue_pending_set" });
   }
 
   await ensureCampaignTTL(campaign.id);
 
-  await pushSystemAlert("CAMPAIGN_CREATED", {
-    id: campaign.id,
-    totalTargets: targetUserIds.length,
-    sendNow: sendNow.length,
-    pending: pending.length,
-    planTargets: runtimeMeta.planTargets,
-    mode,
-  }).catch(() => ({}));
+  try {
+    await pushSystemAlert("CAMPAIGN_CREATED", {
+      id: campaign.id,
+      totalTargets: targetUserIds.length,
+      sendNow: sendNow.length,
+      pending: pending.length,
+      planTargets: runtimeMeta.planTargets,
+      mode,
+    });
+  } catch (error) {
+    await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.RUNTIME, campaignId: campaign.id, campaignCode: campaign.code, step: "push_system_alert" });
+  }
 
   return await getCampaign(campaign.id);
 }
@@ -466,14 +709,20 @@ export async function reprocessCampaignForActiveWindow(campaignId, { limit = 500
   const id = safeStr(campaignId);
   if (!id) throw new Error("campaignId required");
 
-  const campaign = (await getCampaignCore(id))?.campaign;
+  let campaign = null;
+  try {
+    campaign = (await getCampaignCore(id))?.campaign;
+  } catch (error) {
+    await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.CAMPAIGN_LOOKUP, campaignId: id, step: "reprocess_lookup_campaign" });
+    throw error;
+  }
   if (!campaign) throw new Error("campaign not found");
 
   const runtimeMeta = await readRuntimeMeta(id);
-  const windowWaIds = await listWindow24hActive(nowMs(), Number(limit || 5000));
+  const windowWaIds = await redisBestEffort(() => listWindow24hActive(nowMs(), Number(limit || 5000)), [], { campaignId: id, campaignCode: campaign.code, step: "reprocess_list_window24h_active" });
   const windowList = Array.isArray(windowWaIds) ? windowWaIds.map((x) => String(x)) : [];
   const windowSet = new Set(windowList);
-  const pendingUserIds = await redisSMembers(campaignKeyPending(id)).catch(() => []);
+  const pendingUserIds = await redisBestEffort(() => redisSMembers(campaignKeyPending(id)), [], { campaignId: id, campaignCode: campaign.code, step: "reprocess_pending_users" });
   const pendList = Array.isArray(pendingUserIds) ? pendingUserIds.map((x) => String(x)) : [];
 
   let attempted = 0;
@@ -485,21 +734,22 @@ export async function reprocessCampaignForActiveWindow(campaignId, { limit = 500
 
   for (const userId of pendList) {
     if (!userId) continue;
-    const recipientInfo = await getRecipientForUser(userId);
-    const recipient = safeStr(recipientInfo?.recipient);
-    if (!recipient) {
-      errors += 1;
-      await recordError(id, userId, "Missing outbound recipient for pending campaign user");
-      await markCampaignError(id, userId, "Missing outbound recipient for pending campaign user").catch(() => ({}));
-      continue;
-    }
-    if (!windowSet.has(recipient)) continue;
-
-    attempted += 1;
     try {
+      const recipientInfo = await getRecipientForUser(userId);
+      const recipient = safeStr(recipientInfo?.recipient);
+      if (!recipientInfo?.ok || !recipient) {
+        errors += 1;
+        await reportBroadcastFailure({ error: recipientInfo?.error || "Missing outbound recipient for pending campaign user", errorCode: recipientInfo?.errorCode || BROADCAST_ERROR.RECIPIENT, campaignId: id, campaignCode: campaign.code, userId, step: "reprocess_resolve_recipient" });
+        await recordError(id, userId, "Missing outbound recipient for pending campaign user");
+        await markCampaignError(id, userId, "Missing outbound recipient for pending campaign user").catch(() => ({}));
+        continue;
+      }
+      if (!windowSet.has(recipient)) continue;
+
+      attempted += 1;
       await sendWhatsAppText({ to: recipient, text: msg });
-      await redisSAdd(campaignKeySent(id), userId);
-      await redisSRem(campaignKeyPending(id), userId);
+      await redisBestEffort(() => redisSAdd(campaignKeySent(id), userId), 0, { campaignId: id, campaignCode: campaign.code, userId, recipient, step: "reprocess_mark_sent" });
+      await redisBestEffort(() => redisSRem(campaignKeyPending(id), userId), 0, { campaignId: id, campaignCode: campaign.code, userId, recipient, step: "reprocess_remove_pending" });
       await markCampaignSent(id, userId, {
         source: "broadcast",
         details: buildCampaignDispatchDetails({
@@ -511,16 +761,17 @@ export async function reprocessCampaignForActiveWindow(campaignId, { limit = 500
         }),
       }).catch(() => ({}));
       sent += 1;
-    } catch (err) {
+    } catch (error) {
       errors += 1;
-      await recordError(id, userId, err?.message || err);
-      await markCampaignError(id, userId, err).catch(() => ({}));
+      await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.SEND, campaignId: id, campaignCode: campaign.code, userId, step: "reprocess_send", metricsKind: "whatsapp" });
+      await recordError(id, userId, extractErrorMessage(error));
+      await markCampaignError(id, userId, error).catch(() => ({}));
     }
   }
 
-  const pendingLeft = await redisSCard(campaignKeyPending(id)).catch(() => 0);
+  const pendingLeft = await redisBestEffort(() => redisSCard(campaignKeyPending(id)), 0, { campaignId: id, campaignCode: campaign.code, step: "reprocess_pending_left" });
   if (Number(pendingLeft || 0) === 0) {
-    await redisSRem(PENDING_CAMPAIGNS_SET, id).catch(() => 0);
+    await redisBestEffort(() => redisSRem(PENDING_CAMPAIGNS_SET, id), 0, { campaignId: id, campaignCode: campaign.code, step: "reprocess_remove_from_pending_set" });
   }
 
   await ensureCampaignTTL(id);
@@ -544,11 +795,11 @@ export async function processPendingForWaId(waId) {
   const inboundWaId = safeStr(waId);
   if (!inboundWaId) return { ok: true, processed: 0 };
 
-  const userId = await getInternalUserIdByWaId(inboundWaId).catch(() => null);
+  const userId = await redisBestEffort(() => getInternalUserIdByWaId(inboundWaId), null, { userId: inboundWaId, recipient: inboundWaId, step: "process_pending_resolve_user" });
   const id = safeStr(userId);
   if (!id) return { ok: true, waId: inboundWaId, processed: 0 };
 
-  const pendingCampaigns = await redisSMembers(PENDING_CAMPAIGNS_SET).catch(() => []);
+  const pendingCampaigns = await redisBestEffort(() => redisSMembers(PENDING_CAMPAIGNS_SET), [], { userId: id, recipient: inboundWaId, step: "process_pending_list_set" });
   const list = Array.isArray(pendingCampaigns) ? pendingCampaigns : [];
 
   let processed = 0;
@@ -557,33 +808,34 @@ export async function processPendingForWaId(waId) {
     const cpId = safeStr(cpIdRaw);
     if (!cpId) continue;
 
-    const isPending = await redisSIsMember(campaignKeyPending(cpId), id).catch(() => 0);
-    if (!Number(isPending)) continue;
-
-    const runtimeMeta = await readRuntimeMeta(cpId);
-    const campaign = (await getCampaignCore(cpId))?.campaign || null;
-    const msg = buildMessage({ subject: runtimeMeta.subject, text: runtimeMeta.text });
-
-    if (!msg) {
-      await redisSRem(campaignKeyPending(cpId), id).catch(() => 0);
-      await recordError(cpId, id, "Campaign meta missing subject/text (auto-send skipped)");
-      await markCampaignError(cpId, id, "Campaign meta missing subject/text (auto-send skipped)").catch(() => ({}));
-      processed += 1;
-      continue;
-    }
-
-    const recipientInfo = await getRecipientForUser(id);
-    const recipient = safeStr(recipientInfo?.recipient);
-    if (!recipient) {
-      await recordError(cpId, id, "Missing outbound recipient for pending campaign user");
-      await markCampaignError(cpId, id, "Missing outbound recipient for pending campaign user").catch(() => ({}));
-      continue;
-    }
-
     try {
+      const isPending = await redisBestEffort(() => redisSIsMember(campaignKeyPending(cpId), id), 0, { campaignId: cpId, userId: id, recipient: inboundWaId, step: "process_pending_membership" });
+      if (!Number(isPending)) continue;
+
+      const runtimeMeta = await readRuntimeMeta(cpId);
+      const campaign = (await getCampaignCore(cpId).catch(() => null))?.campaign || null;
+      const msg = buildMessage({ subject: runtimeMeta.subject, text: runtimeMeta.text });
+
+      if (!msg) {
+        await redisBestEffort(() => redisSRem(campaignKeyPending(cpId), id), 0, { campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient: inboundWaId, step: "process_pending_remove_invalid_message" });
+        await recordError(cpId, id, "Campaign meta missing subject/text (auto-send skipped)");
+        await markCampaignError(cpId, id, "Campaign meta missing subject/text (auto-send skipped)").catch(() => ({}));
+        processed += 1;
+        continue;
+      }
+
+      const recipientInfo = await getRecipientForUser(id);
+      const recipient = safeStr(recipientInfo?.recipient);
+      if (!recipientInfo?.ok || !recipient) {
+        await reportBroadcastFailure({ error: recipientInfo?.error || "Missing outbound recipient for pending campaign user", errorCode: recipientInfo?.errorCode || BROADCAST_ERROR.RECIPIENT, campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient: inboundWaId, step: "process_pending_resolve_recipient" });
+        await recordError(cpId, id, "Missing outbound recipient for pending campaign user");
+        await markCampaignError(cpId, id, "Missing outbound recipient for pending campaign user").catch(() => ({}));
+        continue;
+      }
+
       await sendWhatsAppText({ to: recipient, text: msg });
-      await redisSAdd(campaignKeySent(cpId), id);
-      await redisSRem(campaignKeyPending(cpId), id);
+      await redisBestEffort(() => redisSAdd(campaignKeySent(cpId), id), 0, { campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient, step: "process_pending_mark_sent" });
+      await redisBestEffort(() => redisSRem(campaignKeyPending(cpId), id), 0, { campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient, step: "process_pending_remove_pending" });
       await markCampaignSent(cpId, id, {
         source: "broadcast",
         details: buildCampaignDispatchDetails({
@@ -591,22 +843,23 @@ export async function processPendingForWaId(waId) {
           recipient,
           channel: recipientInfo?.channel,
           runtimeMeta,
-          campaign: { id: cpId },
+          campaign: campaign || { id: cpId },
           extra: { inboundWaId },
         }),
       }).catch(() => ({}));
       processed += 1;
-    } catch (err) {
-      await recordError(cpId, id, err?.message || err);
-      await markCampaignError(cpId, id, err).catch(() => ({}));
-    }
 
-    const pendingLeft = await redisSCard(campaignKeyPending(cpId)).catch(() => 0);
-    if (Number(pendingLeft || 0) === 0) {
-      await redisSRem(PENDING_CAMPAIGNS_SET, cpId).catch(() => 0);
-    }
+      const pendingLeft = await redisBestEffort(() => redisSCard(campaignKeyPending(cpId)), 0, { campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient, step: "process_pending_pending_left" });
+      if (Number(pendingLeft || 0) === 0) {
+        await redisBestEffort(() => redisSRem(PENDING_CAMPAIGNS_SET, cpId), 0, { campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient, step: "process_pending_remove_from_set" });
+      }
 
-    await ensureCampaignTTL(cpId);
+      await ensureCampaignTTL(cpId);
+    } catch (error) {
+      await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.SEND, campaignId: cpId, userId: id, recipient: inboundWaId, step: "process_pending_send", metricsKind: "whatsapp" });
+      await recordError(cpId, id, extractErrorMessage(error));
+      await markCampaignError(cpId, id, error).catch(() => ({}));
+    }
   }
 
   return { ok: true, waId: inboundWaId, userId: id, processed };
@@ -665,7 +918,11 @@ async function getCouponRemovalMessage(userId, reservation = null) {
 }
 
 async function processExpiredCouponReservations({ now = nowMs(), limit = COUPON_EXPIRATION_CHECK_LIMIT } = {}) {
-  const expired = await listExpiredPendingCouponReservations({ now, limit }).catch(() => []);
+  const expired = await redisBestEffort(
+    () => listExpiredPendingCouponReservations({ now, limit }),
+    [],
+    { step: "list_expired_coupon_reservations" }
+  );
   const rows = Array.isArray(expired) ? expired : [];
 
   let expiredCount = 0;
@@ -688,7 +945,7 @@ async function processExpiredCouponReservations({ now = nowMs(), limit = COUPON_
       expiredCount += result?.ok ? 1 : 0;
 
       if (userId) {
-        await resetCheckoutCouponState(userId).catch(() => ({}));
+        await redisBestEffort(() => resetCheckoutCouponState(userId), null, { userId, step: "reset_checkout_coupon_state_after_timeout" });
       }
 
       const alreadySent = Boolean(nextReservation?.messageSentAt || nextReservation?.meta?.couponRemovedMessageSent);
@@ -699,16 +956,18 @@ async function processExpiredCouponReservations({ now = nowMs(), limit = COUPON_
 
       const recipientInfo = userId ? await getRecipientForUser(userId) : null;
       const recipient = safeStr(recipientInfo?.recipient);
-      if (!recipient) {
+      if (!recipientInfo?.ok || !recipient) {
         skippedMessageCount += 1;
-        await recordError("automation_coupon_expiration", userId || reservationId, "Missing outbound recipient for coupon expiration message").catch(() => 0);
+        await reportBroadcastFailure({ error: recipientInfo?.error || "Missing outbound recipient for coupon expiration message", errorCode: recipientInfo?.errorCode || BROADCAST_ERROR.RECIPIENT, campaignId: "automation_coupon_expiration", userId: userId || reservationId, step: "coupon_expiration_resolve_recipient" });
+        await recordError("automation_coupon_expiration", userId || reservationId, "Missing outbound recipient for coupon expiration message");
         continue;
       }
 
       const text = await getCouponRemovalMessage(userId, nextReservation);
       if (!safeStr(text)) {
         skippedMessageCount += 1;
-        await recordError("automation_coupon_expiration", userId || reservationId, "Coupon expiration message empty").catch(() => 0);
+        await reportBroadcastFailure({ error: "Coupon expiration message empty", errorCode: BROADCAST_ERROR.COUPON_EXPIRATION, campaignId: "automation_coupon_expiration", userId: userId || reservationId, recipient, step: "coupon_expiration_empty_message" });
+        await recordError("automation_coupon_expiration", userId || reservationId, "Coupon expiration message empty");
         continue;
       }
 
@@ -718,13 +977,15 @@ async function processExpiredCouponReservations({ now = nowMs(), limit = COUPON_
           meta: { source: "broadcast_automation", timeoutHours: 20 },
         }).catch(() => ({}));
         messageSentCount += 1;
-      } catch (err) {
+      } catch (error) {
         errors += 1;
-        await recordError("automation_coupon_expiration", userId || reservationId, err?.message || err).catch(() => 0);
+        await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.SEND, campaignId: "automation_coupon_expiration", userId: userId || reservationId, recipient, step: "coupon_expiration_send", metricsKind: "whatsapp" });
+        await recordError("automation_coupon_expiration", userId || reservationId, extractErrorMessage(error));
       }
-    } catch (err) {
+    } catch (error) {
       errors += 1;
-      await recordError("automation_coupon_expiration", userId || reservationId, err?.message || err).catch(() => 0);
+      await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.COUPON_EXPIRATION, campaignId: "automation_coupon_expiration", userId: userId || reservationId, step: "coupon_expiration_runtime" });
+      await recordError("automation_coupon_expiration", userId || reservationId, extractErrorMessage(error));
     }
   }
 
@@ -765,7 +1026,14 @@ async function evaluateLifecycleCandidatesForUser(userId, nowTs) {
       const result = await evaluateCampaignEligibility(campaign, { userId }, { ...context, userId, nowMs: nowTs });
       evaluations.push(result);
     } catch (_) {
-      // erro isolado de uma campanha não pode quebrar o tick inteiro
+      await reportBroadcastFailure({
+        error: _,
+        errorCode: BROADCAST_ERROR.RUNTIME,
+        campaignId: safeStr(campaign?.id),
+        campaignCode: safeStr(campaign?.code),
+        userId: safeStr(userId),
+        step: "evaluate_lifecycle_campaign",
+      });
     }
   }
 
@@ -776,22 +1044,24 @@ async function dispatchLifecycleWinner(userId, evaluation) {
   const campaign = evaluation?.campaign;
   if (!campaign?.id) return { sent: false };
 
-  const recipientInfo = await getRecipientForUser(userId);
-  const recipient = safeStr(recipientInfo?.recipient);
-  if (!recipient) {
-    await recordError(campaign.id, userId, "Missing outbound recipient for lifecycle campaign");
-    await markCampaignError(campaign.id, userId, "Missing outbound recipient for lifecycle campaign").catch(() => ({}));
-    return { sent: false };
-  }
-
-  const text = await renderCampaignMessage(campaign, userId);
-  if (!safeStr(text)) {
-    await recordError(campaign.id, userId, "Lifecycle campaign message empty");
-    await markCampaignError(campaign.id, userId, "Lifecycle campaign message empty").catch(() => ({}));
-    return { sent: false };
-  }
-
   try {
+    const recipientInfo = await getRecipientForUser(userId);
+    const recipient = safeStr(recipientInfo?.recipient);
+    if (!recipientInfo?.ok || !recipient) {
+      await reportBroadcastFailure({ error: recipientInfo?.error || "Missing outbound recipient for lifecycle campaign", errorCode: recipientInfo?.errorCode || BROADCAST_ERROR.RECIPIENT, campaignId: campaign.id, campaignCode: campaign.code, userId, step: "lifecycle_resolve_recipient" });
+      await recordError(campaign.id, userId, "Missing outbound recipient for lifecycle campaign");
+      await markCampaignError(campaign.id, userId, "Missing outbound recipient for lifecycle campaign").catch(() => ({}));
+      return { sent: false };
+    }
+
+    const text = await renderCampaignMessage(campaign, userId);
+    if (!safeStr(text)) {
+      await reportBroadcastFailure({ error: "Lifecycle campaign message empty", errorCode: BROADCAST_ERROR.CAMPAIGN_LOOKUP, campaignId: campaign.id, campaignCode: campaign.code, userId, recipient, step: "lifecycle_render_message" });
+      await recordError(campaign.id, userId, "Lifecycle campaign message empty");
+      await markCampaignError(campaign.id, userId, "Lifecycle campaign message empty").catch(() => ({}));
+      return { sent: false };
+    }
+
     await sendWhatsAppText({ to: recipient, text });
     await markCampaignSent(campaign.id, userId, {
       source: "broadcast",
@@ -807,9 +1077,10 @@ async function dispatchLifecycleWinner(userId, evaluation) {
       }),
     }).catch(() => ({}));
     return { sent: true, campaignId: campaign.id };
-  } catch (err) {
-    await recordError(campaign.id, userId, err?.message || err);
-    await markCampaignError(campaign.id, userId, err).catch(() => ({}));
+  } catch (error) {
+    await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.SEND, campaignId: campaign.id, campaignCode: campaign.code, userId, step: "dispatch_lifecycle_winner", metricsKind: "whatsapp" });
+    await recordError(campaign.id, userId, extractErrorMessage(error));
+    await markCampaignError(campaign.id, userId, error).catch(() => ({}));
     return { sent: false };
   }
 }
@@ -818,23 +1089,29 @@ export async function runLifecycleAutomationTick({ limit = 5000, tsMs = nowMs() 
   const couponAutomation = await processExpiredCouponReservations({
     now: tsMs,
     limit: COUPON_EXPIRATION_CHECK_LIMIT,
-  }).catch((err) => ({
-    ok: false,
-    expiredCount: 0,
-    messageSentCount: 0,
-    skippedMessageCount: 0,
-    errors: 1,
-    checked: 0,
-    error: err?.message || String(err),
-  }));
+  }).catch(async (error) => {
+    await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.COUPON_EXPIRATION, campaignId: "automation_coupon_expiration", step: "run_coupon_automation" });
+    return {
+      ok: false,
+      expiredCount: 0,
+      messageSentCount: 0,
+      skippedMessageCount: 0,
+      errors: 1,
+      checked: 0,
+      error: extractErrorMessage(error),
+    };
+  });
 
-  const activeWaIds = await listWindow24hActive(tsMs, Number(limit || 5000)).catch(() => []);
+  const activeWaIds = await redisBestEffort(() => listWindow24hActive(tsMs, Number(limit || 5000)), [], { step: "lifecycle_list_window24h_active" });
   const activeList = Array.isArray(activeWaIds) ? activeWaIds.map((x) => String(x || "").trim()).filter(Boolean) : [];
 
   const mapped = [];
   const seen = new Set();
   for (const waId of activeList) {
-    const userId = safeStr(await getInternalUserIdByWaId(waId).catch(() => null));
+    const userId = safeStr(await getInternalUserIdByWaId(waId).catch(async (error) => {
+      await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.RECIPIENT, userId: waId, recipient: waId, step: "lifecycle_resolve_internal_user" });
+      return null;
+    }));
     if (!userId || seen.has(userId)) continue;
     seen.add(userId);
     mapped.push({ userId, waId });
@@ -866,9 +1143,10 @@ export async function runLifecycleAutomationTick({ limit = 5000, tsMs = nowMs() 
 
       const sent = await dispatchLifecycleWinner(userId, winner);
       if (sent?.sent) campaignSent += 1;
-    } catch (err) {
+    } catch (error) {
       errors += 1;
-      await recordError("automation_lifecycle", userId, err?.message || err).catch(() => 0);
+      await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.RUNTIME, campaignId: "automation_lifecycle", userId, step: "run_lifecycle_tick_user" });
+      await recordError("automation_lifecycle", userId, extractErrorMessage(error));
     }
   }
 
@@ -899,11 +1177,7 @@ export function startLifecycleAutomationLoop({ intervalMs = 60_000 } = {}) {
     try {
       await runLifecycleAutomationTick({ limit: 5000, tsMs: nowMs() });
     } catch (err) {
-      console.warn(JSON.stringify({
-        level: "warn",
-        tag: "automation_tick_failed",
-        error: String(err?.message || err),
-      }));
+      await reportBroadcastFailure({ error: err, errorCode: BROADCAST_ERROR.RUNTIME, campaignId: "automation_loop", step: "automation_tick_failed" });
     } finally {
       automationRunning = false;
     }
