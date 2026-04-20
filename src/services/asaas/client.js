@@ -9,13 +9,8 @@
  * - Materializar no Asaas apenas o resultado já calculado pelo pricing.js.
  */
 
-import {
-  trackCheckoutStarted,
-  trackCheckoutConfirmed,
-  trackPaymentLinkCreated,
-  trackPixCheckoutCreated,
-  trackSubscriptionCheckoutCreated,
-} from "../metrics.js";
+import * as metrics from "../metrics.js";
+import * as audit from "../audit.js";
 
 function env(name, def = "") {
   return String(process.env[name] || def).trim();
@@ -29,7 +24,16 @@ function asaasBaseUrl() {
 
 function asaasHeaders() {
   const key = env("ASAAS_API_KEY");
-  if (!key) throw new Error("ASAAS_API_KEY missing");
+  if (!key) {
+    throw buildAsaasClientError({
+      errorCode: ASAAS_CLIENT_ERROR_CODE.ENV,
+      message: "ASAAS_API_KEY missing",
+      retryable: false,
+      httpStatus: 500,
+      step: "asaasHeaders",
+      source: "asaas_client",
+    });
+  }
   return {
     "Content-Type": "application/json",
     access_token: key,
@@ -97,6 +101,19 @@ const ASAAS_CLIENT_TRACKING_MODE = Object.freeze({
   PROVIDER_AND_JOURNEY: "provider_and_journey",
 });
 
+export const ASAAS_CLIENT_ERROR_CODE = Object.freeze({
+  ENV: "ASAAS_ENV_ERROR",
+  AUTH: "ASAAS_AUTH_ERROR",
+  HTTP: "ASAAS_HTTP_ERROR",
+  VALIDATION: "ASAAS_VALIDATION_ERROR",
+  CUSTOMER: "ASAAS_CUSTOMER_ERROR",
+  PIX_CREATE: "ASAAS_PIX_CREATE_ERROR",
+  PAYMENT_LINK: "ASAAS_PAYMENT_LINK_ERROR",
+  SUBSCRIPTION: "ASAAS_SUBSCRIPTION_ERROR",
+  RESPONSE_PARSE: "ASAAS_RESPONSE_PARSE_ERROR",
+  UNKNOWN: "ASAAS_UNKNOWN_ERROR",
+});
+
 function normalizeAsaasClientTrackingMode(value, { fallback = ASAAS_CLIENT_TRACKING_MODE.PROVIDER_ONLY } = {}) {
   const normalized = safeLower(value);
   if (normalized === ASAAS_CLIENT_TRACKING_MODE.NONE) return ASAAS_CLIENT_TRACKING_MODE.NONE;
@@ -157,6 +174,7 @@ function buildAsaasClientTrackingContext({
   subscriptionId = "",
   source = "asaas_client",
   step = "",
+  errorCode = "",
 } = {}) {
   const normalized = normalizeQuotePayload(quote);
   return {
@@ -169,6 +187,7 @@ function buildAsaasClientTrackingContext({
     subscriptionId: safeStr(subscriptionId),
     source: safeStr(source) || "asaas_client",
     step: safeStr(step),
+    errorCode: safeStr(errorCode),
   };
 }
 
@@ -181,37 +200,129 @@ async function emitAsaasClientMetricSafe(metricFn, payload = {}) {
   }
 }
 
+function inferRetryableFromHttpStatus(httpStatus) {
+  const status = Number(httpStatus || 0);
+  if (!status) return false;
+  if (status === 408 || status === 409 || status === 425 || status === 429) return true;
+  if (status >= 500) return true;
+  return false;
+}
 
-async function asaasFetch(path, { method = "GET", body = undefined } = {}) {
-  const url = `${asaasBaseUrl()}${path}`;
-  const init = {
-    method,
-    headers: asaasHeaders(),
+function inferAsaasErrorCode({ httpStatus = 0, message = "", payload = null, fallback = ASAAS_CLIENT_ERROR_CODE.HTTP } = {}) {
+  const status = Number(httpStatus || 0);
+  const text = `${safeStr(message)} ${safeStr(payload?.errors?.[0]?.code)} ${safeStr(payload?.errors?.[0]?.description)}`.toLowerCase();
+
+  if (fallback && fallback !== ASAAS_CLIENT_ERROR_CODE.HTTP) return fallback;
+  if (status === 401 || status === 403) return ASAAS_CLIENT_ERROR_CODE.AUTH;
+  if (status === 400 || status === 404 || status === 422) return ASAAS_CLIENT_ERROR_CODE.VALIDATION;
+  if (text.includes("api key")) return ASAAS_CLIENT_ERROR_CODE.AUTH;
+  return ASAAS_CLIENT_ERROR_CODE.HTTP;
+}
+
+function buildAsaasClientError({
+  errorCode = ASAAS_CLIENT_ERROR_CODE.UNKNOWN,
+  message = "Asaas client error",
+  retryable = false,
+  httpStatus = 0,
+  provider = "asaas",
+  payload = null,
+  cause = null,
+  source = "asaas_client",
+  step = "",
+  context = null,
+} = {}) {
+  const err = new Error(safeStr(message) || "Asaas client error");
+  err.ok = false;
+  err.errorCode = safeStr(errorCode) || ASAAS_CLIENT_ERROR_CODE.UNKNOWN;
+  err.retryable = Boolean(retryable);
+  err.httpStatus = Number(httpStatus || 0) || undefined;
+  err.provider = provider;
+  err.payload = payload ?? null;
+  err.context = context ?? null;
+  err.source = safeStr(source) || "asaas_client";
+  err.step = safeStr(step);
+  if (cause) err.cause = cause;
+  return err;
+}
+
+async function logAsaasClientFailure({
+  error = null,
+  quote = {},
+  source = "asaas_client",
+  step = "",
+  paymentId = "",
+  subscriptionId = "",
+  extra = {},
+} = {}) {
+  const payload = buildAsaasClientTrackingContext({
+    quote,
+    paymentId,
+    subscriptionId,
+    source,
+    step,
+    errorCode: safeStr(error?.errorCode || error?.code),
+  });
+
+  const paymentErrorTracker = metrics?.trackPaymentError;
+  if (typeof paymentErrorTracker === "function") {
+    await emitAsaasClientMetricSafe(paymentErrorTracker, payload);
+  }
+
+  const logger =
+    audit?.logOperationalEvent ||
+    audit?.logRuntimeError ||
+    null;
+
+  const logEntry = {
+    module: "ASAAS_CLIENT",
+    event: "ERROR",
+    level: "error",
+    source,
+    step,
+    userId: payload.userId || "",
+    paymentId: payload.paymentId || "",
+    subscriptionId: payload.subscriptionId || "",
+    planCode: payload.planCode || "",
+    billingCycle: payload.billingCycle || "",
+    couponCode: payload.couponCode || "",
+    errorCode: safeStr(error?.errorCode || error?.code),
+    message: safeStr(error?.message),
+    meta: {
+      retryable: Boolean(error?.retryable),
+      httpStatus: Number(error?.httpStatus || error?.status || 0) || undefined,
+      ...extra,
+    },
   };
-  if (body !== undefined) init.body = JSON.stringify(body);
 
-  const res = await fetch(url, init);
-  const text = await res.text();
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
+  if (typeof logger === "function") {
+    try {
+      await logger(logEntry);
+      return;
+    } catch {
+      // fallback abaixo
+    }
   }
 
-  if (!res.ok) {
-    const msg =
-      (json && json.errors && json.errors[0] && json.errors[0].description) ||
-      (json && json.message) ||
-      text ||
-      `Asaas HTTP ${res.status}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    err.payload = json;
-    throw err;
-  }
+  console.warn(JSON.stringify({
+    level: "error",
+    tag: "asaas_client_error",
+    ...logEntry,
+  }));
+}
 
-  return json;
+function assertRequiredString(value, label, { errorCode = ASAAS_CLIENT_ERROR_CODE.VALIDATION, source = "asaas_client", step = "" } = {}) {
+  const text = safeStr(value);
+  if (!text) {
+    throw buildAsaasClientError({
+      errorCode,
+      message: `${label} required`,
+      retryable: false,
+      httpStatus: 400,
+      source,
+      step,
+    });
+  }
+  return text;
 }
 
 function normalizeQuotePayload(quote = {}) {
@@ -249,22 +360,120 @@ function normalizeQuotePayload(quote = {}) {
   };
 }
 
-function assertValidQuote(quote = {}) {
+function assertValidQuote(quote = {}, { source = "asaas_client", step = "assertValidQuote" } = {}) {
   const normalized = normalizeQuotePayload(quote);
 
   if (!normalized.ok || !normalized.valid) {
-    throw new Error(normalized.reason || normalized.code || "Invalid pricing quote");
+    throw buildAsaasClientError({
+      errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+      message: normalized.reason || normalized.code || "Invalid pricing quote",
+      retryable: false,
+      httpStatus: 400,
+      source,
+      step,
+      context: { quote: normalized },
+    });
   }
 
   if (!normalized.planCode) {
-    throw new Error("Quote missing planCode");
+    throw buildAsaasClientError({
+      errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+      message: "Quote missing planCode",
+      retryable: false,
+      httpStatus: 400,
+      source,
+      step,
+      context: { quote: normalized },
+    });
   }
 
   if (normalized.finalPriceCents <= 0) {
-    throw new Error("Quote finalPriceCents must be greater than zero");
+    throw buildAsaasClientError({
+      errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+      message: "Quote finalPriceCents must be greater than zero",
+      retryable: false,
+      httpStatus: 400,
+      source,
+      step,
+      context: { quote: normalized },
+    });
   }
 
   return normalized;
+}
+
+async function asaasFetch(path, { method = "GET", body = undefined, step = "asaasFetch", errorCode = ASAAS_CLIENT_ERROR_CODE.HTTP, context = null } = {}) {
+  let url = "";
+  try {
+    url = `${asaasBaseUrl()}${path}`;
+    const init = {
+      method,
+      headers: asaasHeaders(),
+    };
+    if (body !== undefined) init.body = JSON.stringify(body);
+
+    const res = await fetch(url, init);
+    const text = await res.text();
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch (parseErr) {
+      if (res.ok) {
+        throw buildAsaasClientError({
+          errorCode: ASAAS_CLIENT_ERROR_CODE.RESPONSE_PARSE,
+          message: "Invalid JSON response from Asaas",
+          retryable: false,
+          httpStatus: res.status,
+          payload: text ? { raw: String(text).slice(0, 1000) } : null,
+          cause: parseErr,
+          step,
+          context,
+        });
+      }
+      json = null;
+    }
+
+    if (!res.ok) {
+      const msg =
+        (json && json.errors && json.errors[0] && (json.errors[0].description || json.errors[0].code)) ||
+        (json && json.message) ||
+        text ||
+        `Asaas HTTP ${res.status}`;
+
+      throw buildAsaasClientError({
+        errorCode: inferAsaasErrorCode({
+          httpStatus: res.status,
+          message: msg,
+          payload: json,
+          fallback: errorCode,
+        }),
+        message: msg,
+        retryable: inferRetryableFromHttpStatus(res.status),
+        httpStatus: res.status,
+        payload: json,
+        step,
+        context,
+      });
+    }
+
+    return json;
+  } catch (err) {
+    if (err?.errorCode) throw err;
+
+    const message = safeStr(err?.message) || "Asaas request failed";
+    throw buildAsaasClientError({
+      errorCode: message.toLowerCase().includes("api_key") || message.toLowerCase().includes("access_token")
+        ? ASAAS_CLIENT_ERROR_CODE.AUTH
+        : errorCode || ASAAS_CLIENT_ERROR_CODE.UNKNOWN,
+      message,
+      retryable: false,
+      httpStatus: Number(err?.status || 0) || undefined,
+      payload: err?.payload || null,
+      cause: err,
+      step,
+      context: context || (url ? { path, url } : null),
+    });
+  }
 }
 
 export function buildAsaasChargeContextFromQuote({
@@ -273,7 +482,7 @@ export function buildAsaasChargeContextFromQuote({
   dueDate = "",
   paymentDate = "",
 } = {}) {
-  const q = assertValidQuote(quote);
+  const q = assertValidQuote(quote, { source: "asaas_client", step: "buildAsaasChargeContextFromQuote" });
   const method = safeLower(paymentMethod);
   const resolvedDueDate = safeStr(dueDate) || safeStr(paymentDate) || addDaysISO(todayISO(), 1);
   const resolvedPaymentDate = safeStr(paymentDate) || resolvedDueDate;
@@ -341,17 +550,36 @@ export async function findCustomerByExternalReference(externalReference) {
   const ref = safeStr(externalReference);
   if (!ref) return null;
 
-  const q = new URLSearchParams({ externalReference: ref, limit: "10", offset: "0" }).toString();
-  const data = await asaasFetch(`/customers?${q}`);
+  try {
+    const q = new URLSearchParams({ externalReference: ref, limit: "10", offset: "0" }).toString();
+    const data = await asaasFetch(`/customers?${q}`, {
+      method: "GET",
+      step: "findCustomerByExternalReference",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.CUSTOMER,
+      context: { externalReference: ref },
+    });
 
-  const first = data?.data?.[0];
-  if (!first?.id) return null;
-  return first;
+    const first = data?.data?.[0];
+    if (!first?.id) return null;
+    return first;
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      source: "asaas_client",
+      step: "findCustomerByExternalReference",
+      extra: { externalReference: ref },
+    });
+    throw err;
+  }
 }
 
 export async function createCustomer({ name, cpfCnpj, externalReference }) {
   const nm = safeStr(name) || "Cliente Amigo das Vendas";
-  const doc = safeStr(cpfCnpj);
+  const doc = assertRequiredString(cpfCnpj, "cpfCnpj", {
+    errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+    source: "asaas_client",
+    step: "createCustomer",
+  });
   const ref = safeStr(externalReference);
 
   // ⚠️ não logar doc
@@ -361,21 +589,84 @@ export async function createCustomer({ name, cpfCnpj, externalReference }) {
     externalReference: ref || undefined,
   };
 
-  return asaasFetch("/customers", { method: "POST", body: payload });
+  try {
+    return await asaasFetch("/customers", {
+      method: "POST",
+      body: payload,
+      step: "createCustomer",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.CUSTOMER,
+      context: { externalReference: ref, hasDocument: Boolean(doc) },
+    });
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      source: "asaas_client",
+      step: "createCustomer",
+      extra: { externalReference: ref, hasDocument: Boolean(doc) },
+    });
+    throw err;
+  }
 }
 
 // -------------------- Payment (PIX / boleto / etc) --------------------
 export async function createPixPayment({ customerId, value, description, externalReference, dueDate }) {
+  const finalCustomerId = assertRequiredString(customerId, "customerId", {
+    errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+    source: "asaas_client",
+    step: "createPixPayment",
+  });
+  const finalDueDate = assertRequiredString(dueDate, "dueDate", {
+    errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+    source: "asaas_client",
+    step: "createPixPayment",
+  });
+
+  const normalizedValue = normalizeMoneyValue(value);
+  if (normalizedValue <= 0) {
+    throw buildAsaasClientError({
+      errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+      message: "value must be greater than zero",
+      retryable: false,
+      httpStatus: 400,
+      source: "asaas_client",
+      step: "createPixPayment",
+    });
+  }
+
   const payload = {
-    customer: safeStr(customerId),
+    customer: finalCustomerId,
     billingType: "PIX",
-    value: normalizeMoneyValue(value),
-    dueDate: safeStr(dueDate),
+    value: normalizedValue,
+    dueDate: finalDueDate,
     description: safeStr(description),
     externalReference: externalReference ? safeStr(externalReference) : undefined,
   };
 
-  return asaasFetch("/payments", { method: "POST", body: payload });
+  try {
+    return await asaasFetch("/payments", {
+      method: "POST",
+      body: payload,
+      step: "createPixPayment",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.PIX_CREATE,
+      context: {
+        customerId: finalCustomerId,
+        dueDate: finalDueDate,
+        externalReference: safeStr(externalReference),
+      },
+    });
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      source: "asaas_client",
+      step: "createPixPayment",
+      extra: {
+        customerId: finalCustomerId,
+        dueDate: finalDueDate,
+        externalReference: safeStr(externalReference),
+      },
+    });
+    throw err;
+  }
 }
 
 export async function createPixPaymentFromQuote({
@@ -408,40 +699,54 @@ export async function createPixPaymentFromQuote({
   });
 
   if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
-    await emitAsaasClientMetricSafe(trackCheckoutStarted, trackingContext);
+    await emitAsaasClientMetricSafe(metrics.trackCheckoutStarted, trackingContext);
   }
 
-  const payment = await createPixPayment({
-    customerId,
-    value: context.finalPriceValue,
-    description: safeStr(description) || context.description,
-    externalReference,
-    dueDate: context.dueDate,
-  });
+  try {
+    const payment = await createPixPayment({
+      customerId,
+      value: context.finalPriceValue,
+      description: safeStr(description) || context.description,
+      externalReference,
+      dueDate: context.dueDate,
+    });
 
-  const paymentTrackingContext = buildAsaasClientTrackingContext({
-    quote,
-    paymentId: safeStr(payment?.id),
-    source,
-    step: "pix_checkout_created",
-  });
+    const paymentTrackingContext = buildAsaasClientTrackingContext({
+      quote,
+      paymentId: safeStr(payment?.id),
+      source,
+      step: "pix_checkout_created",
+    });
 
-  if (shouldEmitProviderTracking(resolvedTrackingMode)) {
-    await emitAsaasClientMetricSafe(trackPixCheckoutCreated, paymentTrackingContext);
+    if (shouldEmitProviderTracking(resolvedTrackingMode)) {
+      await emitAsaasClientMetricSafe(metrics.trackPixCheckoutCreated, paymentTrackingContext);
+    }
+    if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
+      await emitAsaasClientMetricSafe(
+        metrics.trackCheckoutConfirmed,
+        buildAsaasClientTrackingContext({
+          quote,
+          paymentId: safeStr(payment?.id),
+          source,
+          step: "provider_pix_checkout_materialized",
+        })
+      );
+    }
+
+    return payment;
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      quote,
+      source,
+      step: "createPixPaymentFromQuote",
+      extra: {
+        externalReference: safeStr(externalReference),
+        dueDate: safeStr(context?.dueDate),
+      },
+    });
+    throw err;
   }
-  if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
-    await emitAsaasClientMetricSafe(
-      trackCheckoutConfirmed,
-      buildAsaasClientTrackingContext({
-        quote,
-        paymentId: safeStr(payment?.id),
-        source,
-        step: "provider_pix_checkout_materialized",
-      })
-    );
-  }
-
-  return payment;
 }
 
 // -------------------- Payment Link (Recurring credit card) --------------------
@@ -452,6 +757,18 @@ export async function createRecurringCardPaymentLink({
   externalReference,
   subscriptionCycle = "MONTHLY",
 }) {
+  const normalizedValue = normalizeMoneyValue(value);
+  if (normalizedValue <= 0) {
+    throw buildAsaasClientError({
+      errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+      message: "value must be greater than zero",
+      retryable: false,
+      httpStatus: 400,
+      source: "asaas_client",
+      step: "createRecurringCardPaymentLink",
+    });
+  }
+
   // Docs: /v3/paymentLinks
   // chargeType: RECURRENT => cria assinatura automática após checkout
   const payload = {
@@ -460,11 +777,33 @@ export async function createRecurringCardPaymentLink({
     chargeType: "RECURRENT",
     billingType: "CREDIT_CARD",
     subscriptionCycle: normalizeSubscriptionCycle(subscriptionCycle),
-    value: normalizeMoneyValue(value),
+    value: normalizedValue,
     externalReference: externalReference ? safeStr(externalReference) : undefined,
   };
 
-  return asaasFetch("/paymentLinks", { method: "POST", body: payload });
+  try {
+    return await asaasFetch("/paymentLinks", {
+      method: "POST",
+      body: payload,
+      step: "createRecurringCardPaymentLink",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.PAYMENT_LINK,
+      context: {
+        externalReference: safeStr(externalReference),
+        subscriptionCycle: normalizeSubscriptionCycle(subscriptionCycle),
+      },
+    });
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      source: "asaas_client",
+      step: "createRecurringCardPaymentLink",
+      extra: {
+        externalReference: safeStr(externalReference),
+        subscriptionCycle: normalizeSubscriptionCycle(subscriptionCycle),
+      },
+    });
+    throw err;
+  }
 }
 
 export async function createRecurringCardPaymentLinkFromQuote({
@@ -483,9 +822,16 @@ export async function createRecurringCardPaymentLinkFromQuote({
   });
 
   if (!context.ok || !context.valid) {
-    const err = new Error(context.reason || "Quote not supported for recurring card payment link");
+    const err = buildAsaasClientError({
+      errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+      message: context.reason || "Quote not supported for recurring card payment link",
+      retryable: false,
+      httpStatus: 400,
+      source,
+      step: "createRecurringCardPaymentLinkFromQuote",
+      context,
+    });
     err.code = context.code || "quote_not_supported_for_recurring_link";
-    err.context = context;
     throw err;
   }
 
@@ -502,49 +848,60 @@ export async function createRecurringCardPaymentLinkFromQuote({
   });
 
   if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
-    await emitAsaasClientMetricSafe(trackCheckoutStarted, trackingContext);
+    await emitAsaasClientMetricSafe(metrics.trackCheckoutStarted, trackingContext);
   }
 
-  const paymentLink = await createRecurringCardPaymentLink({
-    name: safeStr(name) || safeStr(context.planName) || "Assinatura Amigo das Vendas",
-    description: safeStr(description) || context.description,
-    value: context.finalPriceValue,
-    externalReference,
-    subscriptionCycle: context.subscriptionCycle,
-  });
+  try {
+    const paymentLink = await createRecurringCardPaymentLink({
+      name: safeStr(name) || safeStr(context.planName) || "Assinatura Amigo das Vendas",
+      description: safeStr(description) || context.description,
+      value: context.finalPriceValue,
+      externalReference,
+      subscriptionCycle: context.subscriptionCycle,
+    });
 
-  const paymentLinkTrackingContext = buildAsaasClientTrackingContext({
-    quote,
-    paymentId: safeStr(paymentLink?.id),
-    source,
-    step: "payment_link_created",
-  });
+    const paymentLinkTrackingContext = buildAsaasClientTrackingContext({
+      quote,
+      paymentId: safeStr(paymentLink?.id),
+      source,
+      step: "payment_link_created",
+    });
 
-  if (shouldEmitProviderTracking(resolvedTrackingMode)) {
-    await emitAsaasClientMetricSafe(trackPaymentLinkCreated, paymentLinkTrackingContext);
-    await emitAsaasClientMetricSafe(
-      trackSubscriptionCheckoutCreated,
-      buildAsaasClientTrackingContext({
-        quote,
-        paymentId: safeStr(paymentLink?.id),
-        source,
-        step: "subscription_checkout_created",
-      })
-    );
+    if (shouldEmitProviderTracking(resolvedTrackingMode)) {
+      await emitAsaasClientMetricSafe(metrics.trackPaymentLinkCreated, paymentLinkTrackingContext);
+      await emitAsaasClientMetricSafe(
+        metrics.trackSubscriptionCheckoutCreated,
+        buildAsaasClientTrackingContext({
+          quote,
+          paymentId: safeStr(paymentLink?.id),
+          source,
+          step: "subscription_checkout_created",
+        })
+      );
+    }
+    if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
+      await emitAsaasClientMetricSafe(
+        metrics.trackCheckoutConfirmed,
+        buildAsaasClientTrackingContext({
+          quote,
+          paymentId: safeStr(paymentLink?.id),
+          source,
+          step: "provider_subscription_checkout_materialized",
+        })
+      );
+    }
+
+    return paymentLink;
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      quote,
+      source,
+      step: "createRecurringCardPaymentLinkFromQuote",
+      extra: { externalReference: safeStr(externalReference) },
+    });
+    throw err;
   }
-  if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
-    await emitAsaasClientMetricSafe(
-      trackCheckoutConfirmed,
-      buildAsaasClientTrackingContext({
-        quote,
-        paymentId: safeStr(paymentLink?.id),
-        source,
-        step: "provider_subscription_checkout_materialized",
-      })
-    );
-  }
-
-  return paymentLink;
 }
 
 export async function createAsaasCheckoutFromQuote({
@@ -562,33 +919,53 @@ export async function createAsaasCheckoutFromQuote({
 } = {}) {
   const method = safeLower(paymentMethod);
 
-  if (method === "pix") {
-    return createPixPaymentFromQuote({
-      customerId,
-      quote,
-      description,
-      externalReference,
-      dueDate,
-      trackingMode,
-      trackConversion,
-      trackCheckoutLifecycle,
-      source,
-    });
-  }
+  try {
+    if (method === "pix") {
+      return await createPixPaymentFromQuote({
+        customerId,
+        quote,
+        description,
+        externalReference,
+        dueDate,
+        trackingMode,
+        trackConversion,
+        trackCheckoutLifecycle,
+        source,
+      });
+    }
 
-  if (method === "credit_card" || method === "card") {
-    return createRecurringCardPaymentLinkFromQuote({
-      quote,
-      name,
-      description,
-      externalReference,
-      trackConversion,
-      trackCheckoutLifecycle,
-      source,
-    });
-  }
+    if (method === "credit_card" || method === "card") {
+      return await createRecurringCardPaymentLinkFromQuote({
+        quote,
+        name,
+        description,
+        externalReference,
+        trackingMode,
+        trackConversion,
+        trackCheckoutLifecycle,
+        source,
+      });
+    }
 
-  throw new Error("Unsupported paymentMethod. Use pix or credit_card.");
+    throw buildAsaasClientError({
+      errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+      message: "Unsupported paymentMethod. Use pix or credit_card.",
+      retryable: false,
+      httpStatus: 400,
+      source,
+      step: "createAsaasCheckoutFromQuote",
+      context: { paymentMethod: method },
+    });
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      quote,
+      source,
+      step: "createAsaasCheckoutFromQuote",
+      extra: { paymentMethod: method },
+    });
+    throw err;
+  }
 }
 
 // -------------------- Subscriptions --------------------
@@ -598,33 +975,101 @@ export async function createAsaasCheckoutFromQuote({
 // 2) Se falhar (404/405), tentar DELETE /subscriptions/{id}
 
 export async function getSubscription({ subscriptionId }) {
-  const id = safeStr(subscriptionId);
-  if (!id) throw new Error("subscriptionId required");
-  return asaasFetch(`/subscriptions/${id}`, { method: "GET" });
+  const id = assertRequiredString(subscriptionId, "subscriptionId", {
+    errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+    source: "asaas_client",
+    step: "getSubscription",
+  });
+
+  try {
+    return await asaasFetch(`/subscriptions/${id}`, {
+      method: "GET",
+      step: "getSubscription",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.SUBSCRIPTION,
+      context: { subscriptionId: id },
+    });
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      source: "asaas_client",
+      step: "getSubscription",
+      subscriptionId: id,
+    });
+    throw err;
+  }
 }
 
 export async function cancelSubscription({ subscriptionId }) {
-  const id = safeStr(subscriptionId);
-  if (!id) throw new Error("subscriptionId required");
+  const id = assertRequiredString(subscriptionId, "subscriptionId", {
+    errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+    source: "asaas_client",
+    step: "cancelSubscription",
+  });
 
   // 1) POST cancel (quando disponível)
   try {
-    return await asaasFetch(`/subscriptions/${id}/cancel`, { method: "POST" });
+    return await asaasFetch(`/subscriptions/${id}/cancel`, {
+      method: "POST",
+      step: "cancelSubscription:post_cancel",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.SUBSCRIPTION,
+      context: { subscriptionId: id },
+    });
   } catch (err) {
-    const st = Number(err?.status || 0);
-    // 404/405/400: tenta alternativa
-    if (st && st !== 404 && st !== 405 && st !== 400) throw err;
+    const st = Number(err?.httpStatus || err?.status || 0);
+    if (st && st !== 404 && st !== 405 && st !== 400) {
+      await logAsaasClientFailure({
+        error: err,
+        source: "asaas_client",
+        step: "cancelSubscription:post_cancel",
+        subscriptionId: id,
+      });
+      throw err;
+    }
   }
 
   // 2) DELETE subscription
-  return asaasFetch(`/subscriptions/${id}`, { method: "DELETE" });
+  try {
+    return await asaasFetch(`/subscriptions/${id}`, {
+      method: "DELETE",
+      step: "cancelSubscription:delete",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.SUBSCRIPTION,
+      context: { subscriptionId: id },
+    });
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      source: "asaas_client",
+      step: "cancelSubscription:delete",
+      subscriptionId: id,
+    });
+    throw err;
+  }
 }
 
 // -------------------- Payments (Consulta / Reconciliação) --------------------
 export async function getPayment({ paymentId }) {
-  const id = safeStr(paymentId);
-  if (!id) throw new Error("paymentId required");
-  return asaasFetch(`/payments/${id}`, { method: "GET" });
+  const id = assertRequiredString(paymentId, "paymentId", {
+    errorCode: ASAAS_CLIENT_ERROR_CODE.VALIDATION,
+    source: "asaas_client",
+    step: "getPayment",
+  });
+
+  try {
+    return await asaasFetch(`/payments/${id}`, {
+      method: "GET",
+      step: "getPayment",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.HTTP,
+      context: { paymentId: id },
+    });
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      source: "asaas_client",
+      step: "getPayment",
+      paymentId: id,
+    });
+    throw err;
+  }
 }
 
 export async function listPayments({
@@ -646,8 +1091,6 @@ export async function listPayments({
   if (status) params.set("status", safeStr(status));
   if (billingType) params.set("billingType", safeStr(billingType));
 
-  // Asaas aceita dateCreated (YYYY-MM-DD) e possivelmente filtros por intervalo via createdDate[ge]/[le] em alguns endpoints.
-  // Mantemos abordagem compatível: se apenas um lado foi fornecido, enviamos dateCreated (from).
   if (dateCreatedFrom && !dateCreatedTo) params.set("dateCreated", safeStr(dateCreatedFrom));
   if (dateCreatedFrom && dateCreatedTo) {
     params.set("dateCreated[ge]", safeStr(dateCreatedFrom));
@@ -657,7 +1100,30 @@ export async function listPayments({
   params.set("limit", String(Number(limit) || 50));
   params.set("offset", String(Number(offset) || 0));
 
-  return asaasFetch(`/payments?${params.toString()}`, { method: "GET" });
+  try {
+    return await asaasFetch(`/payments?${params.toString()}`, {
+      method: "GET",
+      step: "listPayments",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.HTTP,
+      context: {
+        externalReference: safeStr(externalReference),
+        customerId: safeStr(customerId),
+        subscriptionId: safeStr(subscriptionId),
+      },
+    });
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      source: "asaas_client",
+      step: "listPayments",
+      extra: {
+        externalReference: safeStr(externalReference),
+        customerId: safeStr(customerId),
+        subscriptionId: safeStr(subscriptionId),
+      },
+    });
+    throw err;
+  }
 }
 
 export async function listPaymentsByExternalReference(externalReference, { limit = 50, offset = 0 } = {}) {
@@ -678,12 +1144,35 @@ export async function listSubscriptions({
   if (status) params.set("status", safeStr(status));
   params.set("limit", String(Number(limit) || 50));
   params.set("offset", String(Number(offset) || 0));
-  return asaasFetch(`/subscriptions?${params.toString()}`, { method: "GET" });
+
+  try {
+    return await asaasFetch(`/subscriptions?${params.toString()}`, {
+      method: "GET",
+      step: "listSubscriptions",
+      errorCode: ASAAS_CLIENT_ERROR_CODE.SUBSCRIPTION,
+      context: {
+        externalReference: safeStr(externalReference),
+        customerId: safeStr(customerId),
+        status: safeStr(status),
+      },
+    });
+  } catch (err) {
+    await logAsaasClientFailure({
+      error: err,
+      source: "asaas_client",
+      step: "listSubscriptions",
+      extra: {
+        externalReference: safeStr(externalReference),
+        customerId: safeStr(customerId),
+        status: safeStr(status),
+      },
+    });
+    throw err;
+  }
 }
 
 export async function listSubscriptionsByExternalReference(externalReference, { limit = 50, offset = 0 } = {}) {
   return listSubscriptions({ externalReference, limit, offset });
 }
-
 
 export const ASAAS_CLIENT_TRACKING_MODE_VALUES = ASAAS_CLIENT_TRACKING_MODE;
