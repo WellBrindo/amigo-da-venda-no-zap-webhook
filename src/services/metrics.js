@@ -1090,6 +1090,8 @@ const CONVERSION_EVENTS = Object.freeze([
   "pricing_error",
   "whatsapp_send_error",
   "webhook_error",
+  "state_error",
+  "coupon_error",
 ]);
 
 export const CONVERSION_EVENT_CATALOG = Object.freeze({
@@ -1129,6 +1131,8 @@ export const CONVERSION_EVENT_CATALOG = Object.freeze({
   PRICING_ERROR: "pricing_error",
   WHATSAPP_SEND_ERROR: "whatsapp_send_error",
   WEBHOOK_ERROR: "webhook_error",
+  STATE_ERROR: "state_error",
+  COUPON_ERROR: "coupon_error",
 });
 
 const CONVERSION_EVENT_SET = new Set(CONVERSION_EVENTS);
@@ -1325,6 +1329,7 @@ function normalizeTrackingContext(payload = {}) {
     paymentId: safeStr(source.paymentId),
     subscriptionId: safeStr(source.subscriptionId),
     quoteId: safeStr(source.quoteId),
+    errorCode: normalizeMetricSlug(source.errorCode),
     source: normalizeMetricSlug(source.source),
     step: normalizeMetricSlug(source.step),
     by: Number(source.by) || 1,
@@ -1362,6 +1367,7 @@ export async function trackConversionEvent(eventName, payload = {}) {
       paymentId: context.paymentId || null,
       subscriptionId: context.subscriptionId || null,
       quoteId: context.quoteId || null,
+      errorCode: context.errorCode || null,
       source: context.source || null,
       step: context.step || null,
       by: context.by,
@@ -1412,6 +1418,11 @@ export const trackCampaignError = makeTrackConversionHelper(CONVERSION_EVENT_CAT
 export const trackPricingError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PRICING_ERROR);
 export const trackWhatsappSendError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.WHATSAPP_SEND_ERROR);
 export const trackWebhookError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.WEBHOOK_ERROR);
+export const trackStateError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.STATE_ERROR);
+export const trackCouponError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.COUPON_ERROR);
+
+// Alias com capitalização mais natural, preservando compatibilidade retroativa
+export const trackWhatsAppSendError = trackWhatsappSendError;
 
 export async function getConversionMetricsOverview(date = new Date()) {
   const entries = await Promise.all(CONVERSION_EVENTS.map((eventName) => getGlobalMetricEvent(eventName, date)));
@@ -1425,4 +1436,49 @@ export async function getConversionMetricsOverview(date = new Date()) {
         .map((entry) => [entry.eventName, { dayCount: entry.dayCount, monthCount: entry.monthCount }])
     ),
   };
+}
+
+
+const ERROR_EVENTS = Object.freeze([
+  CONVERSION_EVENT_CATALOG.FLOW_ERROR,
+  CONVERSION_EVENT_CATALOG.PAYMENT_ERROR,
+  CONVERSION_EVENT_CATALOG.CAMPAIGN_ERROR,
+  CONVERSION_EVENT_CATALOG.WHATSAPP_SEND_ERROR,
+  CONVERSION_EVENT_CATALOG.WEBHOOK_ERROR,
+  CONVERSION_EVENT_CATALOG.STATE_ERROR,
+  CONVERSION_EVENT_CATALOG.PRICING_ERROR,
+  CONVERSION_EVENT_CATALOG.COUPON_ERROR,
+]);
+
+export const ERROR_EVENT_CATALOG = Object.freeze({
+  FLOW_ERROR: CONVERSION_EVENT_CATALOG.FLOW_ERROR,
+  PAYMENT_ERROR: CONVERSION_EVENT_CATALOG.PAYMENT_ERROR,
+  CAMPAIGN_ERROR: CONVERSION_EVENT_CATALOG.CAMPAIGN_ERROR,
+  WHATSAPP_SEND_ERROR: CONVERSION_EVENT_CATALOG.WHATSAPP_SEND_ERROR,
+  WEBHOOK_ERROR: CONVERSION_EVENT_CATALOG.WEBHOOK_ERROR,
+  STATE_ERROR: CONVERSION_EVENT_CATALOG.STATE_ERROR,
+  PRICING_ERROR: CONVERSION_EVENT_CATALOG.PRICING_ERROR,
+  COUPON_ERROR: CONVERSION_EVENT_CATALOG.COUPON_ERROR,
+});
+
+export async function getErrorMetricsOverview(date = new Date()) {
+  const entries = await Promise.all(ERROR_EVENTS.map((eventName) => getGlobalMetricEvent(eventName, date)));
+  return {
+    ok: true,
+    day: entries[0]?.day || getDayKeyParts(date).day,
+    month: entries[0]?.month || getDayKeyParts(date).month,
+    events: Object.fromEntries(
+      entries
+        .filter((entry) => entry && entry.ok)
+        .map((entry) => [entry.eventName, { dayCount: entry.dayCount, monthCount: entry.monthCount }])
+    ),
+  };
+}
+
+export async function getErrorMetricEvent(eventName, date = new Date()) {
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  if (!ERROR_EVENTS.includes(normalizedEvent)) {
+    return { ok: false, error: 'eventName not in error catalog', eventName: normalizedEvent };
+  }
+  return getGlobalMetricEvent(normalizedEvent, date);
 }
