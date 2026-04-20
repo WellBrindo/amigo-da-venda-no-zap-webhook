@@ -459,6 +459,8 @@ async function emitReservationSideEffects({
     return false;
 }
 
+}
+
 async function finalizeReservationTransition({
   previous = null,
   next = null,
