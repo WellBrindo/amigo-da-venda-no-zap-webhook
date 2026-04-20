@@ -82,6 +82,412 @@ const COUPON_CONVERSION_TRACKING_MODE = Object.freeze({
   FLOW_EXCLUSIVE: "flow_exclusive",
 });
 
+const COUPON_ERROR_CODE = Object.freeze({
+  PERSISTENCE: "COUPON_PERSISTENCE_ERROR",
+  VALIDATION: "COUPON_VALIDATION_ERROR",
+  RESERVATION: "COUPON_RESERVATION_ERROR",
+  RELEASE: "COUPON_RELEASE_ERROR",
+  CONFIRM: "COUPON_CONFIRM_ERROR",
+  EXPIRATION: "COUPON_EXPIRATION_ERROR",
+  RUNTIME: "COUPON_RUNTIME_ERROR",
+});
+
+
+
+const COUPON_ROLLBACK_POLICY = Object.freeze({
+  KEEP_RESERVED: "keep_reserved",
+  RELEASE: "release",
+  FAIL: "fail",
+  CANCEL: "cancel",
+});
+
+let couponMetricsModulePromise = null;
+let couponAuditModulePromise = null;
+
+function createCouponError(errorCode, message, extra = {}) {
+  const err = new Error(safeStr(message) || safeStr(errorCode) || "Coupon runtime error");
+  err.name = "CouponRuntimeError";
+  err.errorCode = safeStr(errorCode) || COUPON_ERROR_CODE.RUNTIME;
+  Object.assign(err, extra || {});
+  return err;
+}
+
+function normalizeCouponRollbackPolicy(value, fallback = COUPON_ROLLBACK_POLICY.RELEASE) {
+  const text = toLower(value);
+  if (text === COUPON_ROLLBACK_POLICY.KEEP_RESERVED) return COUPON_ROLLBACK_POLICY.KEEP_RESERVED;
+  if (text === COUPON_ROLLBACK_POLICY.FAIL) return COUPON_ROLLBACK_POLICY.FAIL;
+  if (text === COUPON_ROLLBACK_POLICY.CANCEL) return COUPON_ROLLBACK_POLICY.CANCEL;
+  if (text === COUPON_ROLLBACK_POLICY.RELEASE) return COUPON_ROLLBACK_POLICY.RELEASE;
+  return fallback;
+}
+
+async function getMetricsModuleOptional() {
+  if (!couponMetricsModulePromise) {
+    couponMetricsModulePromise = import("./metrics.js").catch(() => null);
+  }
+  return couponMetricsModulePromise;
+}
+
+async function getAuditModuleOptional() {
+  if (!couponAuditModulePromise) {
+    couponAuditModulePromise = import("./audit.js").catch(() => null);
+  }
+  return couponAuditModulePromise;
+}
+
+async function emitCouponFailureMetric({
+  errorCode = COUPON_ERROR_CODE.RUNTIME,
+  source = "coupons",
+  step = "",
+  reservationId = "",
+  couponCode = "",
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "",
+  checkoutImpact = false,
+  paymentId = "",
+  subscriptionId = "",
+} = {}) {
+  try {
+    const metrics = await getMetricsModuleOptional();
+    if (!metrics) return null;
+
+    if (typeof metrics.trackCouponError === "function") {
+      return await metrics.trackCouponError({
+        userId: safeStr(internalUserId),
+        waId: safeStr(internalUserId),
+        couponCode: normalizeCouponCode(couponCode),
+        planCode: normalizePlanCode(planCode),
+        billingCycle: normalizeBillingCycle(billingCycle),
+        paymentId: safeStr(paymentId),
+        subscriptionId: safeStr(subscriptionId),
+        source: safeStr(source) || "coupons",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        by: safeStr(reservationId),
+      });
+    }
+
+    if (typeof recordCouponMetrics === "function") {
+      await recordCouponMetrics({
+        eventName: "coupon_error",
+        userId: safeStr(internalUserId),
+        couponCode: normalizeCouponCode(couponCode),
+        planCode: normalizePlanCode(planCode),
+        billingCycle: normalizeBillingCycle(billingCycle),
+        originalCents: 0,
+        discountCents: 0,
+        finalCents: 0,
+      });
+    }
+
+    if (checkoutImpact && typeof metrics.trackPaymentError === "function") {
+      await metrics.trackPaymentError({
+        userId: safeStr(internalUserId),
+        waId: safeStr(internalUserId),
+        couponCode: normalizeCouponCode(couponCode),
+        planCode: normalizePlanCode(planCode),
+        billingCycle: normalizeBillingCycle(billingCycle),
+        paymentId: safeStr(paymentId),
+        subscriptionId: safeStr(subscriptionId),
+        source: safeStr(source) || "coupons",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        by: safeStr(reservationId),
+      });
+    }
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
+async function emitCouponOperationalLog({
+  level = "warn",
+  event = "coupon_runtime_failure",
+  errorCode = COUPON_ERROR_CODE.RUNTIME,
+  message = "",
+  source = "coupons",
+  reservationId = "",
+  couponCode = "",
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "",
+  paymentId = "",
+  subscriptionId = "",
+  step = "",
+  meta = {},
+} = {}) {
+  const payload = {
+    ts: nowIso(),
+    module: "coupons",
+    source: safeStr(source) || "coupons",
+    event: safeStr(event) || "coupon_runtime_failure",
+    level: safeStr(level) || "warn",
+    message: safeStr(message),
+    errorCode: safeStr(errorCode) || COUPON_ERROR_CODE.RUNTIME,
+    reservationId: safeStr(reservationId),
+    couponCode: normalizeCouponCode(couponCode),
+    userId: safeStr(internalUserId),
+    planCode: normalizePlanCode(planCode),
+    billingCycle: normalizeBillingCycle(billingCycle),
+    paymentId: safeStr(paymentId),
+    subscriptionId: safeStr(subscriptionId),
+    step: safeStr(step),
+    meta: normalizeMeta(meta),
+  };
+
+  try {
+    const audit = await getAuditModuleOptional();
+    if (audit?.logRuntimeError) {
+      return await audit.logRuntimeError(payload);
+    }
+    if (audit?.logOperationalEvent) {
+      return await audit.logOperationalEvent(payload);
+    }
+  } catch (_) {
+    // fallback abaixo
+  }
+
+  try {
+    console.warn(JSON.stringify(payload));
+  } catch (_) {
+    // noop
+  }
+  return payload;
+}
+
+async function handleCouponRuntimeFailure({
+  error = null,
+  errorCode = COUPON_ERROR_CODE.RUNTIME,
+  message = "",
+  source = "coupons",
+  step = "",
+  reservationId = "",
+  couponCode = "",
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "",
+  paymentId = "",
+  subscriptionId = "",
+  checkoutImpact = false,
+  meta = {},
+  shouldThrow = true,
+} = {}) {
+  const err = error instanceof Error
+    ? error
+    : createCouponError(
+        errorCode,
+        message || safeStr(error),
+        {
+          reservationId,
+          couponCode,
+          internalUserId,
+          planCode,
+          billingCycle,
+          paymentId,
+          subscriptionId,
+          source,
+          step,
+          meta,
+        }
+      );
+
+  if (!err.errorCode) err.errorCode = safeStr(errorCode) || COUPON_ERROR_CODE.RUNTIME;
+  if (!err.source) err.source = safeStr(source) || "coupons";
+  if (!err.step) err.step = safeStr(step);
+  if (!err.reservationId) err.reservationId = safeStr(reservationId);
+  if (!err.couponCode) err.couponCode = normalizeCouponCode(couponCode);
+  if (!err.internalUserId) err.internalUserId = safeStr(internalUserId);
+  if (!err.planCode) err.planCode = normalizePlanCode(planCode);
+  if (!err.billingCycle) err.billingCycle = normalizeBillingCycle(billingCycle);
+  if (!err.paymentId) err.paymentId = safeStr(paymentId);
+  if (!err.subscriptionId) err.subscriptionId = safeStr(subscriptionId);
+  if (!err.meta) err.meta = normalizeMeta(meta);
+  if (typeof err.checkoutImpact !== "boolean") err.checkoutImpact = !!checkoutImpact;
+
+  await emitCouponFailureMetric({
+    errorCode: err.errorCode,
+    source: err.source,
+    step: err.step,
+    reservationId: err.reservationId,
+    couponCode: err.couponCode,
+    internalUserId: err.internalUserId,
+    planCode: err.planCode,
+    billingCycle: err.billingCycle,
+    paymentId: err.paymentId,
+    subscriptionId: err.subscriptionId,
+    checkoutImpact: err.checkoutImpact,
+  });
+  await emitCouponOperationalLog({
+    event: "coupon_runtime_failure",
+    errorCode: err.errorCode,
+    message: err.message,
+    source: err.source,
+    reservationId: err.reservationId,
+    couponCode: err.couponCode,
+    internalUserId: err.internalUserId,
+    planCode: err.planCode,
+    billingCycle: err.billingCycle,
+    paymentId: err.paymentId,
+    subscriptionId: err.subscriptionId,
+    step: err.step,
+    meta: err.meta,
+  });
+
+  if (shouldThrow) throw err
+  return err;
+}
+
+async function persistReservationWithIndexes(previousReservation, nextReservation, context = {}) {
+  const previous = isPlainObject(previousReservation) ? previousReservation : null;
+  const next = isPlainObject(nextReservation) ? nextReservation : null;
+  if (!next?.reservationId) {
+    return handleCouponRuntimeFailure({
+      errorCode: COUPON_ERROR_CODE.RESERVATION,
+      message: "persistReservationWithIndexes: reservationId required",
+      source: context.source || "coupons",
+      step: context.step || "persist_reservation",
+      reservationId: safeStr(next?.reservationId),
+      couponCode: normalizeCouponCode(next?.couponCode),
+      internalUserId: safeStr(next?.internalUserId),
+      planCode: normalizePlanCode(next?.planCode),
+      billingCycle: normalizeBillingCycle(next?.billingCycle),
+      checkoutImpact: !!context.checkoutImpact,
+    });
+  }
+
+  let wroteRecord = false;
+  try {
+    await writeReservationRecord(next);
+    wroteRecord = true;
+    await syncReservationIndexes(previous, next);
+    return next;
+  } catch (error) {
+    if (wroteRecord) {
+      try {
+        if (previous) {
+          await writeReservationRecord(previous);
+          await syncReservationIndexes(next, previous);
+        } else {
+          await redisDel(redisCouponReservationKey(next.reservationId));
+          await syncReservationIndexes(next, null);
+        }
+      } catch (_) {
+        // best effort de rollback
+      }
+    }
+
+    return handleCouponRuntimeFailure({
+      error,
+      errorCode: COUPON_ERROR_CODE.PERSISTENCE,
+      message: error?.message || "Failed to persist coupon reservation",
+      source: context.source || "coupons",
+      step: context.step || "persist_reservation",
+      reservationId: next.reservationId,
+      couponCode: next.couponCode,
+      internalUserId: next.internalUserId,
+      planCode: next.planCode,
+      billingCycle: next.billingCycle,
+      paymentId: next.paymentId,
+      subscriptionId: next.subscriptionId,
+      checkoutImpact: !!context.checkoutImpact,
+      meta: { rollbackAttempted: true, hasPreviousReservation: !!previous },
+    });
+  }
+}
+
+async function emitReservationSideEffects({
+  eventName = "",
+  metricEvent = "",
+  previous = null,
+  reservation = null,
+  reason = "",
+  meta = {},
+  source = "coupons",
+  checkoutImpact = false,
+} = {}) {
+  const next = isPlainObject(reservation) ? reservation : {};
+  try {
+    await emitCouponAudit(eventName, next, {
+      summary: `Reserva alterada para ${safeStr(next.status)}`,
+      before: previous || {},
+      after: next,
+      meta,
+    });
+
+    if (metricEvent) {
+      await emitCouponMetric({
+        eventName: metricEvent,
+        couponCode: next.couponCode,
+        internalUserId: next.internalUserId,
+        planCode: next.planCode,
+        billingCycle: next.billingCycle,
+        basePriceCents: next.basePriceCents,
+        discountAmountCents: next.discountAmountCents,
+        finalPriceCents: next.finalPriceCents,
+      });
+    }
+
+    await emitCouponReport(metricEvent || toLower(eventName), next, {
+      status: next.status,
+      paymentId: next.paymentId,
+      subscriptionId: next.subscriptionId,
+      reason,
+      meta,
+    });
+
+    return true;
+  } catch (error) {
+    await handleCouponRuntimeFailure({
+      error,
+      errorCode: COUPON_ERROR_CODE.RUNTIME,
+      message: error?.message || "Failed to emit coupon side effects",
+      source,
+      step: "emit_reservation_side_effects",
+      reservationId: safeStr(next.reservationId),
+      couponCode: normalizeCouponCode(next.couponCode),
+      internalUserId: safeStr(next.internalUserId),
+      planCode: normalizePlanCode(next.planCode),
+      billingCycle: normalizeBillingCycle(next.billingCycle),
+      paymentId: safeStr(next.paymentId),
+      subscriptionId: safeStr(next.subscriptionId),
+      checkoutImpact: !!checkoutImpact,
+      meta: { eventName, metricEvent, reason },
+      shouldThrow: false,
+    });
+    return false;
+}
+
+async function finalizeReservationTransition({
+  previous = null,
+  next = null,
+  eventName = "",
+  metricEvent = "",
+  reason = "",
+  meta = {},
+  source = "coupons",
+  checkoutImpact = false,
+} = {}) {
+  await persistReservationWithIndexes(previous, next, {
+    source,
+    step: "transition_persist",
+    checkoutImpact,
+  });
+
+  await emitReservationSideEffects({
+    eventName,
+    metricEvent,
+    previous,
+    reservation: next,
+    reason,
+    meta,
+    source,
+    checkoutImpact,
+  });
+
+  return { ok: true, previous, reservation: next };
+}
 // Política semântica final deste módulo:
 // - Eventos operacionais do motor de cupom:
 //   coupon_attempted, coupon_validated, coupon_reserved, coupon_confirmed,
@@ -1409,17 +1815,47 @@ export async function createCouponReservation({
   reservationTtlHours = DEFAULT_RESERVATION_TTL_HOURS,
   meta = {},
 } = {}) {
-  const eligibility = await validateCouponEligibility({
-    internalUserId,
-    couponCode,
-    planCode,
-    billingCycle,
-    basePriceCents,
-  });
+  let eligibility = null;
+  try {
+    eligibility = await validateCouponEligibility({
+      internalUserId,
+      couponCode,
+      planCode,
+      billingCycle,
+      basePriceCents,
+    });
+  } catch (error) {
+    await handleCouponRuntimeFailure({
+      error,
+      errorCode: COUPON_ERROR_CODE.VALIDATION,
+      message: error?.message || "Failed to validate coupon eligibility",
+      source: "coupons",
+      step: "create_reservation_validate",
+      couponCode,
+      internalUserId,
+      planCode,
+      billingCycle,
+      checkoutImpact: true,
+    });
+  }
 
-  if (!eligibility.ok) return eligibility;
+  if (!eligibility?.ok) return eligibility;
 
-  const sequence = await redisNextCouponReservationSequence();
+  const sequence = await redisNextCouponReservationSequence().catch((error) =>
+    handleCouponRuntimeFailure({
+      error,
+      errorCode: COUPON_ERROR_CODE.RESERVATION,
+      message: error?.message || "Failed to allocate coupon reservation sequence",
+      source: "coupons",
+      step: "create_reservation_sequence",
+      couponCode,
+      internalUserId,
+      planCode,
+      billingCycle,
+      checkoutImpact: true,
+    })
+  );
+
   const reservationId = makeReservationId(sequence);
   const ttlHours = resolveReservationHours({ reservationTtlHours });
   const reservedAtMs = nowMs();
@@ -1452,26 +1888,20 @@ export async function createCouponReservation({
     meta: normalizeMeta(meta),
   });
 
-  await writeReservationRecord(reservation);
-  await syncReservationIndexes(null, reservation);
+  await persistReservationWithIndexes(null, reservation, {
+    source: "coupons",
+    step: "create_reservation_persist",
+    checkoutImpact: true,
+  });
 
-  await emitCouponAudit("COUPON_RESERVED", reservation, {
-    summary: "Reserva de cupom criada",
+  await emitReservationSideEffects({
+    eventName: "COUPON_RESERVED",
+    metricEvent: "coupon_reserved",
+    previous: null,
+    reservation,
     meta: { ttlHours },
-  });
-  await emitCouponMetric({
-    eventName: "coupon_reserved",
-    couponCode: reservation.couponCode,
-    internalUserId: reservation.internalUserId,
-    planCode: reservation.planCode,
-    billingCycle: reservation.billingCycle,
-    basePriceCents: reservation.basePriceCents,
-    discountAmountCents: reservation.discountAmountCents,
-    finalPriceCents: reservation.finalPriceCents,
-  });
-  await emitCouponReport("coupon_reserved", reservation, {
-    status: reservation.status,
-    meta: { ttlHours },
+    source: "coupons",
+    checkoutImpact: true,
   });
 
   return {
@@ -1545,8 +1975,29 @@ export async function listExpiredPendingCouponReservations({
   return rows.filter((row) => row.status === RESERVATION_STATUS.RESERVED && isoToMs(row.expiresAt) <= normalizedNow);
 }
 
-async function transitionReservation(reservationId, nextStatus, patch = {}, eventName = "", metricEvent = "") {
-  const previous = await readReservation(reservationId);
+async function transitionReservation(reservationId, nextStatus, patch = {}, eventName = "", metricEvent = "", options = {}) {
+  const source = safeStr(options.source || "coupons") || "coupons";
+  const normalizedReason =
+    safeStr(
+      patch.releaseReason ||
+      patch.failureReason ||
+      patch.cancellationReason ||
+      options.reason ||
+      ""
+    );
+
+  const previous = await readReservation(reservationId).catch((error) =>
+    handleCouponRuntimeFailure({
+      error,
+      errorCode: COUPON_ERROR_CODE.PERSISTENCE,
+      message: error?.message || "Failed to read coupon reservation",
+      source,
+      step: "transition_read_previous",
+      reservationId,
+      checkoutImpact: !!options.checkoutImpact,
+    })
+  );
+
   if (!previous) {
     return { ok: false, error: "reservation_not_found" };
   }
@@ -1567,34 +2018,15 @@ async function transitionReservation(reservationId, nextStatus, patch = {}, even
     previous
   );
 
-  await writeReservationRecord(next);
-  await syncReservationIndexes(previous, next);
-
-  await emitCouponAudit(eventName, next, {
-    summary: `Reserva alterada para ${allowedStatus}`,
-    before: previous,
-    after: next,
-  });
-
-  if (metricEvent) {
-    await emitCouponMetric({
-      eventName: metricEvent,
-      couponCode: next.couponCode,
-      internalUserId: next.internalUserId,
-      planCode: next.planCode,
-      billingCycle: next.billingCycle,
-      basePriceCents: next.basePriceCents,
-      discountAmountCents: next.discountAmountCents,
-      finalPriceCents: next.finalPriceCents,
-    });
-  }
-
-  await emitCouponReport(metricEvent || eventName.toLowerCase(), next, {
-    status: next.status,
-    paymentId: next.paymentId,
-    subscriptionId: next.subscriptionId,
-    reason: patch.releaseReason || patch.failureReason || patch.cancellationReason || "",
+  await finalizeReservationTransition({
+    previous,
+    next,
+    eventName,
+    metricEvent,
+    reason: normalizedReason,
     meta: normalizeMeta(patch.meta),
+    source,
+    checkoutImpact: !!options.checkoutImpact,
   });
 
   return { ok: true, previous, reservation: next };
@@ -1614,7 +2046,8 @@ export async function confirmCouponReservation(
       meta: { ...normalizeMeta(meta), transition: "confirmed" },
     },
     "COUPON_CONFIRMED",
-    "coupon_confirmed"
+    "coupon_confirmed",
+    { source: "coupons", checkoutImpact: true }
   );
 }
 
@@ -1633,7 +2066,8 @@ export async function releaseCouponReservation(
       meta: { ...normalizeMeta(meta), transition: "released" },
     },
     "COUPON_RELEASED",
-    "coupon_released"
+    "coupon_released",
+    { source: "coupons", checkoutImpact: true, reason }
   );
 }
 
@@ -1647,7 +2081,8 @@ export async function expireCouponReservation(reservationId, { reason = "", meta
       meta: { ...normalizeMeta(meta), transition: "expired" },
     },
     "COUPON_EXPIRED",
-    "coupon_expired"
+    "coupon_expired",
+    { source: "coupons", checkoutImpact: true, reason }
   );
 }
 
@@ -1666,7 +2101,8 @@ export async function failCouponReservation(
       meta: { ...normalizeMeta(meta), transition: "failed" },
     },
     "COUPON_FAILED",
-    "coupon_failed"
+    "coupon_failed",
+    { source: "coupons", checkoutImpact: true, reason }
   );
 }
 
@@ -1685,15 +2121,111 @@ export async function cancelCouponReservation(
       meta: { ...normalizeMeta(meta), transition: "cancelled" },
     },
     "COUPON_CANCELLED",
-    ""
+    "",
+    { source: "coupons", checkoutImpact: true, reason }
   );
 }
+
+export async function rollbackCouponReservation(
+  reservationId,
+  {
+    policy = COUPON_ROLLBACK_POLICY.RELEASE,
+    reason = "",
+    paymentId = "",
+    subscriptionId = "",
+    meta = {},
+    source = "coupons",
+  } = {}
+) {
+  const normalizedPolicy = normalizeCouponRollbackPolicy(policy);
+  const reservation = await readReservation(reservationId).catch((error) =>
+    handleCouponRuntimeFailure({
+      error,
+      errorCode: COUPON_ERROR_CODE.PERSISTENCE,
+      message: error?.message || "Failed to read coupon reservation for rollback",
+      source,
+      step: "rollback_read",
+      reservationId,
+      paymentId,
+      subscriptionId,
+      checkoutImpact: true,
+    })
+  );
+
+  if (!reservation) return { ok: false, error: "reservation_not_found" };
+  if (reservation.status !== RESERVATION_STATUS.RESERVED) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "reservation_not_reserved",
+      reservation,
+      policy: normalizedPolicy,
+    };
+  }
+
+  if (normalizedPolicy === COUPON_ROLLBACK_POLICY.KEEP_RESERVED) {
+    await emitCouponOperationalLog({
+      event: "coupon_rollback_keep_reserved",
+      errorCode: COUPON_ERROR_CODE.RESERVATION,
+      message: "Coupon reservation preserved after checkout rollback",
+      source,
+      reservationId: reservation.reservationId,
+      couponCode: reservation.couponCode,
+      internalUserId: reservation.internalUserId,
+      planCode: reservation.planCode,
+      billingCycle: reservation.billingCycle,
+      paymentId,
+      subscriptionId,
+      step: "rollback_keep_reserved",
+      meta: normalizeMeta(meta),
+    });
+    return { ok: true, kept: true, policy: normalizedPolicy, reservation };
+  }
+
+  if (normalizedPolicy === COUPON_ROLLBACK_POLICY.FAIL) {
+    return failCouponReservation(reservationId, {
+      reason: safeStr(reason) || "checkout_rollback_failed",
+      paymentId,
+      subscriptionId,
+      meta: { ...normalizeMeta(meta), rollbackPolicy: normalizedPolicy, source },
+    });
+  }
+
+  if (normalizedPolicy === COUPON_ROLLBACK_POLICY.CANCEL) {
+    return cancelCouponReservation(reservationId, {
+      reason: safeStr(reason) || "checkout_rollback_cancelled",
+      paymentId,
+      subscriptionId,
+      meta: { ...normalizeMeta(meta), rollbackPolicy: normalizedPolicy, source },
+    });
+  }
+
+  return releaseCouponReservation(reservationId, {
+    reason: safeStr(reason) || "checkout_rollback_released",
+    paymentId,
+    subscriptionId,
+    meta: { ...normalizeMeta(meta), rollbackPolicy: normalizedPolicy, source },
+  });
+}
+
 
 // Importante:
 // - coupon_removed_message_sent é um evento operacional de timeout/automação.
 // - coupon_removed (funil oficial) pertence ao fluxo de UX explícita e NÃO deve ser emitido aqui.
 export async function markCouponRemovedMessageSent(reservationId, { sentAt = "", meta = {}, trackConversion = false, trackingMode = "auto", source = "coupons" } = {}) {
-  const previous = await readReservation(reservationId);
+  void trackConversion;
+  void trackingMode;
+  const previous = await readReservation(reservationId).catch((error) =>
+    handleCouponRuntimeFailure({
+      error,
+      errorCode: COUPON_ERROR_CODE.PERSISTENCE,
+      message: error?.message || "Failed to read coupon reservation",
+      source,
+      step: "coupon_removed_message_read",
+      reservationId,
+      checkoutImpact: false,
+    })
+  );
   if (!previous) return { ok: false, error: "reservation_not_found" };
 
   if (safeStr(previous.messageSentAt)) {
@@ -1709,25 +2241,20 @@ export async function markCouponRemovedMessageSent(reservationId, { sentAt = "",
     previous
   );
 
-  await writeReservationRecord(next);
-  await emitCouponAudit("COUPON_REMOVED_MESSAGE_SENT", next, {
-    summary: "Mensagem de remoção de cupom enviada",
-    before: previous,
-    after: next,
+  await persistReservationWithIndexes(previous, next, {
+    source,
+    step: "coupon_removed_message_persist",
+    checkoutImpact: false,
   });
-  await emitCouponMetric({
-    eventName: "coupon_removed_message_sent",
-    couponCode: next.couponCode,
-    internalUserId: next.internalUserId,
-    planCode: next.planCode,
-    billingCycle: next.billingCycle,
-    basePriceCents: next.basePriceCents,
-    discountAmountCents: next.discountAmountCents,
-    finalPriceCents: next.finalPriceCents,
-  });
-  await emitCouponReport("coupon_removed_message_sent", next, {
-    status: next.status,
+
+  await emitReservationSideEffects({
+    eventName: "COUPON_REMOVED_MESSAGE_SENT",
+    metricEvent: "coupon_removed_message_sent",
+    previous,
+    reservation: next,
     meta: normalizeMeta(meta),
+    source,
+    checkoutImpact: false,
   });
 
   return { ok: true, previous, reservation: next };
@@ -1827,3 +2354,5 @@ export const COUPON_DISCOUNT_TYPE_VALUES = DISCOUNT_TYPE;
 export const COUPON_APPLIES_TO_VALUES = APPLIES_TO;
 export const COUPON_DEFAULT_RESERVATION_TTL_HOURS = DEFAULT_RESERVATION_TTL_HOURS;
 export const COUPON_CONVERSION_TRACKING_MODE_VALUES = COUPON_CONVERSION_TRACKING_MODE;
+export const COUPON_ERROR_CODE_VALUES = COUPON_ERROR_CODE;
+export const COUPON_ROLLBACK_POLICY_VALUES = COUPON_ROLLBACK_POLICY;
