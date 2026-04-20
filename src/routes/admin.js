@@ -36,6 +36,7 @@ import {
   resetUserDescriptionMetrics,
   getFeedbackMetricsOverview,
   getMetricEventLastNDays,
+  getConversionMetricsOverview,
   incMetricEvent,
 } from "../services/metrics.js";
 
@@ -2526,10 +2527,19 @@ export function adminRouter() {
       user = { snapshot: snap || {}, metrics };
     }
 
+    const funnel = await buildDashboardFunnelData().catch((err) => ({
+      ok: false,
+      error: String(err?.message || err),
+      overview: { ok: false, events: {} },
+      timelines: {},
+      rates: { day: {}, month: {} },
+    }));
+
     res.json({
       ok: true,
       ts: Date.now(),
       global,
+      funnel,
       window24hCount,
       systemPlans,
       systemPlansError: systemPlansError || undefined,
@@ -2544,6 +2554,147 @@ export function adminRouter() {
   });
 
   
+
+  const DASHBOARD_FUNNEL_PRIMARY_EVENTS = [
+    "trial_started",
+    "first_ad_generated",
+    "plans_viewed",
+    "checkout_started",
+    "payment_confirmed",
+    "plan_activated",
+  ];
+
+  const DASHBOARD_FUNNEL_CAMPAIGN_EVENTS = [
+    "campaign_received",
+    "campaign_clicked_intent",
+    "campaign_conversion_attributed",
+  ];
+
+  const DASHBOARD_FUNNEL_EVENTS = [
+    ...DASHBOARD_FUNNEL_PRIMARY_EVENTS,
+    ...DASHBOARD_FUNNEL_CAMPAIGN_EVENTS,
+  ];
+
+  function pctSafe(current, base) {
+    const a = Number(current || 0);
+    const b = Number(base || 0);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b <= 0) return null;
+    return Number(((a / b) * 100).toFixed(1));
+  }
+
+  function buildDashboardFunnelRates(events = {}) {
+    const trialDay = Number(events?.trial_started?.dayCount || 0);
+    const firstAdDay = Number(events?.first_ad_generated?.dayCount || 0);
+    const plansDay = Number(events?.plans_viewed?.dayCount || 0);
+    const checkoutDay = Number(events?.checkout_started?.dayCount || 0);
+    const paidDay = Number(events?.payment_confirmed?.dayCount || 0);
+    const activeDay = Number(events?.plan_activated?.dayCount || 0);
+    const campaignReceivedDay = Number(events?.campaign_received?.dayCount || 0);
+    const campaignClickedDay = Number(events?.campaign_clicked_intent?.dayCount || 0);
+    const campaignConvertedDay = Number(events?.campaign_conversion_attributed?.dayCount || 0);
+
+    const trialMonth = Number(events?.trial_started?.monthCount || 0);
+    const firstAdMonth = Number(events?.first_ad_generated?.monthCount || 0);
+    const plansMonth = Number(events?.plans_viewed?.monthCount || 0);
+    const checkoutMonth = Number(events?.checkout_started?.monthCount || 0);
+    const paidMonth = Number(events?.payment_confirmed?.monthCount || 0);
+    const activeMonth = Number(events?.plan_activated?.monthCount || 0);
+    const campaignReceivedMonth = Number(events?.campaign_received?.monthCount || 0);
+    const campaignClickedMonth = Number(events?.campaign_clicked_intent?.monthCount || 0);
+    const campaignConvertedMonth = Number(events?.campaign_conversion_attributed?.monthCount || 0);
+
+    return {
+      day: {
+        trialToFirstAd: pctSafe(firstAdDay, trialDay),
+        firstAdToPlans: pctSafe(plansDay, firstAdDay),
+        plansToCheckout: pctSafe(checkoutDay, plansDay),
+        checkoutToPayment: pctSafe(paidDay, checkoutDay),
+        paymentToActivation: pctSafe(activeDay, paidDay),
+        campaignReceiveToIntent: pctSafe(campaignClickedDay, campaignReceivedDay),
+        campaignIntentToAttributed: pctSafe(campaignConvertedDay, campaignClickedDay),
+      },
+      month: {
+        trialToFirstAd: pctSafe(firstAdMonth, trialMonth),
+        firstAdToPlans: pctSafe(plansMonth, firstAdMonth),
+        plansToCheckout: pctSafe(checkoutMonth, plansMonth),
+        checkoutToPayment: pctSafe(paidMonth, checkoutMonth),
+        paymentToActivation: pctSafe(activeMonth, paidMonth),
+        campaignReceiveToIntent: pctSafe(campaignClickedMonth, campaignReceivedMonth),
+        campaignIntentToAttributed: pctSafe(campaignConvertedMonth, campaignClickedMonth),
+      },
+    };
+  }
+
+  function buildDashboardFunnelIntegrity(events = {}) {
+    const primaryEventKeys = [
+      "trial_started",
+      "first_ad_generated",
+      "plans_viewed",
+      "checkout_started",
+      "payment_confirmed",
+      "plan_activated",
+    ];
+    const campaignEventKeys = [
+      "campaign_received",
+      "campaign_clicked_intent",
+      "campaign_conversion_attributed",
+    ];
+
+    const missingPrimary = primaryEventKeys.filter((key) => !events?.[key]);
+    const availableCampaign = campaignEventKeys.filter((key) => Boolean(events?.[key]));
+    const missingCampaign = campaignEventKeys.filter((key) => !events?.[key]);
+
+    let level = "ok";
+    if (missingPrimary.length) level = "warning";
+    if (missingPrimary.length >= 2) level = "critical";
+
+    const notes = [
+      "Leitura operacional baseada em eventos instrumentados no backend.",
+      missingPrimary.length
+        ? `Etapas principais ausentes no overview: ${missingPrimary.join(", ")}.`
+        : "Todas as etapas principais do funil estão disponíveis no overview.",
+      availableCampaign.length
+        ? `Apoio de campanhas disponível para: ${availableCampaign.join(", ")}.`
+        : "Métricas de campanhas ainda não aparecem neste overview.",
+      missingCampaign.length
+        ? "Atribuição de campanhas depende da instrumentação disponível nos pontos reais de clique/intenção e conversão atribuída."
+        : "As métricas de campanhas disponíveis devem ser lidas como apoio operacional, não como atribuição oficial de negócio.",
+    ];
+
+    return {
+      level,
+      missingPrimary,
+      availableCampaign,
+      missingCampaign,
+      notes,
+    };
+  }
+
+  async function buildDashboardFunnelData() {
+    const overview = await getConversionMetricsOverview();
+    const timelines = {};
+    for (const eventName of DASHBOARD_FUNNEL_EVENTS) {
+      try {
+        timelines[eventName] = await getMetricEventLastNDays(eventName, 30);
+      } catch (err) {
+        timelines[eventName] = { ok: false, error: String(err?.message || err) };
+      }
+    }
+
+    return {
+      ok: true,
+      overview,
+      timelines,
+      rates: buildDashboardFunnelRates(overview?.events || {}),
+      integrity: buildDashboardFunnelIntegrity(overview?.events || {}),
+      labels: {
+        primary: "Etapas principais do funil",
+        campaigns: "Apoio / campanhas",
+        interpretation: "Taxas simples operacionais (não são taxa oficial de negócio)",
+      },
+    };
+  }
+
   // ✅ Histórico do Dashboard (global + opcional por usuário)
   // GET /admin/dashboard/history?days=30&months=12&start=YYYY-MM-DD&end=YYYY-MM-DD&waId=...
   router.get("/dashboard/history", async (req, res) => {
@@ -2675,6 +2826,92 @@ router.get("/dashboard", async (req, res) => {
 
         <div class="hr"></div>
 
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:8px;">
+          <div>
+            <h4 style="margin:0 0 6px 0;">Funil de conversão</h4>
+            <div class="muted" id="funnelNarrative">Leitura operacional do funil principal e dos sinais auxiliares de campanhas.</div>
+          </div>
+          <div class="pill" id="funnelIntegrityPill">Integridade do funil: —</div>
+        </div>
+
+        <div class="card pad" style="margin-bottom:12px;">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div>
+              <h4 style="margin:0 0 6px 0;">Etapas principais do funil</h4>
+              <div class="muted">Eventos operacionais centrais da jornada: trial, criação do 1º anúncio, visão de planos, checkout, pagamento e ativação.</div>
+            </div>
+            <div class="muted">Hoje / mês</div>
+          </div>
+          <div class="grid cols3" style="margin-top:12px;">
+            <div class="kpi"><div class="t">Trial iniciado</div><div class="v" id="fTrial">—</div><div class="muted" id="fTrialMonth">—</div></div>
+            <div class="kpi"><div class="t">1º anúncio gerado</div><div class="v" id="fFirstAd">—</div><div class="muted" id="fFirstAdMonth">—</div></div>
+            <div class="kpi"><div class="t">Planos visualizados</div><div class="v" id="fPlans">—</div><div class="muted" id="fPlansMonth">—</div></div>
+            <div class="kpi"><div class="t">Checkout iniciado</div><div class="v" id="fCheckout">—</div><div class="muted" id="fCheckoutMonth">—</div></div>
+            <div class="kpi"><div class="t">Pagamento confirmado</div><div class="v" id="fPayment">—</div><div class="muted" id="fPaymentMonth">—</div></div>
+            <div class="kpi"><div class="t">Plano ativado</div><div class="v" id="fActivated">—</div><div class="muted" id="fActivatedMonth">—</div></div>
+          </div>
+        </div>
+
+        <div class="card pad" style="margin-bottom:12px;">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div>
+              <h4 style="margin:0 0 6px 0;">Apoio / campanhas</h4>
+              <div class="muted">Métricas auxiliares de recebimento, intenção e conversão atribuída. Devem ser lidas como apoio operacional, não como atribuição oficial de negócio.</div>
+            </div>
+            <div class="muted">Disponível conforme instrumentação do backend</div>
+          </div>
+          <div class="grid cols3" style="margin-top:12px;">
+            <div class="kpi"><div class="t">Campanhas recebidas</div><div class="v" id="fCampaignReceived">—</div><div class="muted" id="fCampaignReceivedMonth">—</div></div>
+            <div class="kpi"><div class="t">Intenção após campanha</div><div class="v" id="fCampaignIntent">—</div><div class="muted" id="fCampaignIntentMonth">—</div></div>
+            <div class="kpi"><div class="t">Conversão atribuída</div><div class="v" id="fCampaignConverted">—</div><div class="muted" id="fCampaignConvertedMonth">—</div></div>
+          </div>
+          <div class="row" style="margin-top:10px; gap:8px; flex-wrap:wrap;">
+            <span class="pill">Hoje · Recebimento → intenção: <b id="rateDayCampaignReceiveIntent">—</b></span>
+            <span class="pill">Hoje · Intenção → conversão atribuída: <b id="rateDayCampaignIntentConversion">—</b></span>
+            <span class="pill">Mês · Recebimento → intenção: <b id="rateMonthCampaignReceiveIntent">—</b></span>
+            <span class="pill">Mês · Intenção → conversão atribuída: <b id="rateMonthCampaignIntentConversion">—</b></span>
+          </div>
+        </div>
+
+        <div class="card pad" style="margin-top:12px;">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div>
+              <h4 style="margin:0 0 6px 0;">Taxas simples do funil</h4>
+              <div class="muted" id="funnelInterpretation">Leitura operacional baseada nos eventos reais já instrumentados no backend.</div>
+            </div>
+            <div class="muted" id="funnelMeta">Últimos 30 dias por evento</div>
+          </div>
+          <div class="row" style="margin-top:10px; gap:8px; flex-wrap:wrap;">
+            <span class="pill">Hoje · Trial → 1º anúncio: <b id="rateDayTrialFirst">—</b></span>
+            <span class="pill">Hoje · 1º anúncio → planos: <b id="rateDayFirstPlans">—</b></span>
+            <span class="pill">Hoje · Planos → checkout: <b id="rateDayPlansCheckout">—</b></span>
+            <span class="pill">Hoje · Checkout → pagamento: <b id="rateDayCheckoutPayment">—</b></span>
+            <span class="pill">Hoje · Pagamento → ativação: <b id="rateDayPaymentActivation">—</b></span>
+          </div>
+          <div class="row" style="margin-top:8px; gap:8px; flex-wrap:wrap;">
+            <span class="pill">Mês · Trial → 1º anúncio: <b id="rateMonthTrialFirst">—</b></span>
+            <span class="pill">Mês · 1º anúncio → planos: <b id="rateMonthFirstPlans">—</b></span>
+            <span class="pill">Mês · Planos → checkout: <b id="rateMonthPlansCheckout">—</b></span>
+            <span class="pill">Mês · Checkout → pagamento: <b id="rateMonthCheckoutPayment">—</b></span>
+            <span class="pill">Mês · Pagamento → ativação: <b id="rateMonthPaymentActivation">—</b></span>
+          </div>
+          <div class="muted" id="funnelNotes" style="margin-top:10px;"></div>
+        </div>
+
+        <div class="grid cols2" style="margin-top:12px;">
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Funil principal · últimos 30 dias</h4><div class="muted" id="funnelDaysLabel"></div></div>
+            <canvas id="chartFunnelDays" width="900" height="240" style="width:100%; border:1px solid var(--border); border-radius:12px;"></canvas>
+            <div id="funnelDaysTable"></div>
+          </div>
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Resumo operacional</h4><div class="muted">Etapas principais e apoio</div></div>
+            <div id="funnelSummaryTable"></div>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
         <details>
           <summary class="muted">Ver JSON bruto</summary>
           <pre id="raw" style="white-space:pre-wrap;"></pre>
@@ -2765,6 +3002,91 @@ router.get("/dashboard", async (req, res) => {
           el.innerHTML = '<table><thead><tr><th>Período</th><th>Qtd</th></tr></thead><tbody>'+rows+'</tbody></table><div class="muted">Mostrando últimos 10 pontos.</div>';
         }
 
+        function fmtRate(v){ return (v === null || v === undefined || Number.isNaN(Number(v))) ? '—' : (String(v).replace('.', ',') + '%'); }
+        function fmtCountLabel(dayCount, monthCount){ return 'Hoje: ' + (dayCount ?? 0) + ' · Mês: ' + (monthCount ?? 0); }
+        function integrityBadge(level){
+          if(level === 'critical') return '<span class="badge danger">Integridade crítica</span>';
+          if(level === 'warning') return '<span class="badge warn">Integridade parcial</span>';
+          return '<span class="badge ok">Integridade operacional OK</span>';
+        }
+
+        function renderFunnelSummary(events){
+          const el = document.getElementById('funnelSummaryTable');
+          if(!el) return;
+          const primaryRows = [
+            ['trial_started','Trial iniciado'],
+            ['first_ad_generated','1º anúncio gerado'],
+            ['plans_viewed','Planos visualizados'],
+            ['checkout_started','Checkout iniciado'],
+            ['payment_confirmed','Pagamento confirmado'],
+            ['plan_activated','Plano ativado'],
+          ].map(([key,label]) => {
+            const item = events?.[key] || {};
+            return '<tr><td>'+esc(label)+'</td><td><b>'+esc(item.dayCount ?? 0)+'</b></td><td><b>'+esc(item.monthCount ?? 0)+'</b></td></tr>';
+          }).join('');
+          const campaignRows = [
+            ['campaign_received','Campanhas recebidas'],
+            ['campaign_clicked_intent','Intenção após campanha'],
+            ['campaign_conversion_attributed','Conversão atribuída'],
+          ].map(([key,label]) => {
+            const item = events?.[key] || {};
+            return '<tr><td>'+esc(label)+'</td><td><b>'+esc(item.dayCount ?? 0)+'</b></td><td><b>'+esc(item.monthCount ?? 0)+'</b></td></tr>';
+          }).join('');
+          el.innerHTML = ''+
+            '<div class="muted" style="margin-bottom:8px;">Etapas principais</div>'+
+            '<table><thead><tr><th>Etapa</th><th>Hoje</th><th>Mês</th></tr></thead><tbody>'+primaryRows+'</tbody></table>'+
+            '<div class="hr"></div>'+
+            '<div class="muted" style="margin-bottom:8px;">Apoio / campanhas</div>'+
+            '<table><thead><tr><th>Métrica</th><th>Hoje</th><th>Mês</th></tr></thead><tbody>'+campaignRows+'</tbody></table>';
+        }
+
+        function renderFunnelTimeline(timelines){
+          const seriesNames = ['trial_started','first_ad_generated','plans_viewed','checkout_started','payment_confirmed','plan_activated'];
+          const palette = ['#2563eb','#16a34a','#7c3aed','#f59e0b','#dc2626','#0f766e'];
+          const labels = ((timelines?.trial_started?.points)||[]).map(p => String(p.day||''));
+          const canvas = document.getElementById('chartFunnelDays');
+          if(!canvas) return;
+          const ctx = canvas.getContext('2d');
+          const w = canvas.width, h = canvas.height;
+          ctx.clearRect(0,0,w,h);
+          if(!labels.length){
+            ctx.fillText('Sem dados', 10, 20);
+            document.getElementById('funnelDaysTable').innerHTML = '<span class="muted">Sem dados.</span>';
+            return;
+          }
+          const padL=36,padR=10,padT=10,padB=24;
+          const iw=w-padL-padR, ih=h-padT-padB;
+          const allValues=[];
+          seriesNames.forEach(name => ((timelines?.[name]?.points)||[]).forEach(p => allValues.push(Number(p.count||0))));
+          const max=Math.max(1,...allValues);
+          ctx.beginPath();
+          ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+ih); ctx.lineTo(padL+iw,padT+ih);
+          ctx.strokeStyle='#94a3b8'; ctx.stroke();
+          seriesNames.forEach((name, idx) => {
+            const points=(timelines?.[name]?.points)||[];
+            if(!points.length) return;
+            ctx.beginPath();
+            points.forEach((p,i)=>{
+              const x=padL+(iw*(i/Math.max(1,points.length-1)));
+              const y=padT+ih-(ih*((Number(p.count||0))/max));
+              if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+            });
+            ctx.strokeStyle=palette[idx%palette.length]; ctx.lineWidth=2; ctx.stroke();
+          });
+          ctx.fillStyle='#64748b'; ctx.font='12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+          ctx.fillText(String(labels[0]||''), padL, h-8);
+          const lastLabel=String(labels[labels.length-1]||'');
+          const tw=ctx.measureText(lastLabel).width;
+          ctx.fillText(lastLabel, w-padR-tw, h-8);
+          ctx.fillText(String(max), 6, 16);
+          const rows = labels.slice(-10).map((day, indexFromEnd) => {
+            const idx = labels.length - Math.min(10, labels.length) + indexFromEnd;
+            const cols = seriesNames.map(name => '<td><b>'+esc((((timelines?.[name]?.points)||[])[idx]?.count ?? 0))+'</b></td>').join('');
+            return '<tr><td><code>'+esc(day)+'</code></td>'+cols+'</tr>';
+          }).join('');
+          document.getElementById('funnelDaysTable').innerHTML = '<table><thead><tr><th>Dia</th><th>Trial</th><th>1º anúncio</th><th>Planos</th><th>Checkout</th><th>Pagamento</th><th>Ativação</th></tr></thead><tbody>'+rows+'</tbody></table><div class="muted">Mostrando últimos 10 pontos do funil principal.</div>';
+        }
+
         async function loadHistory(){
           const query = qs();
           const r = await fetch('/admin/dashboard/history?' + query);
@@ -2829,6 +3151,52 @@ router.get("/dashboard", async (req, res) => {
             return '<span class="pill"><code>'+esc(k)+'</code>: <b>'+plans[k]+'</b>' + extra + '</span>';
           }).join(' ');
           document.getElementById('plans').innerHTML = planHtml || '<span class="muted">Sem dados.</span>';
+
+          const funnel = j.funnel || {};
+          const fe = funnel?.overview?.events || {};
+          const integrity = funnel?.integrity || {};
+          const labelsMeta = funnel?.labels || {};
+          document.getElementById('fTrial').textContent = fe?.trial_started?.dayCount ?? '0';
+          document.getElementById('fTrialMonth').textContent = fmtCountLabel(fe?.trial_started?.dayCount ?? 0, fe?.trial_started?.monthCount ?? 0);
+          document.getElementById('fFirstAd').textContent = fe?.first_ad_generated?.dayCount ?? '0';
+          document.getElementById('fFirstAdMonth').textContent = fmtCountLabel(fe?.first_ad_generated?.dayCount ?? 0, fe?.first_ad_generated?.monthCount ?? 0);
+          document.getElementById('fPlans').textContent = fe?.plans_viewed?.dayCount ?? '0';
+          document.getElementById('fPlansMonth').textContent = fmtCountLabel(fe?.plans_viewed?.dayCount ?? 0, fe?.plans_viewed?.monthCount ?? 0);
+          document.getElementById('fCheckout').textContent = fe?.checkout_started?.dayCount ?? '0';
+          document.getElementById('fCheckoutMonth').textContent = fmtCountLabel(fe?.checkout_started?.dayCount ?? 0, fe?.checkout_started?.monthCount ?? 0);
+          document.getElementById('fPayment').textContent = fe?.payment_confirmed?.dayCount ?? '0';
+          document.getElementById('fPaymentMonth').textContent = fmtCountLabel(fe?.payment_confirmed?.dayCount ?? 0, fe?.payment_confirmed?.monthCount ?? 0);
+          document.getElementById('fActivated').textContent = fe?.plan_activated?.dayCount ?? '0';
+          document.getElementById('fActivatedMonth').textContent = fmtCountLabel(fe?.plan_activated?.dayCount ?? 0, fe?.plan_activated?.monthCount ?? 0);
+          document.getElementById('fCampaignReceived').textContent = fe?.campaign_received?.dayCount ?? '0';
+          document.getElementById('fCampaignReceivedMonth').textContent = fmtCountLabel(fe?.campaign_received?.dayCount ?? 0, fe?.campaign_received?.monthCount ?? 0);
+          document.getElementById('fCampaignIntent').textContent = fe?.campaign_clicked_intent?.dayCount ?? '0';
+          document.getElementById('fCampaignIntentMonth').textContent = fmtCountLabel(fe?.campaign_clicked_intent?.dayCount ?? 0, fe?.campaign_clicked_intent?.monthCount ?? 0);
+          document.getElementById('fCampaignConverted').textContent = fe?.campaign_conversion_attributed?.dayCount ?? '0';
+          document.getElementById('fCampaignConvertedMonth').textContent = fmtCountLabel(fe?.campaign_conversion_attributed?.dayCount ?? 0, fe?.campaign_conversion_attributed?.monthCount ?? 0);
+          const rates = funnel?.rates || {};
+          document.getElementById('rateDayTrialFirst').textContent = fmtRate(rates?.day?.trialToFirstAd);
+          document.getElementById('rateDayFirstPlans').textContent = fmtRate(rates?.day?.firstAdToPlans);
+          document.getElementById('rateDayPlansCheckout').textContent = fmtRate(rates?.day?.plansToCheckout);
+          document.getElementById('rateDayCheckoutPayment').textContent = fmtRate(rates?.day?.checkoutToPayment);
+          document.getElementById('rateDayPaymentActivation').textContent = fmtRate(rates?.day?.paymentToActivation);
+          document.getElementById('rateMonthTrialFirst').textContent = fmtRate(rates?.month?.trialToFirstAd);
+          document.getElementById('rateMonthFirstPlans').textContent = fmtRate(rates?.month?.firstAdToPlans);
+          document.getElementById('rateMonthPlansCheckout').textContent = fmtRate(rates?.month?.plansToCheckout);
+          document.getElementById('rateMonthCheckoutPayment').textContent = fmtRate(rates?.month?.checkoutToPayment);
+          document.getElementById('rateMonthPaymentActivation').textContent = fmtRate(rates?.month?.paymentToActivation);
+          document.getElementById('rateDayCampaignReceiveIntent').textContent = fmtRate(rates?.day?.campaignReceiveToIntent);
+          document.getElementById('rateDayCampaignIntentConversion').textContent = fmtRate(rates?.day?.campaignIntentToAttributed);
+          document.getElementById('rateMonthCampaignReceiveIntent').textContent = fmtRate(rates?.month?.campaignReceiveToIntent);
+          document.getElementById('rateMonthCampaignIntentConversion').textContent = fmtRate(rates?.month?.campaignIntentToAttributed);
+          document.getElementById('funnelMeta').textContent = funnel?.ok === false ? ('⚠️ ' + (funnel?.error || 'Falha ao carregar funil')) : 'Últimos 30 dias por evento';
+          document.getElementById('funnelInterpretation').textContent = labelsMeta?.interpretation || 'Leitura operacional baseada nos eventos reais já instrumentados no backend.';
+          document.getElementById('funnelNarrative').textContent = ((labelsMeta?.primary || 'Etapas principais do funil') + ' + ' + (labelsMeta?.campaigns || 'Apoio / campanhas') + ' com leitura operacional e tecnicamente honesta.');
+          document.getElementById('funnelIntegrityPill').innerHTML = integrityBadge(integrity?.level) + ' <span class="muted">' + esc((integrity?.missingPrimary||[]).length ? ((integrity?.missingPrimary||[]).length + ' etapa(s) principal(is) ausente(s)') : 'sem lacunas principais no overview') + '</span>';
+          document.getElementById('funnelNotes').textContent = Array.isArray(integrity?.notes) ? integrity.notes.join(' ') : 'As taxas do funil são operacionais e devem ser interpretadas com contexto.';
+          document.getElementById('funnelDaysLabel').textContent = (((funnel?.timelines||{}).trial_started||{}).start && ((funnel?.timelines||{}).trial_started||{}).end) ? ((((funnel?.timelines||{}).trial_started||{}).start) + ' → ' + (((funnel?.timelines||{}).trial_started||{}).end)) : '';
+          renderFunnelSummary(fe);
+          renderFunnelTimeline(funnel?.timelines || {});
 
           const hist = await loadHistory();
           return { j, hist };
