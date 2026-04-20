@@ -22,6 +22,12 @@ const CAMPAIGN_AUDIT_BY_CAMPAIGN_PREFIX = "audit:campaign:campaign";
 const CAMPAIGN_AUDIT_MAX_ITEMS = 2000;
 const CAMPAIGN_AUDIT_TTL_SECONDS = 180 * 24 * 60 * 60;
 
+const RUNTIME_AUDIT_KEY = "audit:runtime";
+const RUNTIME_AUDIT_BY_MODULE_PREFIX = "audit:runtime:module";
+const RUNTIME_AUDIT_MAX_ITEMS = 3000;
+const RUNTIME_AUDIT_TTL_SECONDS = 30 * 24 * 60 * 60;
+const RUNTIME_LOG_LEVELS = Object.freeze(["debug", "info", "warn", "error", "fatal"]);
+
 function normalizeCampaignCode(value) {
   const text = safeStr(value).toUpperCase();
   return text || "";
@@ -31,6 +37,12 @@ function campaignAuditListKey(campaignId) {
   const id = safeStr(campaignId);
   if (!id) throw new Error("campaignAuditListKey: campaignId is required");
   return `${CAMPAIGN_AUDIT_BY_CAMPAIGN_PREFIX}:${id}`;
+}
+
+
+function runtimeAuditListKey(moduleName) {
+  const moduleId = normalizeMetricSlug(moduleName) || "runtime";
+  return `${RUNTIME_AUDIT_BY_MODULE_PREFIX}:${moduleId}`;
 }
 
 function safeStr(value) {
@@ -59,6 +71,44 @@ function normalizeCouponCode(value) {
 function normalizeBillingCycle(value) {
   const text = safeStr(value).toLowerCase();
   return text || "";
+}
+
+
+function normalizeMetricSlug(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9:_-]+/g, "_")
+    .replace(/_{2,}/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeRuntimeLevel(value) {
+  const level = normalizeMetricSlug(value);
+  return RUNTIME_LOG_LEVELS.includes(level) ? level : "info";
+}
+
+function normalizeRuntimeEvent(input = {}) {
+  const moduleName = safeStr(input.module || input.source || "runtime");
+  return {
+    id: safeStr(input.id) || makeEventId(),
+    ts: safeStr(input.ts) || new Date().toISOString(),
+    module: moduleName,
+    event: safeStr(input.event || input.action || "runtime_event"),
+    level: normalizeRuntimeLevel(input.level || (input.errorCode ? "error" : "info")),
+    userId: safeStr(input.userId || input.internalUserId),
+    internalUserId: safeStr(input.internalUserId || input.userId),
+    waId: safeStr(input.waId),
+    campaignId: safeStr(input.campaignId),
+    campaignCode: normalizeCampaignCode(input.campaignCode),
+    paymentId: safeStr(input.paymentId),
+    subscriptionId: safeStr(input.subscriptionId),
+    step: safeStr(input.step),
+    status: safeStr(input.status),
+    message: safeStr(input.message || input.summary),
+    errorCode: safeStr(input.errorCode).toUpperCase(),
+    meta: normalizeObject(input.meta),
+  };
 }
 
 function normalizeEvent(input = {}) {
@@ -249,5 +299,57 @@ export async function getCampaignAuditCountByCampaign(campaignId) {
   const id = safeStr(campaignId);
   if (!id) return 0;
   const count = await redisLLen(campaignAuditListKey(id));
+  return toInt(count, 0);
+}
+
+
+export async function logOperationalEvent(input = {}) {
+  const event = normalizeRuntimeEvent(input);
+  const moduleKey = runtimeAuditListKey(event.module);
+
+  await Promise.allSettled([
+    pushAuditEvent(RUNTIME_AUDIT_KEY, event, {
+      maxItems: RUNTIME_AUDIT_MAX_ITEMS,
+      ttlSeconds: RUNTIME_AUDIT_TTL_SECONDS,
+    }),
+    pushAuditEvent(moduleKey, event, {
+      maxItems: RUNTIME_AUDIT_MAX_ITEMS,
+      ttlSeconds: RUNTIME_AUDIT_TTL_SECONDS,
+    }),
+  ]);
+
+  return event;
+}
+
+export async function logRuntimeError(input = {}) {
+  return logOperationalEvent({
+    level: safeStr(input.level) || "error",
+    status: safeStr(input.status) || "error",
+    ...input,
+  });
+}
+
+export async function listOperationalAudit({ limit = 100, module = "" } = {}) {
+  const lim = Math.max(1, Math.min(1500, toInt(limit, 100)));
+  const key = safeStr(module) ? runtimeAuditListKey(module) : RUNTIME_AUDIT_KEY;
+  const raw = await redisLRange(key, 0, lim - 1);
+  const items = Array.isArray(raw) ? raw : [];
+  return items.map((entry) => {
+    try {
+      return normalizeRuntimeEvent(JSON.parse(String(entry)));
+    } catch (_) {
+      return normalizeRuntimeEvent({
+        module: safeStr(module) || "runtime",
+        event: "runtime_raw_event",
+        level: "warn",
+        message: safeStr(entry),
+      });
+    }
+  });
+}
+
+export async function getOperationalAuditCount({ module = "" } = {}) {
+  const key = safeStr(module) ? runtimeAuditListKey(module) : RUNTIME_AUDIT_KEY;
+  const count = await redisLLen(key);
   return toInt(count, 0);
 }
