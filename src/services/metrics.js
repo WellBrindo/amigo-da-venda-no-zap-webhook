@@ -1053,6 +1053,86 @@ export async function resetUserDescriptionMetrics(userRef, { days = 120, months 
   return { ok: true, userId: id, waId: id, deleted: delCount, ranges: { days: { start: fmtYmd(startDay), end: dayEnd, count: dN }, months: { start: fmtYm(startMonth), end: fmtYm(endMonth), count: mN } } };
 }
 
+const CONVERSION_EVENTS = Object.freeze([
+  "first_inbound_received",
+  "trial_started",
+  "first_ad_generation_started",
+  "first_ad_generated",
+  "ad_generated",
+  "ad_refined",
+  "trial_limit_reached",
+  "plans_viewed",
+  "plan_selected",
+  "billing_cycle_selected",
+  "coupon_code_entered",
+  "coupon_applied",
+  "coupon_rejected",
+  "coupon_removed",
+  "pricing_quote_generated",
+  "checkout_started",
+  "checkout_confirmed",
+  "payment_link_created",
+  "pix_checkout_created",
+  "subscription_checkout_created",
+  "payment_confirmed",
+  "payment_failed",
+  "payment_expired",
+  "subscription_activated",
+  "plan_activated",
+  "checkout_abandoned",
+  "payment_abandoned",
+  "campaign_received",
+  "campaign_clicked_intent",
+  "campaign_conversion_attributed",
+  "flow_error",
+  "payment_error",
+  "campaign_error",
+  "pricing_error",
+  "whatsapp_send_error",
+  "webhook_error",
+]);
+
+export const CONVERSION_EVENT_CATALOG = Object.freeze({
+  FIRST_INBOUND_RECEIVED: "first_inbound_received",
+  TRIAL_STARTED: "trial_started",
+  FIRST_AD_GENERATION_STARTED: "first_ad_generation_started",
+  FIRST_AD_GENERATED: "first_ad_generated",
+  AD_GENERATED: "ad_generated",
+  AD_REFINED: "ad_refined",
+  TRIAL_LIMIT_REACHED: "trial_limit_reached",
+  PLANS_VIEWED: "plans_viewed",
+  PLAN_SELECTED: "plan_selected",
+  BILLING_CYCLE_SELECTED: "billing_cycle_selected",
+  COUPON_CODE_ENTERED: "coupon_code_entered",
+  COUPON_APPLIED: "coupon_applied",
+  COUPON_REJECTED: "coupon_rejected",
+  COUPON_REMOVED: "coupon_removed",
+  PRICING_QUOTE_GENERATED: "pricing_quote_generated",
+  CHECKOUT_STARTED: "checkout_started",
+  CHECKOUT_CONFIRMED: "checkout_confirmed",
+  PAYMENT_LINK_CREATED: "payment_link_created",
+  PIX_CHECKOUT_CREATED: "pix_checkout_created",
+  SUBSCRIPTION_CHECKOUT_CREATED: "subscription_checkout_created",
+  PAYMENT_CONFIRMED: "payment_confirmed",
+  PAYMENT_FAILED: "payment_failed",
+  PAYMENT_EXPIRED: "payment_expired",
+  SUBSCRIPTION_ACTIVATED: "subscription_activated",
+  PLAN_ACTIVATED: "plan_activated",
+  CHECKOUT_ABANDONED: "checkout_abandoned",
+  PAYMENT_ABANDONED: "payment_abandoned",
+  CAMPAIGN_RECEIVED: "campaign_received",
+  CAMPAIGN_CLICKED_INTENT: "campaign_clicked_intent",
+  CAMPAIGN_CONVERSION_ATTRIBUTED: "campaign_conversion_attributed",
+  FLOW_ERROR: "flow_error",
+  PAYMENT_ERROR: "payment_error",
+  CAMPAIGN_ERROR: "campaign_error",
+  PRICING_ERROR: "pricing_error",
+  WHATSAPP_SEND_ERROR: "whatsapp_send_error",
+  WEBHOOK_ERROR: "webhook_error",
+});
+
+const CONVERSION_EVENT_SET = new Set(CONVERSION_EVENTS);
+
 const CAMPAIGN_EVENTS = Object.freeze([
   "campaign_evaluated",
   "campaign_eligible",
@@ -1216,6 +1296,125 @@ export async function getCampaignMetricEventByCategory(category, eventName, date
 
 export async function getCampaignMetricsOverview(date = new Date()) {
   const entries = await Promise.all(CAMPAIGN_EVENTS.map((eventName) => getCampaignMetricEvent(eventName, date)));
+  return {
+    ok: true,
+    day: entries[0]?.day || getDayKeyParts(date).day,
+    month: entries[0]?.month || getDayKeyParts(date).month,
+    events: Object.fromEntries(
+      entries
+        .filter((entry) => entry && entry.ok)
+        .map((entry) => [entry.eventName, { dayCount: entry.dayCount, monthCount: entry.monthCount }])
+    ),
+  };
+}
+
+
+function normalizeTrackingContext(payload = {}) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const normalizedDate = source.date instanceof Date ? source.date : (source.date ? new Date(source.date) : new Date());
+  const date = Number.isFinite(normalizedDate.getTime()) ? normalizedDate : new Date();
+
+  return {
+    userId: normalizeUserMetricRef(source.userId || source.internalUserId || source.userRef),
+    waId: normalizeUserMetricRef(source.waId),
+    planCode: normalizePlanMetricCode(source.planCode),
+    billingCycle: normalizeBillingCycleMetric(source.billingCycle),
+    couponCode: normalizeCouponMetricCode(source.couponCode),
+    campaignId: normalizeCampaignMetricId(source.campaignId),
+    campaignCode: normalizeMetricSlug(source.campaignCode),
+    paymentId: safeStr(source.paymentId),
+    subscriptionId: safeStr(source.subscriptionId),
+    quoteId: safeStr(source.quoteId),
+    source: normalizeMetricSlug(source.source),
+    step: normalizeMetricSlug(source.step),
+    by: Number(source.by) || 1,
+    date,
+  };
+}
+
+export async function trackConversionEvent(eventName, payload = {}) {
+  const normalizedEvent = normalizeMetricEventName(eventName);
+  if (!normalizedEvent) return { ok: false, error: "eventName required" };
+  if (!CONVERSION_EVENT_SET.has(normalizedEvent)) {
+    return { ok: false, error: "eventName not in conversion catalog", eventName: normalizedEvent };
+  }
+
+  const context = normalizeTrackingContext(payload);
+  const metricResult = await incMetricEvent(normalizedEvent, {
+    userId: context.userId,
+    waId: context.waId,
+    by: context.by,
+    date: context.date,
+  });
+
+  return {
+    ...metricResult,
+    catalog: "conversion",
+    eventName: normalizedEvent,
+    context: {
+      userId: context.userId || null,
+      waId: context.waId || null,
+      planCode: context.planCode || null,
+      billingCycle: context.billingCycle || null,
+      couponCode: context.couponCode || null,
+      campaignId: context.campaignId || null,
+      campaignCode: context.campaignCode || null,
+      paymentId: context.paymentId || null,
+      subscriptionId: context.subscriptionId || null,
+      quoteId: context.quoteId || null,
+      source: context.source || null,
+      step: context.step || null,
+      by: context.by,
+      date: context.date,
+    },
+  };
+}
+
+function makeTrackConversionHelper(eventName) {
+  return async function trackConversionHelper(payload = {}) {
+    return trackConversionEvent(eventName, payload);
+  };
+}
+
+export const trackFirstInboundReceived = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.FIRST_INBOUND_RECEIVED);
+export const trackTrialStarted = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.TRIAL_STARTED);
+export const trackFirstAdGenerationStarted = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.FIRST_AD_GENERATION_STARTED);
+export const trackFirstAdGenerated = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.FIRST_AD_GENERATED);
+export const trackAdGenerated = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.AD_GENERATED);
+export const trackAdRefined = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.AD_REFINED);
+export const trackTrialLimitReached = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.TRIAL_LIMIT_REACHED);
+export const trackPlansViewed = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PLANS_VIEWED);
+export const trackPlanSelected = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PLAN_SELECTED);
+export const trackBillingCycleSelected = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.BILLING_CYCLE_SELECTED);
+export const trackCouponCodeEntered = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.COUPON_CODE_ENTERED);
+export const trackCouponApplied = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.COUPON_APPLIED);
+export const trackCouponRejected = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.COUPON_REJECTED);
+export const trackCouponRemoved = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.COUPON_REMOVED);
+export const trackPricingQuoteGenerated = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PRICING_QUOTE_GENERATED);
+export const trackCheckoutStarted = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.CHECKOUT_STARTED);
+export const trackCheckoutConfirmed = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.CHECKOUT_CONFIRMED);
+export const trackPaymentLinkCreated = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PAYMENT_LINK_CREATED);
+export const trackPixCheckoutCreated = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PIX_CHECKOUT_CREATED);
+export const trackSubscriptionCheckoutCreated = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.SUBSCRIPTION_CHECKOUT_CREATED);
+export const trackPaymentConfirmed = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PAYMENT_CONFIRMED);
+export const trackPaymentFailed = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PAYMENT_FAILED);
+export const trackPaymentExpired = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PAYMENT_EXPIRED);
+export const trackSubscriptionActivated = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.SUBSCRIPTION_ACTIVATED);
+export const trackPlanActivated = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PLAN_ACTIVATED);
+export const trackCheckoutAbandoned = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.CHECKOUT_ABANDONED);
+export const trackPaymentAbandoned = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PAYMENT_ABANDONED);
+export const trackCampaignReceived = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.CAMPAIGN_RECEIVED);
+export const trackCampaignClickedIntent = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.CAMPAIGN_CLICKED_INTENT);
+export const trackCampaignConversionAttributed = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.CAMPAIGN_CONVERSION_ATTRIBUTED);
+export const trackFlowError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.FLOW_ERROR);
+export const trackPaymentError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PAYMENT_ERROR);
+export const trackCampaignError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.CAMPAIGN_ERROR);
+export const trackPricingError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.PRICING_ERROR);
+export const trackWhatsappSendError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.WHATSAPP_SEND_ERROR);
+export const trackWebhookError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.WEBHOOK_ERROR);
+
+export async function getConversionMetricsOverview(date = new Date()) {
+  const entries = await Promise.all(CONVERSION_EVENTS.map((eventName) => getGlobalMetricEvent(eventName, date)));
   return {
     ok: true,
     day: entries[0]?.day || getDayKeyParts(date).day,
