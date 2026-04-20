@@ -41,7 +41,11 @@ import {
 import { getPlan, getPlanBillingOption } from "./plans.js";
 import { getUserPlan, getUserStatus } from "./state.js";
 import { logCouponAudit } from "./audit.js";
-import { recordCouponMetrics } from "./metrics.js";
+import {
+  recordCouponMetrics,
+  trackCouponApplied,
+  trackCouponRejected,
+} from "./metrics.js";
 
 const COUPON_STATUS = Object.freeze({
   ACTIVE: "active",
@@ -71,6 +75,26 @@ const APPLIES_TO = Object.freeze({
 const DEFAULT_RESERVATION_TTL_HOURS = 20;
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_LIST_LIMIT = 2000;
+const COUPON_CONVERSION_TRACKING_MODE = Object.freeze({
+  AUTO: "auto",
+  NONE: "none",
+  ENGINE_VALIDATION: "engine_validation",
+  FLOW_EXCLUSIVE: "flow_exclusive",
+});
+
+// Política semântica final deste módulo:
+// - Eventos operacionais do motor de cupom:
+//   coupon_attempted, coupon_validated, coupon_reserved, coupon_confirmed,
+//   coupon_released, coupon_expired, coupon_failed,
+//   coupon_duplicate_blocked, coupon_removed_message_sent.
+// - Eventos oficiais do funil:
+//   coupon_applied, coupon_rejected, coupon_removed.
+// - Responsabilidade canônica:
+//   * coupon_applied: flow.js (UX) ou coupons.js (engine_validation), sem duplicidade material.
+//   * coupon_rejected: pode ser emitido pelo motor de validação com segurança.
+//   * coupon_removed: somente remoção explícita no fluxo de UX; nunca timeout/automação.
+//   * coupon_removed_message_sent: permanece apenas operacional.
+
 
 function safeStr(value) {
   return String(value ?? "").trim();
@@ -646,6 +670,86 @@ async function findDuplicateOpenReservation(internalUserId, couponCode) {
   return null;
 }
 
+function buildCouponTrackingContext({
+  internalUserId = "",
+  couponCode = "",
+  planCode = "",
+  billingCycle = "",
+  source = "coupons",
+  step = "",
+} = {}) {
+  return {
+    userId: safeStr(internalUserId),
+    waId: safeStr(internalUserId),
+    couponCode: normalizeCouponCode(couponCode),
+    planCode: normalizePlanCode(planCode),
+    billingCycle: normalizeBillingCycle(billingCycle),
+    source: safeStr(source) || "coupons",
+    step: safeStr(step),
+  };
+}
+
+function normalizeCouponConversionTrackingMode(value) {
+  const text = toLower(value);
+  if (text === COUPON_CONVERSION_TRACKING_MODE.NONE) return COUPON_CONVERSION_TRACKING_MODE.NONE;
+  if (text === COUPON_CONVERSION_TRACKING_MODE.ENGINE_VALIDATION) return COUPON_CONVERSION_TRACKING_MODE.ENGINE_VALIDATION;
+  if (text === COUPON_CONVERSION_TRACKING_MODE.FLOW_EXCLUSIVE) return COUPON_CONVERSION_TRACKING_MODE.FLOW_EXCLUSIVE;
+  return COUPON_CONVERSION_TRACKING_MODE.AUTO;
+}
+
+function resolveCouponConversionTrackingMode({ trackingMode = "auto", trackConversion = false, source = "coupons" } = {}) {
+  const normalizedMode = normalizeCouponConversionTrackingMode(trackingMode);
+  if (normalizedMode !== COUPON_CONVERSION_TRACKING_MODE.AUTO) {
+    return normalizedMode;
+  }
+
+  if (trackConversion) {
+    return COUPON_CONVERSION_TRACKING_MODE.ENGINE_VALIDATION;
+  }
+
+  const normalizedSource = toLower(source);
+
+  // Fonte canônica do tracking de UX interativo:
+  // - flow.js emite coupon_applied / coupon_rejected / coupon_removed
+  //   nos pontos de interação explícita do usuário.
+  if (normalizedSource === "flow") {
+    return COUPON_CONVERSION_TRACKING_MODE.FLOW_EXCLUSIVE;
+  }
+
+  // Pricing faz validação estrutural de checkout, mas não deve duplicar
+  // o funil oficial quando o fluxo principal já capturou a interação do usuário.
+  if (normalizedSource.startsWith("pricing")) {
+    return COUPON_CONVERSION_TRACKING_MODE.NONE;
+  }
+
+  // Demais validações diretas do motor de cupom podem emitir funil oficial.
+  return COUPON_CONVERSION_TRACKING_MODE.ENGINE_VALIDATION;
+}
+
+function shouldEmitCouponConversion(mode, kind) {
+  const normalizedMode = normalizeCouponConversionTrackingMode(mode);
+  if (normalizedMode === COUPON_CONVERSION_TRACKING_MODE.NONE) return false;
+  if (normalizedMode === COUPON_CONVERSION_TRACKING_MODE.FLOW_EXCLUSIVE) return false;
+  if (normalizedMode === COUPON_CONVERSION_TRACKING_MODE.ENGINE_VALIDATION) {
+    return kind === "applied" || kind === "rejected";
+  }
+  return false;
+}
+
+async function emitCouponConversionMetricSafe(kind, payload = {}) {
+  try {
+    if (kind === "applied") {
+      return await trackCouponApplied(buildCouponTrackingContext(payload));
+    }
+    if (kind === "rejected") {
+      return await trackCouponRejected(buildCouponTrackingContext(payload));
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function emitCouponAudit(action, reservationOrCoupon, extra = {}) {
   const payload = isPlainObject(reservationOrCoupon) ? reservationOrCoupon : {};
   const couponCode = normalizeCouponCode(extra.couponCode || payload.couponCode);
@@ -869,6 +973,9 @@ export async function validateCouponEligibility({
   planCode = "",
   billingCycle = "",
   basePriceCents = 0,
+  trackConversion = false,
+  trackingMode = "auto",
+  source = "coupons",
 } = {}) {
   const context = await buildEligibilityContext({
     internalUserId,
@@ -890,6 +997,12 @@ export async function validateCouponEligibility({
     billingOption,
   } = context;
 
+  const conversionTrackingMode = resolveCouponConversionTrackingMode({
+    trackingMode,
+    trackConversion,
+    source,
+  });
+
   await emitCouponMetric({
     eventName: "coupon_attempted",
     couponCode: context.couponCode,
@@ -906,6 +1019,16 @@ export async function validateCouponEligibility({
 
   if (!coupon || coupon.deleted || coupon.status === COUPON_STATUS.DELETED) {
     const result = buildEligibilityFailure("coupon_not_found", "Coupon not found", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: context.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponAudit("COUPON_REJECTED", context, {
       couponCode: context.couponCode,
       internalUserId: context.internalUserId,
@@ -927,6 +1050,16 @@ export async function validateCouponEligibility({
 
   if (coupon.status !== COUPON_STATUS.ACTIVE || !coupon.active) {
     const result = buildEligibilityFailure("coupon_inactive", "Coupon inactive", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponAudit("COUPON_REJECTED", coupon, {
       internalUserId: context.internalUserId,
       planCode: context.planCode,
@@ -947,6 +1080,16 @@ export async function validateCouponEligibility({
 
   if (!plan || !billingOption || billingOption.enabled === false) {
     const result = buildEligibilityFailure("plan_or_cycle_invalid", "Plan or billing cycle invalid", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponAudit("COUPON_REJECTED", coupon, {
       internalUserId: context.internalUserId,
       planCode: context.planCode,
@@ -971,6 +1114,16 @@ export async function validateCouponEligibility({
 
   if (validFromMs && currentMs < validFromMs) {
     const result = buildEligibilityFailure("coupon_not_started", "Coupon validity has not started", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponMetric({
       eventName: "coupon_rejected",
       couponCode: coupon.couponCode,
@@ -984,6 +1137,16 @@ export async function validateCouponEligibility({
 
   if (validUntilMs && currentMs > validUntilMs) {
     const result = buildEligibilityFailure("coupon_expired", "Coupon expired", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponMetric({
       eventName: "coupon_rejected",
       couponCode: coupon.couponCode,
@@ -997,6 +1160,16 @@ export async function validateCouponEligibility({
 
   if (coupon.eligiblePlanCodes.length && !coupon.eligiblePlanCodes.includes(context.planCode)) {
     const result = buildEligibilityFailure("coupon_plan_not_allowed", "Coupon not allowed for selected plan", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponMetric({
       eventName: "coupon_rejected",
       couponCode: coupon.couponCode,
@@ -1010,6 +1183,16 @@ export async function validateCouponEligibility({
 
   if (coupon.eligibleBillingCycles.length && !coupon.eligibleBillingCycles.includes(context.billingCycle)) {
     const result = buildEligibilityFailure("coupon_cycle_not_allowed", "Coupon not allowed for selected billing cycle", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponMetric({
       eventName: "coupon_rejected",
       couponCode: coupon.couponCode,
@@ -1023,6 +1206,16 @@ export async function validateCouponEligibility({
 
   if (coupon.maxRedemptionsTotal && redemptionCountTotal >= coupon.maxRedemptionsTotal) {
     const result = buildEligibilityFailure("coupon_total_limit_reached", "Coupon total limit reached", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponMetric({
       eventName: "coupon_rejected",
       couponCode: coupon.couponCode,
@@ -1036,6 +1229,16 @@ export async function validateCouponEligibility({
 
   if (coupon.maxRedemptionsPerUser && redemptionCountByUser >= coupon.maxRedemptionsPerUser) {
     const result = buildEligibilityFailure("coupon_user_limit_reached", "Coupon user limit reached", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponMetric({
       eventName: "coupon_rejected",
       couponCode: coupon.couponCode,
@@ -1050,6 +1253,16 @@ export async function validateCouponEligibility({
   const activePlanDetected = userStatus === "ACTIVE" && Boolean(userPlan);
   if (coupon.onlyWithoutActivePlan && activePlanDetected) {
     const result = buildEligibilityFailure("coupon_requires_no_active_plan", "Coupon requires user without active plan", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponMetric({
       eventName: "coupon_rejected",
       couponCode: coupon.couponCode,
@@ -1063,6 +1276,16 @@ export async function validateCouponEligibility({
 
   if (coupon.firstPurchaseOnly && (hasPriorPurchase || activePlanDetected)) {
     const result = buildEligibilityFailure("coupon_first_purchase_only", "Coupon valid only for first purchase", { context });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
     await emitCouponMetric({
       eventName: "coupon_rejected",
       couponCode: coupon.couponCode,
@@ -1079,6 +1302,17 @@ export async function validateCouponEligibility({
       context,
       duplicateReservation,
     });
+    if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+      await emitCouponConversionMetricSafe("rejected", {
+        internalUserId: context.internalUserId,
+        couponCode: coupon.couponCode,
+        planCode: context.planCode,
+        billingCycle: context.billingCycle,
+        source,
+        step: result.code,
+      });
+    }
+    
     await emitCouponAudit("COUPON_DUPLICATE_BLOCKED", coupon, {
       internalUserId: context.internalUserId,
       reservationId: duplicateReservation.reservationId,
@@ -1150,6 +1384,17 @@ export async function validateCouponEligibility({
     discountAmountCents,
     finalPriceCents,
   });
+
+  if (shouldEmitCouponConversion(conversionTrackingMode, "rejected")) {
+    await emitCouponConversionMetricSafe("applied", {
+      internalUserId: context.internalUserId,
+      couponCode: coupon.couponCode,
+      planCode: context.planCode,
+      billingCycle: context.billingCycle,
+      source,
+      step: result.code,
+    });
+  }
 
   return result;
 }
@@ -1444,7 +1689,10 @@ export async function cancelCouponReservation(
   );
 }
 
-export async function markCouponRemovedMessageSent(reservationId, { sentAt = "", meta = {} } = {}) {
+// Importante:
+// - coupon_removed_message_sent é um evento operacional de timeout/automação.
+// - coupon_removed (funil oficial) pertence ao fluxo de UX explícita e NÃO deve ser emitido aqui.
+export async function markCouponRemovedMessageSent(reservationId, { sentAt = "", meta = {}, trackConversion = false, trackingMode = "auto", source = "coupons" } = {}) {
   const previous = await readReservation(reservationId);
   if (!previous) return { ok: false, error: "reservation_not_found" };
 
@@ -1578,3 +1826,4 @@ export const COUPON_RESERVATION_STATUS_VALUES = RESERVATION_STATUS;
 export const COUPON_DISCOUNT_TYPE_VALUES = DISCOUNT_TYPE;
 export const COUPON_APPLIES_TO_VALUES = APPLIES_TO;
 export const COUPON_DEFAULT_RESERVATION_TTL_HOURS = DEFAULT_RESERVATION_TTL_HOURS;
+export const COUPON_CONVERSION_TRACKING_MODE_VALUES = COUPON_CONVERSION_TRACKING_MODE;
