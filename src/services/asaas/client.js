@@ -9,6 +9,14 @@
  * - Materializar no Asaas apenas o resultado já calculado pelo pricing.js.
  */
 
+import {
+  trackCheckoutStarted,
+  trackCheckoutConfirmed,
+  trackPaymentLinkCreated,
+  trackPixCheckoutCreated,
+  trackSubscriptionCheckoutCreated,
+} from "../metrics.js";
+
 function env(name, def = "") {
   return String(process.env[name] || def).trim();
 }
@@ -83,6 +91,42 @@ function normalizeChargeMode(value = "") {
   return "";
 }
 
+const ASAAS_CLIENT_TRACKING_MODE = Object.freeze({
+  NONE: "none",
+  PROVIDER_ONLY: "provider_only",
+  PROVIDER_AND_JOURNEY: "provider_and_journey",
+});
+
+function normalizeAsaasClientTrackingMode(value, { fallback = ASAAS_CLIENT_TRACKING_MODE.PROVIDER_ONLY } = {}) {
+  const normalized = safeLower(value);
+  if (normalized === ASAAS_CLIENT_TRACKING_MODE.NONE) return ASAAS_CLIENT_TRACKING_MODE.NONE;
+  if (normalized === ASAAS_CLIENT_TRACKING_MODE.PROVIDER_AND_JOURNEY) return ASAAS_CLIENT_TRACKING_MODE.PROVIDER_AND_JOURNEY;
+  if (normalized === ASAAS_CLIENT_TRACKING_MODE.PROVIDER_ONLY) return ASAAS_CLIENT_TRACKING_MODE.PROVIDER_ONLY;
+  return fallback;
+}
+
+function resolveAsaasClientTrackingMode({
+  trackingMode = "",
+  trackConversion = true,
+  trackCheckoutLifecycle = false,
+} = {}) {
+  const explicitMode = normalizeAsaasClientTrackingMode(trackingMode, { fallback: "" });
+  if (explicitMode) return explicitMode;
+  if (!trackConversion && !trackCheckoutLifecycle) return ASAAS_CLIENT_TRACKING_MODE.NONE;
+  if (trackConversion && trackCheckoutLifecycle) return ASAAS_CLIENT_TRACKING_MODE.PROVIDER_AND_JOURNEY;
+  if (trackConversion) return ASAAS_CLIENT_TRACKING_MODE.PROVIDER_ONLY;
+  if (trackCheckoutLifecycle) return ASAAS_CLIENT_TRACKING_MODE.PROVIDER_AND_JOURNEY;
+  return ASAAS_CLIENT_TRACKING_MODE.NONE;
+}
+
+function shouldEmitProviderTracking(trackingMode) {
+  return normalizeAsaasClientTrackingMode(trackingMode) !== ASAAS_CLIENT_TRACKING_MODE.NONE;
+}
+
+function shouldEmitJourneyTracking(trackingMode) {
+  return normalizeAsaasClientTrackingMode(trackingMode) === ASAAS_CLIENT_TRACKING_MODE.PROVIDER_AND_JOURNEY;
+}
+
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -106,6 +150,37 @@ function buildDescriptionParts({ planName = "", billingCycle = "monthly", quote 
 
   return parts;
 }
+
+function buildAsaasClientTrackingContext({
+  quote = {},
+  paymentId = "",
+  subscriptionId = "",
+  source = "asaas_client",
+  step = "",
+} = {}) {
+  const normalized = normalizeQuotePayload(quote);
+  return {
+    userId: normalized.internalUserId || safeStr(quote?.internalUserId),
+    waId: normalized.internalUserId || safeStr(quote?.internalUserId),
+    planCode: normalized.planCode,
+    billingCycle: normalized.billingCycle,
+    couponCode: normalized.couponCode,
+    paymentId: safeStr(paymentId),
+    subscriptionId: safeStr(subscriptionId),
+    source: safeStr(source) || "asaas_client",
+    step: safeStr(step),
+  };
+}
+
+async function emitAsaasClientMetricSafe(metricFn, payload = {}) {
+  if (typeof metricFn !== "function") return null;
+  try {
+    return await metricFn(payload);
+  } catch {
+    return null;
+  }
+}
+
 
 async function asaasFetch(path, { method = "GET", body = undefined } = {}) {
   const url = `${asaasBaseUrl()}${path}`;
@@ -309,6 +384,11 @@ export async function createPixPaymentFromQuote({
   description = "",
   externalReference,
   dueDate,
+  trackingMode = "",
+  trackingMode = "",
+  trackConversion = true,
+  trackCheckoutLifecycle = false,
+  source = "asaas_client",
 }) {
   const context = buildAsaasChargeContextFromQuote({
     quote,
@@ -316,13 +396,53 @@ export async function createPixPaymentFromQuote({
     dueDate,
   });
 
-  return createPixPayment({
+  const resolvedTrackingMode = resolveAsaasClientTrackingMode({
+    trackingMode,
+    trackConversion,
+    trackCheckoutLifecycle,
+  });
+
+  const trackingContext = buildAsaasClientTrackingContext({
+    quote,
+    source,
+    step: "provider_pix_checkout_requested",
+  });
+
+  if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
+    await emitAsaasClientMetricSafe(trackCheckoutStarted, trackingContext);
+  }
+
+  const payment = await createPixPayment({
     customerId,
     value: context.finalPriceValue,
     description: safeStr(description) || context.description,
     externalReference,
     dueDate: context.dueDate,
   });
+
+  const paymentTrackingContext = buildAsaasClientTrackingContext({
+    quote,
+    paymentId: safeStr(payment?.id),
+    source,
+    step: "pix_checkout_created",
+  });
+
+  if (shouldEmitProviderTracking(resolvedTrackingMode)) {
+    await emitAsaasClientMetricSafe(trackPixCheckoutCreated, paymentTrackingContext);
+  }
+  if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
+    await emitAsaasClientMetricSafe(
+      trackCheckoutConfirmed,
+      buildAsaasClientTrackingContext({
+        quote,
+        paymentId: safeStr(payment?.id),
+        source,
+        step: "provider_pix_checkout_materialized",
+      })
+    );
+  }
+
+  return payment;
 }
 
 // -------------------- Payment Link (Recurring credit card) --------------------
@@ -353,6 +473,10 @@ export async function createRecurringCardPaymentLinkFromQuote({
   name = "",
   description = "",
   externalReference,
+  trackingMode = "",
+  trackConversion = true,
+  trackCheckoutLifecycle = false,
+  source = "asaas_client",
 }) {
   const context = buildAsaasChargeContextFromQuote({
     quote,
@@ -366,13 +490,62 @@ export async function createRecurringCardPaymentLinkFromQuote({
     throw err;
   }
 
-  return createRecurringCardPaymentLink({
+  const resolvedTrackingMode = resolveAsaasClientTrackingMode({
+    trackingMode,
+    trackConversion,
+    trackCheckoutLifecycle,
+  });
+
+  const trackingContext = buildAsaasClientTrackingContext({
+    quote,
+    source,
+    step: "provider_subscription_checkout_requested",
+  });
+
+  if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
+    await emitAsaasClientMetricSafe(trackCheckoutStarted, trackingContext);
+  }
+
+  const paymentLink = await createRecurringCardPaymentLink({
     name: safeStr(name) || safeStr(context.planName) || "Assinatura Amigo das Vendas",
     description: safeStr(description) || context.description,
     value: context.finalPriceValue,
     externalReference,
     subscriptionCycle: context.subscriptionCycle,
   });
+
+  const paymentLinkTrackingContext = buildAsaasClientTrackingContext({
+    quote,
+    paymentId: safeStr(paymentLink?.id),
+    source,
+    step: "payment_link_created",
+  });
+
+  if (shouldEmitProviderTracking(resolvedTrackingMode)) {
+    await emitAsaasClientMetricSafe(trackPaymentLinkCreated, paymentLinkTrackingContext);
+    await emitAsaasClientMetricSafe(
+      trackSubscriptionCheckoutCreated,
+      buildAsaasClientTrackingContext({
+        quote,
+        paymentId: safeStr(paymentLink?.id),
+        source,
+        step: "subscription_checkout_created",
+      })
+    );
+  }
+  if (shouldEmitJourneyTracking(resolvedTrackingMode)) {
+    await emitAsaasClientMetricSafe(
+      trackCheckoutConfirmed,
+      buildAsaasClientTrackingContext({
+        quote,
+        paymentId: safeStr(paymentLink?.id),
+        source,
+        step: "provider_subscription_checkout_materialized",
+      })
+    );
+  }
+
+  return paymentLink;
 }
 
 export async function createAsaasCheckoutFromQuote({
@@ -383,6 +556,10 @@ export async function createAsaasCheckoutFromQuote({
   dueDate = "",
   description = "",
   name = "",
+  trackingMode = "",
+  trackConversion = true,
+  trackCheckoutLifecycle = false,
+  source = "asaas_client",
 } = {}) {
   const method = safeLower(paymentMethod);
 
@@ -393,6 +570,11 @@ export async function createAsaasCheckoutFromQuote({
       description,
       externalReference,
       dueDate,
+      trackingMode,
+      trackingMode,
+      trackConversion,
+      trackCheckoutLifecycle,
+      source,
     });
   }
 
@@ -402,6 +584,9 @@ export async function createAsaasCheckoutFromQuote({
       name,
       description,
       externalReference,
+      trackConversion,
+      trackCheckoutLifecycle,
+      source,
     });
   }
 
@@ -501,3 +686,6 @@ export async function listSubscriptions({
 export async function listSubscriptionsByExternalReference(externalReference, { limit = 50, offset = 0 } = {}) {
   return listSubscriptions({ externalReference, limit, offset });
 }
+
+
+export const ASAAS_CLIENT_TRACKING_MODE_VALUES = ASAAS_CLIENT_TRACKING_MODE;
