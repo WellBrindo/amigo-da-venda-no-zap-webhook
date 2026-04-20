@@ -27,7 +27,9 @@ import {
   trackCampaignReceived,
   trackCampaignClickedIntent,
   trackCampaignConversionAttributed,
+  trackCampaignError,
 } from "./metrics.js";
+import * as audit from "./audit.js";
 
 const CAMPAIGN_TTL_LOG_SECONDS = 180 * 24 * 60 * 60;
 const CAMPAIGN_LOG_MAX_ITEMS = 5000;
@@ -38,6 +40,17 @@ const CAMPAIGN_ATTRIBUTION_WINDOW_HOURS = 72;
 
 export const CAMPAIGN_ATTRIBUTION_POLICY = Object.freeze({
   MINIMUM_RELIABLE: "minimum_reliable",
+});
+
+
+const CAMPAIGN_ERROR_CODE = Object.freeze({
+  PERSISTENCE_ERROR: "CAMPAIGN_PERSISTENCE_ERROR",
+  STATE_ERROR: "CAMPAIGN_STATE_ERROR",
+  ELIGIBILITY_ERROR: "CAMPAIGN_ELIGIBILITY_ERROR",
+  CONFLICT_ERROR: "CAMPAIGN_CONFLICT_ERROR",
+  ATTRIBUTION_ERROR: "CAMPAIGN_ATTRIBUTION_ERROR",
+  TRACKING_ERROR: "CAMPAIGN_TRACKING_ERROR",
+  RUNTIME_ERROR: "CAMPAIGN_RUNTIME_ERROR",
 });
 
 export const CAMPAIGN_CATEGORY = Object.freeze({
@@ -190,6 +203,194 @@ function tryJsonParse(value, fallback = null) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+
+function createCampaignError(errorCode, message, meta = {}) {
+  const err = new Error(safeStr(message) || errorCode || CAMPAIGN_ERROR_CODE.RUNTIME_ERROR);
+  err.name = "CampaignRuntimeError";
+  err.errorCode = safeStr(errorCode) || CAMPAIGN_ERROR_CODE.RUNTIME_ERROR;
+  err.retryable = !!meta.retryable;
+  err.meta = meta && typeof meta === "object" ? { ...meta } : {};
+  return err;
+}
+
+function serializeCampaignError(error, fallbackCode = CAMPAIGN_ERROR_CODE.RUNTIME_ERROR) {
+  const code = safeStr(error?.errorCode || error?.code || fallbackCode) || CAMPAIGN_ERROR_CODE.RUNTIME_ERROR;
+  const message = safeStr(error?.message || error) || code;
+  return {
+    errorCode: code,
+    message,
+    retryable: Boolean(error?.retryable),
+    meta: error?.meta && typeof error.meta === "object" ? { ...error.meta } : {},
+  };
+}
+
+function buildCampaignOperationalLog({ level = "warn", event = "", campaignId = "", campaignCode = "", userId = "", step = "", error = null, meta = {} } = {}) {
+  const serialized = error ? serializeCampaignError(error) : null;
+  return {
+    level: safeStr(level) || "warn",
+    source: "campaigns",
+    event: safeStr(event),
+    campaignId: safeStr(campaignId),
+    campaignCode: normalizeCampaignCode(campaignCode || ""),
+    userId: safeStr(userId),
+    step: safeStr(step),
+    errorCode: serialized?.errorCode || "",
+    message: serialized?.message || "",
+    retryable: serialized?.retryable || false,
+    meta: meta && typeof meta === "object" ? { ...meta, ...(serialized?.meta || {}) } : (serialized?.meta || {}),
+    ts: nowIso(),
+  };
+}
+
+function emitCampaignOperationalLog(payload = {}) {
+  const entry = buildCampaignOperationalLog(payload);
+
+  void (async () => {
+    try {
+      if (typeof audit?.logOperationalEvent === "function") {
+        await audit.logOperationalEvent({
+          module: "campaigns",
+          event: entry.event || "campaign_runtime",
+          level: entry.level || "warn",
+          userId: entry.userId || "",
+          campaignId: entry.campaignId || "",
+          campaignCode: entry.campaignCode || "",
+          step: entry.step || "",
+          errorCode: entry.errorCode || "",
+          message: entry.message || "",
+          status: entry.retryable ? "retryable" : "",
+          meta: entry.meta && typeof entry.meta === "object" ? entry.meta : {},
+        });
+        return;
+      }
+      if (typeof audit?.logRuntimeError === "function") {
+        await audit.logRuntimeError({
+          module: "campaigns",
+          event: entry.event || "campaign_runtime",
+          level: entry.level || "warn",
+          userId: entry.userId || "",
+          campaignId: entry.campaignId || "",
+          campaignCode: entry.campaignCode || "",
+          step: entry.step || "",
+          errorCode: entry.errorCode || "",
+          message: entry.message || "",
+          meta: entry.meta && typeof entry.meta === "object" ? entry.meta : {},
+        });
+        return;
+      }
+    } catch {
+      // fallback below
+    }
+
+    try {
+      const line = JSON.stringify(entry);
+      if (entry.level === "error" || entry.level === "fatal") {
+        console.error(line);
+        return;
+      }
+      if (entry.level === "warn") {
+        console.warn(line);
+        return;
+      }
+      console.log(line);
+    } catch {
+      // no-op
+    }
+  })();
+}
+
+async function safeAppendCampaignLog(payload, meta = {}) {
+  try {
+    await appendCampaignLog(payload);
+    return { ok: true };
+  } catch (error) {
+    await reportCampaignFailure({
+      level: "warn",
+      event: "campaign_log_write_failed",
+      campaignId: payload?.campaignId,
+      campaignCode: payload?.campaignCode,
+      userId: payload?.userId,
+      step: safeStr(meta.step || payload?.reason || payload?.action),
+      error: createCampaignError(CAMPAIGN_ERROR_CODE.PERSISTENCE_ERROR, error?.message || error, { operation: "appendCampaignLog" }),
+      meta,
+    });
+    return { ok: false, error: serializeCampaignError(error, CAMPAIGN_ERROR_CODE.PERSISTENCE_ERROR) };
+  }
+}
+
+async function safeEmitCampaignMetric(metricFn, payload = {}, meta = {}) {
+  try {
+    return await emitCampaignMetricSafe(metricFn, payload);
+  } catch (error) {
+    await reportCampaignFailure({
+      level: "warn",
+      event: "campaign_metric_emit_failed",
+      campaignId: payload?.campaignId,
+      campaignCode: payload?.campaignCode,
+      userId: payload?.userId,
+      step: safeStr(meta.step || payload?.step),
+      error: createCampaignError(CAMPAIGN_ERROR_CODE.TRACKING_ERROR, error?.message || error, { operation: "emitCampaignMetric" }),
+      meta,
+    });
+    return { ok: false, skipped: true, reason: "metric_emit_failed" };
+  }
+}
+
+async function emitCampaignErrorMetric(payload = {}, meta = {}) {
+  const trackerPayload = {
+    userId: safeStr(payload?.userId),
+    waId: safeStr(payload?.userId),
+    campaignId: safeStr(payload?.campaignId),
+    campaignCode: normalizeCampaignCode(payload?.campaignCode || ""),
+    source: safeStr(payload?.source) || "campaigns",
+    step: safeStr(payload?.step || meta?.step),
+    errorCode: safeStr(payload?.errorCode || meta?.errorCode || CAMPAIGN_ERROR_CODE.RUNTIME_ERROR),
+    by: safeStr(payload?.reference || meta?.reference),
+  };
+  return safeEmitCampaignMetric(trackCampaignError, trackerPayload, { step: trackerPayload.step || meta?.step || "campaign_error" });
+}
+
+async function reportCampaignFailure({
+  event = "campaign_runtime_failure",
+  level = "warn",
+  campaignId = "",
+  campaignCode = "",
+  userId = "",
+  step = "",
+  error = null,
+  source = "campaigns",
+  meta = {},
+  emitMetric = true,
+} = {}) {
+  const serialized = serializeCampaignError(error, CAMPAIGN_ERROR_CODE.RUNTIME_ERROR);
+  emitCampaignOperationalLog({
+    level,
+    event,
+    campaignId,
+    campaignCode,
+    userId,
+    step,
+    error,
+    meta: {
+      source: safeStr(source) || "campaigns",
+      ...(meta && typeof meta === "object" ? meta : {}),
+    },
+  });
+
+  if (emitMetric) {
+    await emitCampaignErrorMetric({
+      campaignId,
+      campaignCode,
+      userId,
+      source,
+      step,
+      errorCode: serialized.errorCode,
+    }, meta);
+  }
+
+  return serialized;
 }
 
 function normalizeCampaignCode(value) {
@@ -374,13 +575,48 @@ function normalizeCampaignUserState(input = {}) {
 }
 
 async function writeJson(key, payload) {
-  await redisSet(key, JSON.stringify(payload));
-  return payload;
+  try {
+    await redisSet(key, JSON.stringify(payload));
+    return payload;
+  } catch (error) {
+    throw createCampaignError(CAMPAIGN_ERROR_CODE.PERSISTENCE_ERROR, error?.message || error, {
+      operation: "writeJson",
+      key: safeStr(key),
+    });
+  }
 }
 
 async function readJson(key, fallback = null) {
-  const raw = await redisGet(key);
-  return raw ? tryJsonParse(raw, fallback) : fallback;
+  let raw = "";
+  try {
+    raw = await redisGet(key);
+  } catch (error) {
+    await reportCampaignFailure({
+      event: "campaign_read_failed",
+      step: "read_json",
+      error: createCampaignError(CAMPAIGN_ERROR_CODE.PERSISTENCE_ERROR, error?.message || error, {
+        operation: "redisGet",
+        key: safeStr(key),
+      }),
+      meta: { key: safeStr(key) },
+    });
+    return fallback;
+  }
+
+  if (!raw) return fallback;
+  const parsed = tryJsonParse(raw, fallback);
+  if (parsed === fallback && raw) {
+    await reportCampaignFailure({
+      event: "campaign_parse_failed",
+      step: "read_json",
+      error: createCampaignError(CAMPAIGN_ERROR_CODE.STATE_ERROR, "Invalid campaign JSON payload", {
+        operation: "json_parse",
+        key: safeStr(key),
+      }),
+      meta: { key: safeStr(key) },
+    });
+  }
+  return parsed;
 }
 
 function campaignSortComparator(a, b) {
@@ -394,34 +630,50 @@ function campaignSortComparator(a, b) {
 }
 
 async function appendCampaignLog(payload) {
-  const logLine = JSON.stringify(payload);
-  await redisLPush(redisCampaignLogGlobalKey(), logLine);
-  await redisLTrim(redisCampaignLogGlobalKey(), 0, CAMPAIGN_LOG_MAX_ITEMS - 1);
-  await redisExpire(redisCampaignLogGlobalKey(), CAMPAIGN_TTL_LOG_SECONDS);
+  try {
+    const logLine = JSON.stringify(payload);
+    await redisLPush(redisCampaignLogGlobalKey(), logLine);
+    await redisLTrim(redisCampaignLogGlobalKey(), 0, CAMPAIGN_LOG_MAX_ITEMS - 1);
+    await redisExpire(redisCampaignLogGlobalKey(), CAMPAIGN_TTL_LOG_SECONDS);
 
-  if (payload.userId) {
-    const userKey = redisCampaignLogUserKey(payload.userId);
-    await redisLPush(userKey, logLine);
-    await redisLTrim(userKey, 0, CAMPAIGN_USER_LOG_MAX_ITEMS - 1);
-    await redisExpire(userKey, CAMPAIGN_TTL_LOG_SECONDS);
+    if (payload.userId) {
+      const userKey = redisCampaignLogUserKey(payload.userId);
+      await redisLPush(userKey, logLine);
+      await redisLTrim(userKey, 0, CAMPAIGN_USER_LOG_MAX_ITEMS - 1);
+      await redisExpire(userKey, CAMPAIGN_TTL_LOG_SECONDS);
+    }
+
+    if (payload.campaignId) {
+      const campaignKey = redisCampaignLogCampaignKey(payload.campaignId);
+      await redisLPush(campaignKey, logLine);
+      await redisLTrim(campaignKey, 0, CAMPAIGN_USER_LOG_MAX_ITEMS - 1);
+      await redisExpire(campaignKey, CAMPAIGN_TTL_LOG_SECONDS);
+    }
+
+    return payload;
+  } catch (error) {
+    throw createCampaignError(CAMPAIGN_ERROR_CODE.PERSISTENCE_ERROR, error?.message || error, {
+      operation: "appendCampaignLog",
+      campaignId: safeStr(payload?.campaignId),
+      userId: safeStr(payload?.userId),
+    });
   }
-
-  if (payload.campaignId) {
-    const campaignKey = redisCampaignLogCampaignKey(payload.campaignId);
-    await redisLPush(campaignKey, logLine);
-    await redisLTrim(campaignKey, 0, CAMPAIGN_USER_LOG_MAX_ITEMS - 1);
-    await redisExpire(campaignKey, CAMPAIGN_TTL_LOG_SECONDS);
-  }
-
-  return payload;
 }
 
 async function appendConflictLog(payload) {
-  const line = JSON.stringify(payload);
-  await redisLPush(redisCampaignConflictGlobalKey(), line);
-  await redisLTrim(redisCampaignConflictGlobalKey(), 0, CAMPAIGN_CONFLICT_LOG_MAX_ITEMS - 1);
-  await redisExpire(redisCampaignConflictGlobalKey(), CAMPAIGN_TTL_LOG_SECONDS);
-  return payload;
+  try {
+    const line = JSON.stringify(payload);
+    await redisLPush(redisCampaignConflictGlobalKey(), line);
+    await redisLTrim(redisCampaignConflictGlobalKey(), 0, CAMPAIGN_CONFLICT_LOG_MAX_ITEMS - 1);
+    await redisExpire(redisCampaignConflictGlobalKey(), CAMPAIGN_TTL_LOG_SECONDS);
+    return payload;
+  } catch (error) {
+    throw createCampaignError(CAMPAIGN_ERROR_CODE.PERSISTENCE_ERROR, error?.message || error, {
+      operation: "appendConflictLog",
+      campaignId: safeStr(payload?.winnerCampaignId),
+      userId: safeStr(payload?.userId),
+    });
+  }
 }
 
 function buildCampaignTrackingContext({
@@ -482,19 +734,29 @@ function buildSkipResult(reason, { campaignId = "", userId = "", campaign = null
 }
 
 async function getCampaignAttributionContext(campaignId, userId) {
-  const campaign = (await getCampaign(campaignId))?.campaign || null;
-  const current = (await getCampaignUserState(campaignId, userId))?.state || normalizeCampaignUserState({ campaignId, userId });
   const now = nowIso();
   const nowMsValue = Date.parse(now);
+  try {
+    const campaign = (await getCampaign(campaignId))?.campaign || null;
+    const stateResult = await getCampaignUserState(campaignId, userId);
+    const current = stateResult?.state || normalizeCampaignUserState({ campaignId, userId });
 
-  return {
-    campaign,
-    current,
-    now,
-    nowMs: nowMsValue,
-    hasSentAt: Boolean(safeStr(current?.lastSentAt)),
-    withinAttributionWindow: isWithinAttributionWindow(current?.lastSentAt, campaign, nowMsValue),
-  };
+    return {
+      campaign,
+      current,
+      now,
+      nowMs: nowMsValue,
+      hasSentAt: Boolean(safeStr(current?.lastSentAt)),
+      withinAttributionWindow: isWithinAttributionWindow(current?.lastSentAt, campaign, nowMsValue),
+      stateError: stateResult?.error || null,
+    };
+  } catch (error) {
+    throw createCampaignError(CAMPAIGN_ERROR_CODE.ATTRIBUTION_ERROR, error?.message || error, {
+      operation: "getCampaignAttributionContext",
+      campaignId: safeStr(campaignId),
+      userId: safeStr(userId),
+    });
+  }
 }
 
 export async function getCampaignAttributableContext(campaignId, userId) {
@@ -536,15 +798,24 @@ async function upsertCampaignIndexes(campaign, previous = null) {
 
 export async function getCampaign(idOrCode) {
   const raw = safeStr(idOrCode);
-  if (!raw) return { campaign: null };
+  if (!raw) return { campaign: null, error: null };
 
-  const direct = raw.startsWith("camp_") ? raw : null;
-  const byCode = direct ? null : await redisGet(redisCampaignIndexCodeKey(normalizeCampaignCode(raw)));
-  const campaignId = safeStr(direct || byCode);
-  if (!campaignId) return { campaign: null };
+  try {
+    const direct = raw.startsWith("camp_") ? raw : null;
+    const byCode = direct ? null : await redisGet(redisCampaignIndexCodeKey(normalizeCampaignCode(raw)));
+    const campaignId = safeStr(direct || byCode);
+    if (!campaignId) return { campaign: null, error: null };
 
-  const data = await readJson(redisCampaignDefinitionKey(campaignId), null);
-  return { campaign: data ? normalizeCampaignDefinition(data, { existing: data }) : null };
+    const data = await readJson(redisCampaignDefinitionKey(campaignId), null);
+    return { campaign: data ? normalizeCampaignDefinition(data, { existing: data }) : null, error: null };
+  } catch (error) {
+    const serialized = serializeCampaignError(createCampaignError(CAMPAIGN_ERROR_CODE.PERSISTENCE_ERROR, error?.message || error, {
+      operation: "getCampaign",
+      idOrCode: raw,
+    }));
+    emitCampaignOperationalLog({ event: "campaign_lookup_failed", campaignCode: raw, step: "get_campaign", error: serialized });
+    return { campaign: null, error: serialized };
+  }
 }
 
 export async function listCampaigns({ includeInactive = true, category = null, limit = 100 } = {}) {
@@ -695,16 +966,37 @@ export async function deleteCampaign(id, { actor = null } = {}) {
 export async function getCampaignUserState(campaignId, userId) {
   const cid = safeStr(campaignId);
   const uid = safeStr(userId);
-  if (!cid || !uid) return { state: normalizeCampaignUserState({ campaignId: cid, userId: uid }) };
-  const raw = await readJson(redisCampaignUserStateKey(cid, uid), null);
-  return { state: normalizeCampaignUserState({ campaignId: cid, userId: uid, ...(raw || {}) }) };
+  if (!cid || !uid) return { state: normalizeCampaignUserState({ campaignId: cid, userId: uid }), error: null };
+  try {
+    const raw = await readJson(redisCampaignUserStateKey(cid, uid), null);
+    return { state: normalizeCampaignUserState({ campaignId: cid, userId: uid, ...(raw || {}) }), error: null };
+  } catch (error) {
+    const serialized = serializeCampaignError(createCampaignError(CAMPAIGN_ERROR_CODE.STATE_ERROR, error?.message || error, {
+      operation: "getCampaignUserState",
+      campaignId: cid,
+      userId: uid,
+    }));
+    emitCampaignOperationalLog({ event: "campaign_user_state_read_failed", campaignId: cid, userId: uid, step: "get_campaign_user_state", error: serialized });
+    return { state: normalizeCampaignUserState({ campaignId: cid, userId: uid }), error: serialized };
+  }
 }
 
 export async function setCampaignUserState(campaignId, userId, patch = {}) {
-  const current = (await getCampaignUserState(campaignId, userId))?.state;
+  const currentResult = await getCampaignUserState(campaignId, userId);
+  const current = currentResult?.state;
   const next = normalizeCampaignUserState({ ...current, ...patch, campaignId, userId });
-  await writeJson(redisCampaignUserStateKey(next.campaignId, next.userId), next);
-  return { state: next };
+  try {
+    await writeJson(redisCampaignUserStateKey(next.campaignId, next.userId), next);
+    return { ok: true, state: next, error: null };
+  } catch (error) {
+    const campaignError = createCampaignError(CAMPAIGN_ERROR_CODE.STATE_ERROR, error?.message || error, {
+      operation: "setCampaignUserState",
+      campaignId: next.campaignId,
+      userId: next.userId,
+    });
+    await reportCampaignFailure({ event: "campaign_user_state_write_failed", campaignId: next.campaignId, userId: next.userId, step: "set_campaign_user_state", error: campaignError });
+    return { ok: false, state: current || normalizeCampaignUserState({ campaignId, userId }), error: serializeCampaignError(campaignError) };
+  }
 }
 
 function deriveCooldownUntil(nowMsValue, campaign) {
@@ -732,7 +1024,33 @@ function compareThreshold({ value, min = 0, max = 0 }) {
 }
 
 export async function evaluateCampaignEligibility(campaignInput, userInput = {}, context = {}) {
-  const campaign = normalizeCampaignDefinition(campaignInput, { existing: campaignInput });
+  let campaign;
+  try {
+    campaign = normalizeCampaignDefinition(campaignInput, { existing: campaignInput });
+  } catch (error) {
+    const campaignError = createCampaignError(CAMPAIGN_ERROR_CODE.ELIGIBILITY_ERROR, error?.message || error, {
+      operation: "normalizeCampaignDefinition",
+      campaignId: safeStr(campaignInput?.id),
+      userId: safeStr(userInput?.userId || context?.userId),
+    });
+    await reportCampaignFailure({ event: "campaign_eligibility_normalization_failed", campaignId: safeStr(campaignInput?.id), userId: safeStr(userInput?.userId || context?.userId), step: "evaluate_campaign_eligibility", error: campaignError });
+    return {
+      campaignId: safeStr(campaignInput?.id),
+      userId: safeStr(userInput?.userId || context?.userId),
+      eligible: false,
+      reasons: [CAMPAIGN_ERROR_CODE.ELIGIBILITY_ERROR],
+      primaryReason: CAMPAIGN_ERROR_CODE.ELIGIBILITY_ERROR,
+      cooldownUntil: null,
+      channelAllowed: false,
+      conflictGroup: safeStr(campaignInput?.conflictGroup),
+      priority: toPositiveInt(campaignInput?.priority ?? 0, 0),
+      evaluatedAt: nowIso(),
+      campaign: campaignInput || null,
+      context: { evaluationFailed: true },
+      error: serializeCampaignError(campaignError),
+    };
+  }
+
   const nowMsValue = Number(context?.nowMs) || Date.now();
   const userId = safeStr(userInput?.userId || context?.userId);
   const status = toUpper(context?.status || userInput?.status);
@@ -749,9 +1067,64 @@ export async function evaluateCampaignEligibility(campaignInput, userInput = {},
   const trialUsed = toPositiveInt(context?.trialUsed ?? userInput?.trialUsed ?? 0, 0);
   const lastInboundHours = getTimeDiffHours(nowMsValue, context?.lastInboundAt || userInput?.lastInboundAt);
   const lastOutboundHours = getTimeDiffHours(nowMsValue, context?.lastOutboundAt || userInput?.lastOutboundAt);
-  const currentState = (await getCampaignUserState(campaign.id, userId))?.state;
+  const currentStateResult = await getCampaignUserState(campaign.id, userId);
+  const currentState = currentStateResult?.state;
   const cooldownUntil = normalizeDateTime(currentState?.cooldownUntil);
   const cooldownActive = cooldownUntil ? Date.parse(cooldownUntil) > nowMsValue : false;
+
+  if (currentStateResult?.error) {
+    const blockedEvaluation = {
+      campaignId: campaign.id,
+      userId,
+      eligible: false,
+      reasons: [CAMPAIGN_ERROR_CODE.STATE_ERROR],
+      primaryReason: CAMPAIGN_ERROR_CODE.STATE_ERROR,
+      cooldownUntil: null,
+      channelAllowed: !campaign.requiresWindow24hOpen || window24hOpen,
+      conflictGroup: campaign.conflictGroup,
+      priority: campaign.priority,
+      evaluatedAt: new Date(nowMsValue).toISOString(),
+      campaign,
+      context: {
+        status,
+        planCode,
+        hasActivePlan,
+        trialEnded,
+        plansViewed,
+        checkoutStarted,
+        isPaymentPending,
+        isInCheckout,
+        adsCreated,
+        trialUsed,
+        lastInboundHours,
+        lastOutboundHours,
+        window24hOpen,
+        stateReadFailed: true,
+      },
+      error: currentStateResult.error,
+    };
+
+    await safeAppendCampaignLog({
+      executionId: await nextExecutionId(),
+      campaignId: campaign.id,
+      userId,
+      action: CAMPAIGN_EXECUTION_ACTION.BLOCKED,
+      reason: blockedEvaluation.primaryReason,
+      details: { reasons: blockedEvaluation.reasons },
+      evaluatedAt: blockedEvaluation.evaluatedAt,
+    }, { step: "evaluate_campaign_eligibility" });
+
+    await emitCampaignErrorMetric({
+      campaignId: campaign.id,
+      campaignCode: campaign.code,
+      userId,
+      source: "campaigns",
+      step: "evaluate_campaign_eligibility",
+      errorCode: CAMPAIGN_ERROR_CODE.STATE_ERROR,
+    }, { stateReadFailed: true });
+
+    return blockedEvaluation;
+  }
 
   const reasons = [];
 
@@ -814,41 +1187,58 @@ export async function evaluateCampaignEligibility(campaignInput, userInput = {},
       lastOutboundHours,
       window24hOpen,
     },
+    error: null,
   };
 
-  await setCampaignUserState(campaign.id, userId, {
+  const stateWriteResult = await setCampaignUserState(campaign.id, userId, {
     lastEvaluatedAt: evaluation.evaluatedAt,
     lastEligibilityResult: eligible ? "eligible" : "blocked",
     lastBlockReason: evaluation.primaryReason,
   });
 
-  await appendCampaignLog({
+  if (!stateWriteResult?.ok) {
+    evaluation.eligible = false;
+    evaluation.reasons = [CAMPAIGN_ERROR_CODE.STATE_ERROR];
+    evaluation.primaryReason = CAMPAIGN_ERROR_CODE.STATE_ERROR;
+    evaluation.error = stateWriteResult?.error || serializeCampaignError(createCampaignError(CAMPAIGN_ERROR_CODE.STATE_ERROR, "Failed to persist campaign evaluation state"));
+  }
+
+  await safeAppendCampaignLog({
     executionId: await nextExecutionId(),
     campaignId: campaign.id,
     userId,
-    action: eligible ? CAMPAIGN_EXECUTION_ACTION.SKIPPED : CAMPAIGN_EXECUTION_ACTION.BLOCKED,
-    reason: evaluation.primaryReason || (eligible ? "eligible" : "blocked"),
+    action: evaluation.eligible ? CAMPAIGN_EXECUTION_ACTION.SKIPPED : CAMPAIGN_EXECUTION_ACTION.BLOCKED,
+    reason: evaluation.primaryReason || (evaluation.eligible ? "eligible" : "blocked"),
     details: { reasons: evaluation.reasons },
     evaluatedAt: evaluation.evaluatedAt,
-  });
+  }, { step: "evaluate_campaign_eligibility" });
 
   return evaluation;
 }
 
 export function resolveCampaignConflict(evaluations = []) {
-  const eligible = (Array.isArray(evaluations) ? evaluations : []).filter((item) => item?.eligible);
-  const ordered = eligible.slice().sort((a, b) => campaignSortComparator(a?.campaign, b?.campaign));
-  const winner = ordered[0] || null;
-  const losers = winner
-    ? ordered.slice(1).map((item) => ({
-        campaignId: item.campaignId,
-        userId: item.userId,
-        reason: CAMPAIGN_BLOCK_REASON.CONFLICT_LOST,
-        priority: item.priority,
-      }))
-    : [];
+  try {
+    const eligible = (Array.isArray(evaluations) ? evaluations : []).filter((item) => item?.eligible && item?.campaign);
+    const ordered = eligible.slice().sort((a, b) => campaignSortComparator(a?.campaign, b?.campaign));
+    const winner = ordered[0] || null;
+    const losers = winner
+      ? ordered.slice(1).map((item) => ({
+          campaignId: item.campaignId,
+          userId: item.userId,
+          reason: CAMPAIGN_BLOCK_REASON.CONFLICT_LOST,
+          priority: item.priority,
+        }))
+      : [];
 
-  return { winner, losers };
+    return { winner, losers, ok: true };
+  } catch (error) {
+    emitCampaignOperationalLog({
+      event: "campaign_conflict_resolution_failed",
+      step: "resolve_campaign_conflict",
+      error: createCampaignError(CAMPAIGN_ERROR_CODE.CONFLICT_ERROR, error?.message || error, { operation: "resolveCampaignConflict" }),
+    });
+    return { winner: null, losers: [], ok: false, error: serializeCampaignError(error, CAMPAIGN_ERROR_CODE.CONFLICT_ERROR) };
+  }
 }
 
 export async function logCampaignConflict({ userId, evaluations = [], winner = null } = {}) {
@@ -862,118 +1252,178 @@ export async function logCampaignConflict({ userId, evaluations = [], winner = n
       .map((item) => (winner && item?.campaignId !== winner.campaignId ? safeStr(item?.campaignId) : ""))
       .filter(Boolean),
   };
-  await appendConflictLog(payload);
-  return payload;
+  try {
+    await appendConflictLog(payload);
+    return { ok: true, payload };
+  } catch (error) {
+    const campaignError = createCampaignError(CAMPAIGN_ERROR_CODE.CONFLICT_ERROR, error?.message || error, {
+      operation: "logCampaignConflict",
+      userId: safeStr(userId),
+    });
+    emitCampaignOperationalLog({ event: "campaign_conflict_log_failed", userId, step: "log_campaign_conflict", error: campaignError });
+    return { ok: false, payload, error: serializeCampaignError(campaignError) };
+  }
 }
 
 export async function markCampaignSent(campaignId, userId, { messageId = "", details = null, source = "campaigns" } = {}) {
-  const current = (await getCampaignUserState(campaignId, userId))?.state;
-  const campaign = (await getCampaign(campaignId))?.campaign || {};
-  const now = nowIso();
-  const cooldownUntil = deriveCooldownUntil(Date.now(), campaign);
+  try {
+    const current = (await getCampaignUserState(campaignId, userId))?.state;
+    const campaignResult = await getCampaign(campaignId);
+    const campaign = campaignResult?.campaign || {};
+    const now = nowIso();
+    const cooldownUntil = deriveCooldownUntil(Date.now(), campaign);
 
-  const next = await setCampaignUserState(campaignId, userId, {
-    sendCount: toPositiveInt(current?.sendCount ?? 0, 0) + 1,
-    lastSentAt: now,
-    lastSentSource: safeStr(source) || "campaigns",
-    cooldownUntil,
-    lastMessageId: safeStr(messageId),
-    lastEligibilityResult: "sent",
-    lastBlockReason: "",
-  });
+    const next = await setCampaignUserState(campaignId, userId, {
+      sendCount: toPositiveInt(current?.sendCount ?? 0, 0) + 1,
+      lastSentAt: now,
+      lastSentSource: safeStr(source) || "campaigns",
+      cooldownUntil,
+      lastMessageId: safeStr(messageId),
+      lastEligibilityResult: "sent",
+      lastBlockReason: "",
+    });
 
-  await appendCampaignLog({
-    executionId: await nextExecutionId(),
-    campaignId: safeStr(campaignId),
-    userId: safeStr(userId),
-    action: CAMPAIGN_EXECUTION_ACTION.SENT,
-    reason: "sent",
-    details: details || {},
-    evaluatedAt: now,
-    cooldownUntil,
-  });
+    if (!next?.ok) {
+      return {
+        ok: false,
+        campaignId: safeStr(campaignId),
+        userId: safeStr(userId),
+        error: next?.error || serializeCampaignError(createCampaignError(CAMPAIGN_ERROR_CODE.STATE_ERROR, "Failed to persist campaign sent state")),
+      };
+    }
 
-  await emitCampaignMetricSafe(trackCampaignReceived, buildCampaignTrackingContext({
-    campaign,
-    campaignId,
-    userId,
-    source,
-    step: "campaign_sent",
-  }));
+    const logResult = await safeAppendCampaignLog({
+      executionId: await nextExecutionId(),
+      campaignId: safeStr(campaignId),
+      userId: safeStr(userId),
+      action: CAMPAIGN_EXECUTION_ACTION.SENT,
+      reason: "sent",
+      details: details || {},
+      evaluatedAt: now,
+      cooldownUntil,
+    }, { step: "mark_campaign_sent" });
 
-  return next;
+    await safeEmitCampaignMetric(trackCampaignReceived, buildCampaignTrackingContext({
+      campaign,
+      campaignId,
+      userId,
+      source,
+      step: "campaign_sent",
+    }), { step: "mark_campaign_sent" });
+
+    return { ok: true, state: next?.state || next, logged: !!logResult?.ok, campaign };
+  } catch (error) {
+    const campaignError = createCampaignError(CAMPAIGN_ERROR_CODE.TRACKING_ERROR, error?.message || error, {
+      operation: "markCampaignSent",
+      campaignId: safeStr(campaignId),
+      userId: safeStr(userId),
+    });
+    await reportCampaignFailure({ event: "campaign_mark_sent_failed", campaignId, userId, step: "mark_campaign_sent", error: campaignError });
+    return { ok: false, campaignId: safeStr(campaignId), userId: safeStr(userId), error: serializeCampaignError(campaignError) };
+  }
 }
 
 export async function markCampaignError(campaignId, userId, error) {
-  const message = safeStr(error?.message || error);
-  const payload = {
-    executionId: await nextExecutionId(),
-    campaignId: safeStr(campaignId),
-    userId: safeStr(userId),
-    action: CAMPAIGN_EXECUTION_ACTION.ERROR,
-    reason: "error",
-    details: { message },
-    evaluatedAt: nowIso(),
-  };
-  await appendCampaignLog(payload);
-  return payload;
+  try {
+    const message = safeStr(error?.message || error);
+    const payload = {
+      executionId: await nextExecutionId(),
+      campaignId: safeStr(campaignId),
+      userId: safeStr(userId),
+      action: CAMPAIGN_EXECUTION_ACTION.ERROR,
+      reason: "error",
+      details: { message, errorCode: safeStr(error?.errorCode || error?.code) },
+      evaluatedAt: nowIso(),
+    };
+    const logResult = await safeAppendCampaignLog(payload, { step: "mark_campaign_error" });
+    await emitCampaignErrorMetric({
+      campaignId,
+      userId,
+      source: "campaigns",
+      step: "mark_campaign_error",
+      errorCode: safeStr(error?.errorCode || error?.code || CAMPAIGN_ERROR_CODE.TRACKING_ERROR),
+    }, { message });
+    return { ok: true, payload, logged: !!logResult?.ok };
+  } catch (caught) {
+    const campaignError = createCampaignError(CAMPAIGN_ERROR_CODE.TRACKING_ERROR, caught?.message || caught, {
+      operation: "markCampaignError",
+      campaignId: safeStr(campaignId),
+      userId: safeStr(userId),
+    });
+    await reportCampaignFailure({ event: "campaign_mark_error_failed", campaignId, userId, step: "mark_campaign_error", error: campaignError });
+    return { ok: false, campaignId: safeStr(campaignId), userId: safeStr(userId), error: serializeCampaignError(campaignError) };
+  }
 }
 
 export async function markCampaignClickedIntent(campaignId, userId, { details = null, source = "campaigns", reference = "" } = {}) {
-  const context = await getCampaignAttributionContext(campaignId, userId);
-  const { campaign, current, now, hasSentAt, withinAttributionWindow } = context;
+  try {
+    const context = await getCampaignAttributionContext(campaignId, userId);
+    const { campaign, now, hasSentAt, withinAttributionWindow } = context;
 
-  if (!hasSentAt) {
-    return buildSkipResult("campaign_not_sent_for_user", {
+    if (!hasSentAt) {
+      return buildSkipResult("campaign_not_sent_for_user", {
+        campaignId,
+        userId,
+        campaign,
+      });
+    }
+
+    if (!withinAttributionWindow) {
+      return buildSkipResult("campaign_outside_attribution_window", {
+        campaignId,
+        userId,
+        campaign,
+        extra: { attributionWindowHours: getAttributionWindowHours(campaign) },
+      });
+    }
+
+    const next = await setCampaignUserState(campaignId, userId, {
+      lastClickedIntentAt: now,
+      lastClickedIntentSource: safeStr(source) || "campaigns",
+    });
+
+    if (!next?.ok) {
+      return { ok: false, campaignId: safeStr(campaignId), userId: safeStr(userId), error: next?.error || serializeCampaignError(createCampaignError(CAMPAIGN_ERROR_CODE.ATTRIBUTION_ERROR, "Failed to persist clicked intent state")) };
+    }
+
+    await safeAppendCampaignLog({
+      executionId: await nextExecutionId(),
+      campaignId: safeStr(campaignId),
+      userId: safeStr(userId),
+      action: CAMPAIGN_EXECUTION_ACTION.SKIPPED,
+      reason: "campaign_clicked_intent",
+      details: {
+        reference: safeStr(reference),
+        ...(details && typeof details === "object" ? details : {}),
+      },
+      evaluatedAt: now,
+    }, { step: "mark_campaign_clicked_intent" });
+
+    await safeEmitCampaignMetric(trackCampaignClickedIntent, buildCampaignTrackingContext({
+      campaign,
       campaignId,
       userId,
+      source,
+      step: "clicked_intent_registered",
+      reference,
+    }), { step: "mark_campaign_clicked_intent" });
+
+    return {
+      ok: true,
+      state: next?.state || next,
       campaign,
+      policy: CAMPAIGN_ATTRIBUTION_POLICY.MINIMUM_RELIABLE,
+      attributionWindowHours: getAttributionWindowHours(campaign),
+    };
+  } catch (error) {
+    const campaignError = createCampaignError(CAMPAIGN_ERROR_CODE.ATTRIBUTION_ERROR, error?.message || error, {
+      operation: "markCampaignClickedIntent",
+      campaignId: safeStr(campaignId),
+      userId: safeStr(userId),
     });
+    await reportCampaignFailure({ event: "campaign_clicked_intent_failed", campaignId, userId, step: "mark_campaign_clicked_intent", error: campaignError });
+    return { ok: false, campaignId: safeStr(campaignId), userId: safeStr(userId), error: serializeCampaignError(campaignError) };
   }
-
-  if (!withinAttributionWindow) {
-    return buildSkipResult("campaign_outside_attribution_window", {
-      campaignId,
-      userId,
-      campaign,
-      extra: { attributionWindowHours: getAttributionWindowHours(campaign) },
-    });
-  }
-
-  const next = await setCampaignUserState(campaignId, userId, {
-    lastClickedIntentAt: now,
-    lastClickedIntentSource: safeStr(source) || "campaigns",
-  });
-
-  await appendCampaignLog({
-    executionId: await nextExecutionId(),
-    campaignId: safeStr(campaignId),
-    userId: safeStr(userId),
-    action: CAMPAIGN_EXECUTION_ACTION.SKIPPED,
-    reason: "campaign_clicked_intent",
-    details: {
-      reference: safeStr(reference),
-      ...(details && typeof details === "object" ? details : {}),
-    },
-    evaluatedAt: now,
-  });
-
-  await emitCampaignMetricSafe(trackCampaignClickedIntent, buildCampaignTrackingContext({
-    campaign,
-    campaignId,
-    userId,
-    source,
-    step: "clicked_intent_registered",
-    reference,
-  }));
-
-  return {
-    ok: true,
-    state: next?.state || next,
-    campaign,
-    policy: CAMPAIGN_ATTRIBUTION_POLICY.MINIMUM_RELIABLE,
-    attributionWindowHours: getAttributionWindowHours(campaign),
-  };
 }
 
 export async function attributeCampaignConversion(campaignId, userId, {
@@ -983,74 +1433,88 @@ export async function attributeCampaignConversion(campaignId, userId, {
   eventSource = "",
   reference = "",
 } = {}) {
-  const context = await getCampaignAttributionContext(campaignId, userId);
-  const { campaign, current, now, hasSentAt, withinAttributionWindow } = context;
-  const normalizedConversionType = safeStr(conversionType);
+  try {
+    const context = await getCampaignAttributionContext(campaignId, userId);
+    const { campaign, now, hasSentAt, withinAttributionWindow } = context;
+    const normalizedConversionType = safeStr(conversionType);
 
-  if (!hasSentAt) {
-    return buildSkipResult("campaign_not_sent_for_user", {
+    if (!hasSentAt) {
+      return buildSkipResult("campaign_not_sent_for_user", {
+        campaignId,
+        userId,
+        campaign,
+      });
+    }
+
+    if (!withinAttributionWindow) {
+      return buildSkipResult("campaign_outside_attribution_window", {
+        campaignId,
+        userId,
+        campaign,
+        extra: { attributionWindowHours: getAttributionWindowHours(campaign) },
+      });
+    }
+
+    if (!normalizedConversionType) {
+      return buildSkipResult("conversion_type_required", {
+        campaignId,
+        userId,
+        campaign,
+      });
+    }
+
+    const next = await setCampaignUserState(campaignId, userId, {
+      lastConversionAttributedAt: now,
+      lastAttributedConversionType: normalizedConversionType,
+      lastAttributedEventSource: safeStr(eventSource || source),
+      lastAttributedReference: safeStr(reference),
+    });
+
+    if (!next?.ok) {
+      return { ok: false, campaignId: safeStr(campaignId), userId: safeStr(userId), error: next?.error || serializeCampaignError(createCampaignError(CAMPAIGN_ERROR_CODE.ATTRIBUTION_ERROR, "Failed to persist conversion attribution state")) };
+    }
+
+    await safeAppendCampaignLog({
+      executionId: await nextExecutionId(),
+      campaignId: safeStr(campaignId),
+      userId: safeStr(userId),
+      action: CAMPAIGN_EXECUTION_ACTION.SKIPPED,
+      reason: "campaign_conversion_attributed",
+      details: {
+        conversionType: normalizedConversionType,
+        eventSource: safeStr(eventSource || source),
+        reference: safeStr(reference),
+        ...(details && typeof details === "object" ? details : {}),
+      },
+      evaluatedAt: now,
+    }, { step: "attribute_campaign_conversion" });
+
+    await safeEmitCampaignMetric(trackCampaignConversionAttributed, buildCampaignTrackingContext({
+      campaign,
       campaignId,
       userId,
-      campaign,
-    });
-  }
-
-  if (!withinAttributionWindow) {
-    return buildSkipResult("campaign_outside_attribution_window", {
-      campaignId,
-      userId,
-      campaign,
-      extra: { attributionWindowHours: getAttributionWindowHours(campaign) },
-    });
-  }
-
-  if (!normalizedConversionType) {
-    return buildSkipResult("conversion_type_required", {
-      campaignId,
-      userId,
-      campaign,
-    });
-  }
-
-  const next = await setCampaignUserState(campaignId, userId, {
-    lastConversionAttributedAt: now,
-    lastAttributedConversionType: normalizedConversionType,
-    lastAttributedEventSource: safeStr(eventSource || source),
-    lastAttributedReference: safeStr(reference),
-  });
-
-  await appendCampaignLog({
-    executionId: await nextExecutionId(),
-    campaignId: safeStr(campaignId),
-    userId: safeStr(userId),
-    action: CAMPAIGN_EXECUTION_ACTION.SKIPPED,
-    reason: "campaign_conversion_attributed",
-    details: {
+      source,
+      step: "conversion_attributed",
       conversionType: normalizedConversionType,
-      eventSource: safeStr(eventSource || source),
-      reference: safeStr(reference),
-      ...(details && typeof details === "object" ? details : {}),
-    },
-    evaluatedAt: now,
-  });
+      reference: safeStr(reference) || safeStr(eventSource || source),
+    }), { step: "attribute_campaign_conversion" });
 
-  await emitCampaignMetricSafe(trackCampaignConversionAttributed, buildCampaignTrackingContext({
-    campaign,
-    campaignId,
-    userId,
-    source,
-    step: "conversion_attributed",
-    conversionType: normalizedConversionType,
-    reference: safeStr(reference) || safeStr(eventSource || source),
-  }));
-
-  return {
-    ok: true,
-    state: next?.state || next,
-    campaign,
-    policy: CAMPAIGN_ATTRIBUTION_POLICY.MINIMUM_RELIABLE,
-    attributionWindowHours: getAttributionWindowHours(campaign),
-  };
+    return {
+      ok: true,
+      state: next?.state || next,
+      campaign,
+      policy: CAMPAIGN_ATTRIBUTION_POLICY.MINIMUM_RELIABLE,
+      attributionWindowHours: getAttributionWindowHours(campaign),
+    };
+  } catch (error) {
+    const campaignError = createCampaignError(CAMPAIGN_ERROR_CODE.ATTRIBUTION_ERROR, error?.message || error, {
+      operation: "attributeCampaignConversion",
+      campaignId: safeStr(campaignId),
+      userId: safeStr(userId),
+    });
+    await reportCampaignFailure({ event: "campaign_conversion_attribution_failed", campaignId, userId, step: "attribute_campaign_conversion", error: campaignError });
+    return { ok: false, campaignId: safeStr(campaignId), userId: safeStr(userId), error: serializeCampaignError(campaignError) };
+  }
 }
 
 export async function listCampaignLogs({ campaignId = "", userId = "", limit = 100 } = {}) {
