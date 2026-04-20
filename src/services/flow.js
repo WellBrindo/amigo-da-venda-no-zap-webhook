@@ -39,8 +39,12 @@ import {
   trackCheckoutStarted,
   trackCheckoutConfirmed,
   trackPaymentAbandoned,
+  trackFlowError,
+  trackPaymentError,
+  trackCampaignError,
 } from "./metrics.js";
 import { getCopyText } from "./copy.js";
+import * as audit from "./audit.js";
 import { redisGet } from "./redis.js";
 
 import {
@@ -485,11 +489,128 @@ function buildFlowTrackingContext(waId, extra = {}) {
   return context;
 }
 
+const FLOW_ERROR_KIND = Object.freeze({
+  OPENAI_ERROR: "OPENAI_ERROR",
+  PRICING_ERROR: "PRICING_ERROR",
+  COUPON_ERROR: "COUPON_ERROR",
+  CHECKOUT_ERROR: "CHECKOUT_ERROR",
+  ASAAS_CLIENT_ERROR: "ASAAS_CLIENT_ERROR",
+  STATE_ERROR: "STATE_ERROR",
+  WHATSAPP_SEND_ERROR: "WHATSAPP_SEND_ERROR",
+  FLOW_STATE_ERROR: "FLOW_STATE_ERROR",
+  CAMPAIGN_ATTRIBUTION_ERROR: "CAMPAIGN_ATTRIBUTION_ERROR",
+  UNKNOWN_FLOW_ERROR: "UNKNOWN_FLOW_ERROR",
+});
+
+function resolveFlowErrorCode(err, fallback = "FLOW_RUNTIME_ERROR") {
+  const explicit = cleanText(err?.errorCode || err?.code || err?.name);
+  if (explicit) return explicit;
+  const msg = cleanText(err?.message).toUpperCase();
+  if (!msg) return fallback;
+  if (msg.includes("ASAAS")) return "ASAAS_CLIENT_ERROR";
+  if (msg.includes("COUPON")) return "COUPON_ERROR";
+  if (msg.includes("PRICING") || msg.includes("QUOTE")) return "PRICING_ERROR";
+  if (msg.includes("REDIS") || msg.includes("STATE")) return "STATE_ERROR";
+  if (msg.includes("OPENAI")) return "OPENAI_ERROR";
+  return fallback;
+}
+
+function serializeFlowError(err) {
+  if (!err) return {};
+  return {
+    name: cleanText(err?.name),
+    message: cleanText(err?.message || err),
+    code: cleanText(err?.code || err?.errorCode),
+    status: Number.isFinite(Number(err?.status)) ? Number(err.status) : undefined,
+    retryable: typeof err?.retryable === "boolean" ? err.retryable : undefined,
+  };
+}
+
+function createFlowRuntimeContext(waId, extra = {}) {
+  return buildFlowTrackingContext(waId, extra);
+}
+
+async function flowRuntimeLog(level, event, payload = {}) {
+  const entry = {
+    ts: nowIso(),
+    module: "flow",
+    level: cleanText(level || "error").toLowerCase(),
+    source: "flow",
+    event: cleanText(event || "runtime"),
+    ...payload,
+  };
+
+  try {
+    if (typeof audit?.logOperationalEvent === "function") {
+      await audit.logOperationalEvent(entry);
+      return;
+    }
+    if (typeof audit?.logRuntimeError === "function") {
+      await audit.logRuntimeError(entry);
+      return;
+    }
+  } catch (_) {
+    // fallback abaixo
+  }
+
+  const writer = entry.level === "warn" ? console.warn : console.error;
+  writer(JSON.stringify(entry));
+}
+
+async function emitFlowFailureMetric(kind, waId, extra = {}) {
+  const payload = createFlowRuntimeContext(waId, extra);
+  try {
+    if (kind === FLOW_ERROR_KIND.CAMPAIGN_ATTRIBUTION_ERROR) {
+      return await trackCampaignError(payload);
+    }
+    if ([FLOW_ERROR_KIND.PRICING_ERROR, FLOW_ERROR_KIND.COUPON_ERROR, FLOW_ERROR_KIND.CHECKOUT_ERROR, FLOW_ERROR_KIND.ASAAS_CLIENT_ERROR].includes(kind)) {
+      return await trackPaymentError(payload);
+    }
+    return await trackFlowError(payload);
+  } catch (metricErr) {
+    await flowRuntimeLog("warn", "flow_metric_emit_failed", {
+      userId: cleanText(waId),
+      step: cleanText(extra?.step),
+      kind: cleanText(kind),
+      metricError: serializeFlowError(metricErr),
+    });
+    return null;
+  }
+}
+
+async function reportFlowRuntimeError(kind, waId, err, extra = {}) {
+  const errorCode = resolveFlowErrorCode(err, cleanText(kind) || "FLOW_RUNTIME_ERROR");
+  const step = cleanText(extra?.step);
+  const payload = {
+    ...extra,
+    step,
+    errorCode,
+    kind: cleanText(kind),
+  };
+  await flowRuntimeLog(extra?.level || "error", extra?.event || "flow_runtime_error", {
+    userId: cleanText(waId),
+    waId: cleanText(waId),
+    step,
+    errorCode,
+    kind: cleanText(kind),
+    meta: extra?.meta && typeof extra.meta === "object" ? extra.meta : undefined,
+    error: serializeFlowError(err),
+  });
+  await emitFlowFailureMetric(kind, waId, payload);
+  return { errorCode, message: cleanText(err?.message || err) };
+}
+
 async function trackFlowMetricSafe(tracker, waId, extra = {}) {
   if (typeof tracker !== "function") return null;
   try {
     return await tracker(buildFlowTrackingContext(waId, extra));
-  } catch (_) {
+  } catch (err) {
+    await flowRuntimeLog("warn", "flow_tracking_non_fatal_error", {
+      userId: cleanText(waId),
+      tracker: cleanText(tracker?.name),
+      step: cleanText(extra?.step),
+      error: serializeFlowError(err),
+    });
     return null;
   }
 }
@@ -538,7 +659,13 @@ async function resolveFlowCampaignAttributionContext(waId, { purpose = "click" }
     });
 
     return eligible[0];
-  } catch (_) {
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.CAMPAIGN_ATTRIBUTION_ERROR, waId, err, {
+      event: "flow_campaign_attribution_context_failed",
+      level: "warn",
+      step: purpose === "conversion" ? "campaign_conversion_context" : "campaign_click_context",
+      meta: { purpose },
+    });
     return null;
   }
 }
@@ -555,7 +682,13 @@ async function resolveAndTrackCampaignClick(waId) {
         step: "handleInboundText",
       },
     });
-  } catch (_) {
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.CAMPAIGN_ATTRIBUTION_ERROR, waId, err, {
+      event: "flow_campaign_click_tracking_failed",
+      level: "warn",
+      step: "handleInboundText",
+      meta: { reference: "inbound_message" },
+    });
     return null;
   }
 }
@@ -575,7 +708,13 @@ async function resolveAndTrackCampaignConversion(waId, conversionType, reference
         ...extraDetails,
       },
     });
-  } catch (_) {
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.CAMPAIGN_ATTRIBUTION_ERROR, waId, err, {
+      event: "flow_campaign_conversion_tracking_failed",
+      level: "warn",
+      step: cleanText(extraDetails?.step || "createCurrentPlanPayment"),
+      meta: { conversionType: cleanText(conversionType), reference: cleanText(reference) },
+    });
     return null;
   }
 }
@@ -2451,17 +2590,33 @@ async function clearCheckoutQuoteState(waId, { releaseReservation = false, reaso
         reason: reason || "checkout_selection_changed",
         meta: { ...meta, source: "flow" },
       });
-    } catch {}
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.COUPON_ERROR, waId, err, {
+        event: "flow_checkout_quote_release_failed",
+        level: "warn",
+        step: "clearCheckoutQuoteState",
+        meta: { reservationId: cleanText(reservationId), reason: cleanText(reason) || "checkout_selection_changed" },
+      });
+    }
   }
 
-  await Promise.all([
-    clearCheckoutDraft(waId),
-    clearSelectedCouponCode(waId),
-    clearPricingQuote(waId),
-    clearCouponReservationId(waId),
-    clearCouponReservationCreatedAt(waId),
-    clearCheckoutCouponStatus(waId),
-  ]);
+  try {
+    await Promise.all([
+      clearCheckoutDraft(waId),
+      clearSelectedCouponCode(waId),
+      clearPricingQuote(waId),
+      clearCouponReservationId(waId),
+      clearCouponReservationCreatedAt(waId),
+      clearCheckoutCouponStatus(waId),
+    ]);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_checkout_quote_state_clear_failed",
+      step: "clearCheckoutQuoteState",
+      meta: { releaseReservation: !!releaseReservation },
+    });
+    throw err;
+  }
 }
 
 async function getSelectedCheckoutPlan(waId) {
@@ -2508,54 +2663,82 @@ async function persistCheckoutQuoteState(waId, { planCode = "", billingCycle = "
   const checkoutCouponStatus = normalizedCouponCode ? (reservationId ? "RESERVED" : "VALIDATED") : "NONE";
   const summary = summarizePricingQuote(quote || {});
 
-  await setSelectedPlanCode(waId, normalizedPlanCode);
-  await setSelectedBillingCycle(waId, normalizedBillingCycle);
-  if (normalizedCouponCode) await setSelectedCouponCode(waId, normalizedCouponCode);
-  else await clearSelectedCouponCode(waId);
+  try {
+    await setSelectedPlanCode(waId, normalizedPlanCode);
+    await setSelectedBillingCycle(waId, normalizedBillingCycle);
+    if (normalizedCouponCode) await setSelectedCouponCode(waId, normalizedCouponCode);
+    else await clearSelectedCouponCode(waId);
 
-  await setPricingQuote(waId, {
-    ...(quote || {}),
-    couponReservationId: reservationId,
-    couponReservationCreatedAt: reservationId ? reservationCreatedAt : "",
-    checkoutCouponStatus,
-  });
+    await setPricingQuote(waId, {
+      ...(quote || {}),
+      couponReservationId: reservationId,
+      couponReservationCreatedAt: reservationId ? reservationCreatedAt : "",
+      checkoutCouponStatus,
+    });
 
-  if (reservationId) {
-    await setCouponReservationId(waId, reservationId);
-    await setCouponReservationCreatedAt(waId, reservationCreatedAt);
-  } else {
-    await clearCouponReservationId(waId);
-    await clearCouponReservationCreatedAt(waId);
+    if (reservationId) {
+      await setCouponReservationId(waId, reservationId);
+      await setCouponReservationCreatedAt(waId, reservationCreatedAt);
+    } else {
+      await clearCouponReservationId(waId);
+      await clearCouponReservationCreatedAt(waId);
+    }
+
+    await setCheckoutCouponStatus(waId, checkoutCouponStatus);
+    await setCheckoutDraft(waId, {
+      planCode: normalizedPlanCode,
+      billingCycle: normalizedBillingCycle,
+      couponCode: normalizedCouponCode,
+      couponReservationId: reservationId,
+      couponReservationCreatedAt: reservationId ? reservationCreatedAt : "",
+      checkoutCouponStatus,
+      calculation: quote?.calculation || null,
+      chargeMode: quote?.chargeMode || "",
+      summary: summary?.summary || "",
+      planName: quote?.plan?.name || quote?.explanation?.planName || "",
+    });
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_checkout_quote_persist_failed",
+      step: "persistCheckoutQuoteState",
+      meta: { planCode: normalizedPlanCode, billingCycle: normalizedBillingCycle, couponCode: normalizedCouponCode, reservationId: cleanText(reservationId) },
+    });
+    throw err;
   }
-
-  await setCheckoutCouponStatus(waId, checkoutCouponStatus);
-  await setCheckoutDraft(waId, {
-    planCode: normalizedPlanCode,
-    billingCycle: normalizedBillingCycle,
-    couponCode: normalizedCouponCode,
-    couponReservationId: reservationId,
-    couponReservationCreatedAt: reservationId ? reservationCreatedAt : "",
-    checkoutCouponStatus,
-    calculation: quote?.calculation || null,
-    chargeMode: quote?.chargeMode || "",
-    summary: summary?.summary || "",
-    planName: quote?.plan?.name || quote?.explanation?.planName || "",
-  });
 }
 
 async function prepareCheckoutQuote(waId, { planCode = "", billingCycle = "monthly", couponCode = "" } = {}) {
-  await clearCheckoutQuoteState(waId, {
-    releaseReservation: true,
-    reason: couponCode ? "checkout_coupon_replaced" : "checkout_quote_rebuilt",
-    meta: { planCode, billingCycle, couponCode },
-  });
+  try {
+    await clearCheckoutQuoteState(waId, {
+      releaseReservation: true,
+      reason: couponCode ? "checkout_coupon_replaced" : "checkout_quote_rebuilt",
+      meta: { planCode, billingCycle, couponCode },
+    });
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_checkout_quote_clear_failed",
+      step: "prepareCheckoutQuote",
+      meta: { planCode, billingCycle, couponCode },
+    });
+    return { ok: false, code: "checkout_quote_clear_failed", reason: "Não foi possível preparar sua contratação agora." };
+  }
 
-  const quote = await buildPricingQuote({
-    internalUserId: waId,
-    planCode,
-    billingCycle,
-    couponCode,
-  });
+  let quote;
+  try {
+    quote = await buildPricingQuote({
+      internalUserId: waId,
+      planCode,
+      billingCycle,
+      couponCode,
+    });
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.PRICING_ERROR, waId, err, {
+      event: "flow_pricing_quote_build_failed",
+      step: "prepareCheckoutQuote",
+      meta: { planCode, billingCycle, couponCode },
+    });
+    return { ok: false, code: "pricing_runtime_error", reason: "Não foi possível calcular a contratação agora." };
+  }
 
   if (!quote?.ok || !quote?.valid) {
     return { ok: false, quote };
@@ -2563,21 +2746,43 @@ async function prepareCheckoutQuote(waId, { planCode = "", billingCycle = "month
 
   let reservation = null;
   if (couponCode) {
-    const reservationResult = await createCouponReservation({
-      internalUserId: waId,
-      couponCode,
-      planCode,
-      billingCycle,
-      basePriceCents: Number(quote?.calculation?.basePriceCents || 0),
-      selectionSnapshot: {
+    let quoteSummary = "";
+    try {
+      quoteSummary = summarizePricingQuote(quote).summary;
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.PRICING_ERROR, waId, err, {
+        event: "flow_pricing_quote_summary_failed",
+        step: "prepareCheckoutQuote",
+        meta: { planCode, billingCycle, couponCode },
+      });
+      return { ok: false, code: "pricing_summary_error", reason: "Não foi possível preparar o resumo da contratação." };
+    }
+
+    let reservationResult;
+    try {
+      reservationResult = await createCouponReservation({
+        internalUserId: waId,
+        couponCode,
         planCode,
         billingCycle,
-        couponCode,
-        quoteSummary: summarizePricingQuote(quote).summary,
-        chargeMode: quote?.chargeMode || "",
-      },
-      meta: { source: "flow" },
-    });
+        basePriceCents: Number(quote?.calculation?.basePriceCents || 0),
+        selectionSnapshot: {
+          planCode,
+          billingCycle,
+          couponCode,
+          quoteSummary,
+          chargeMode: quote?.chargeMode || "",
+        },
+        meta: { source: "flow" },
+      });
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.COUPON_ERROR, waId, err, {
+        event: "flow_coupon_reservation_create_failed",
+        step: "prepareCheckoutQuote",
+        meta: { planCode, billingCycle, couponCode },
+      });
+      return { ok: false, code: "coupon_reservation_runtime_error", reason: "Não foi possível reservar o cupom agora." };
+    }
 
     if (!reservationResult?.ok || !reservationResult?.reservation) {
       return { ok: false, quote: reservationResult || quote };
@@ -2586,13 +2791,32 @@ async function prepareCheckoutQuote(waId, { planCode = "", billingCycle = "month
     reservation = reservationResult.reservation;
   }
 
-  await persistCheckoutQuoteState(waId, {
-    planCode,
-    billingCycle,
-    couponCode,
-    quote,
-    reservation,
-  });
+  try {
+    await persistCheckoutQuoteState(waId, {
+      planCode,
+      billingCycle,
+      couponCode,
+      quote,
+      reservation,
+    });
+  } catch (err) {
+    if (reservation?.reservationId) {
+      try {
+        await releaseCouponReservation(reservation.reservationId, {
+          reason: "checkout_quote_persist_failed",
+          meta: { source: "flow", planCode, billingCycle, couponCode },
+        });
+      } catch (releaseErr) {
+        await reportFlowRuntimeError(FLOW_ERROR_KIND.COUPON_ERROR, waId, releaseErr, {
+          event: "flow_coupon_reservation_rollback_failed",
+          level: "warn",
+          step: "prepareCheckoutQuote",
+          meta: { reservationId: cleanText(reservation.reservationId), planCode, billingCycle, couponCode },
+        });
+      }
+    }
+    return { ok: false, code: "checkout_quote_state_persist_failed", reason: "Não foi possível salvar a contratação agora." };
+  }
 
   await trackFlowMetricSafe(trackPricingQuoteGenerated, waId, {
     planCode,
@@ -2605,36 +2829,84 @@ async function prepareCheckoutQuote(waId, { planCode = "", billingCycle = "month
 }
 
 async function ensureCheckoutQuoteForPayment(waId) {
-  const selection = await getCurrentCheckoutSelection(waId);
+  let selection;
+  try {
+    selection = await getCurrentCheckoutSelection(waId);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_checkout_selection_read_failed",
+      step: "ensureCheckoutQuoteForPayment",
+    });
+    return { ok: false, code: "checkout_selection_read_failed" };
+  }
+
   if (!selection.planCode) {
     return { ok: false, code: "plan_missing" };
   }
 
-  const storedQuote = await getStoredPricingQuote(waId);
+  let storedQuote = null;
+  try {
+    storedQuote = await getStoredPricingQuote(waId);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_stored_quote_read_failed",
+      step: "ensureCheckoutQuoteForPayment",
+      meta: { planCode: selection.planCode, billingCycle: selection.billingCycle, couponCode: selection.couponCode },
+    });
+  }
+
   if (storedQuote?.planCode === String(selection.planCode || "").toUpperCase()
       && storedQuote?.billingCycle === String(selection.billingCycle || "monthly").toLowerCase()
       && String(storedQuote?.couponCode || "").toUpperCase() === String(selection.couponCode || "").toUpperCase()) {
     return { ok: true, quote: storedQuote, plan: selection.plan };
   }
 
-  const quote = await buildPricingQuote({
-    internalUserId: waId,
-    planCode: selection.planCode,
-    billingCycle: selection.billingCycle,
-    couponCode: selection.couponCode,
-  });
+  let quote;
+  try {
+    quote = await buildPricingQuote({
+      internalUserId: waId,
+      planCode: selection.planCode,
+      billingCycle: selection.billingCycle,
+      couponCode: selection.couponCode,
+    });
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.PRICING_ERROR, waId, err, {
+      event: "flow_checkout_quote_rebuild_failed",
+      step: "ensureCheckoutQuoteForPayment",
+      meta: { planCode: selection.planCode, billingCycle: selection.billingCycle, couponCode: selection.couponCode },
+    });
+    return { ok: false, code: "pricing_runtime_error", plan: selection.plan };
+  }
 
   if (!quote?.ok || !quote?.valid) {
     return { ok: false, quote, plan: selection.plan };
   }
 
-  await persistCheckoutQuoteState(waId, {
-    planCode: selection.planCode,
-    billingCycle: selection.billingCycle,
-    couponCode: selection.couponCode,
-    quote,
-    reservation: selection.couponCode ? { reservationId: await getCouponReservationId(waId), reservedAt: new Date().toISOString() } : null,
-  });
+  let reservationId = "";
+  if (selection.couponCode) {
+    try {
+      reservationId = await getCouponReservationId(waId);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_coupon_reservation_read_failed",
+        step: "ensureCheckoutQuoteForPayment",
+        meta: { planCode: selection.planCode, billingCycle: selection.billingCycle, couponCode: selection.couponCode },
+      });
+      return { ok: false, code: "coupon_reservation_state_error", plan: selection.plan };
+    }
+  }
+
+  try {
+    await persistCheckoutQuoteState(waId, {
+      planCode: selection.planCode,
+      billingCycle: selection.billingCycle,
+      couponCode: selection.couponCode,
+      quote,
+      reservation: selection.couponCode ? { reservationId, reservedAt: new Date().toISOString() } : null,
+    });
+  } catch (err) {
+    return { ok: false, code: "checkout_quote_state_persist_failed", plan: selection.plan };
+  }
 
   return { ok: true, quote, plan: selection.plan };
 }
@@ -3310,41 +3582,146 @@ async function msgMenuMySubscription(waId) {
   return await msgMenuSubscription(waId);
 }
 async function createCurrentPlanPayment(waId) {
-  const selection = await getCurrentCheckoutSelection(waId);
-  const planCode = selection.planCode || await getUserPlan(waId);
-  const plan = selection.plan || (planCode ? await getPlan(planCode) : null);
+  let selection;
+  try {
+    selection = await getCurrentCheckoutSelection(waId);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_checkout_selection_failed",
+      step: "createCurrentPlanPayment",
+    });
+    return "Não consegui preparar sua contratação agora. Tente novamente em instantes.";
+  }
+
+  let planCode = selection.planCode;
+  if (!planCode) {
+    try {
+      planCode = await getUserPlan(waId);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_user_plan_read_failed",
+        step: "createCurrentPlanPayment",
+      });
+      return "Não consegui recuperar seu plano agora. Tente novamente em instantes.";
+    }
+  }
+
+  let plan = selection.plan || null;
+  if (!plan && planCode) {
+    try {
+      plan = await getPlan(planCode);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_plan_lookup_failed",
+        step: "createCurrentPlanPayment",
+        meta: { planCode },
+      });
+      return "Não consegui validar seu plano agora. Tente novamente em instantes.";
+    }
+  }
+
   if (!plan) {
-    await setUserStatus(waId, ST.WAIT_PLAN);
+    try {
+      await setUserStatus(waId, ST.WAIT_PLAN);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_status_reset_to_plan_failed",
+        step: "createCurrentPlanPayment",
+      });
+    }
     return await msgPlansOnly(waId);
   }
 
-  const pm = await getPaymentMethod(waId);
+  let pm = "";
+  try {
+    pm = await getPaymentMethod(waId);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_payment_method_read_failed",
+      step: "createCurrentPlanPayment",
+      meta: { planCode: plan.code },
+    });
+    return "Não consegui recuperar a forma de pagamento agora. Tente novamente em instantes.";
+  }
+
   if (!pm) {
-    await setUserStatus(waId, ST.WAIT_PAYMENT_METHOD);
+    try {
+      await setUserStatus(waId, ST.WAIT_PAYMENT_METHOD);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_status_wait_payment_method_failed",
+        step: "createCurrentPlanPayment",
+      });
+      return "Não consegui preparar o pagamento agora. Tente novamente em instantes.";
+    }
     return await msgAskPaymentMethod(waId, plan);
   }
 
-  const customerId = await getAsaasCustomerId(waId);
+  let customerId = "";
+  try {
+    customerId = await getAsaasCustomerId(waId);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_asaas_customer_read_failed",
+      step: "createCurrentPlanPayment",
+      meta: { planCode: plan.code },
+    });
+    return "Não consegui validar seu cadastro agora. Tente novamente em instantes.";
+  }
+
   if (!customerId) {
-    await setUserStatus(waId, ST.WAIT_DOC);
+    try {
+      await setUserStatus(waId, ST.WAIT_DOC);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_status_wait_doc_failed",
+        step: "createCurrentPlanPayment",
+      });
+      return "Não consegui preparar o pagamento agora. Tente novamente em instantes.";
+    }
     return await msgAskDoc(waId);
   }
 
   const quoteResult = await ensureCheckoutQuoteForPayment(waId);
   if (!quoteResult?.ok || !quoteResult?.quote) {
-    const pricingFailure = quoteResult?.quote || {};
-    const couponCode = await getSelectedCouponCode(waId);
+    const pricingFailure = quoteResult?.quote || quoteResult || {};
+    let couponCode = "";
+    try {
+      couponCode = await getSelectedCouponCode(waId);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_selected_coupon_read_failed",
+        step: "createCurrentPlanPayment",
+      });
+    }
+
     if (couponCode) {
-      await setUserStatus(waId, ST.WAIT_COUPON_CODE);
+      try {
+        await setUserStatus(waId, ST.WAIT_COUPON_CODE);
+      } catch (err) {
+        await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+          event: "flow_status_wait_coupon_failed",
+          step: "createCurrentPlanPayment",
+        });
+        return "Não consegui validar seu cupom agora. Tente novamente em instantes.";
+      }
       return await msgCouponInvalid(waId, pricingFailure);
     }
-    await setUserStatus(waId, ST.WAIT_PLAN);
+
+    try {
+      await setUserStatus(waId, ST.WAIT_PLAN);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_status_wait_plan_failed_after_quote_error",
+        step: "createCurrentPlanPayment",
+      });
+      return "Não consegui preparar sua contratação agora. Tente novamente em instantes.";
+    }
     return await msgPlansOnly(waId);
   }
 
   const quote = quoteResult.quote;
   const billingCycle = quote?.billingCycle || selection.billingCycle || "monthly";
-  const finalValue = (Number(quote?.calculation?.finalPriceCents || 0) / 100) || (Number(plan.priceCents) || 0) / 100;
   const planCodeLabel = quote?.planCode || plan.code;
   const billingLabel = billingCycleHumanLabel(billingCycle);
   const quoteSummary = quote?.explanation?.description ? `Resumo: ${quote.explanation.description}.` : "";
@@ -3352,23 +3729,43 @@ async function createCurrentPlanPayment(waId) {
   const dueDate = todayISO();
 
   if (pm === "PIX") {
-    const pay = await createAsaasCheckoutFromQuote({
-      customerId,
-      quote,
-      paymentMethod: "pix",
-      externalReference,
-      dueDate,
-      description: `Amigo das Vendas - Plano ${planCodeLabel} (${billingLabel} via PIX)`,
-      name: `Plano ${plan.name} (${billingLabel})`,
-    });
+    let pay;
+    try {
+      pay = await createAsaasCheckoutFromQuote({
+        customerId,
+        quote,
+        paymentMethod: "pix",
+        externalReference,
+        dueDate,
+        description: `Amigo das Vendas - Plano ${planCodeLabel} (${billingLabel} via PIX)`,
+        name: `Plano ${plan.name} (${billingLabel})`,
+      });
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.ASAAS_CLIENT_ERROR, waId, err, {
+        event: "flow_pix_checkout_create_failed",
+        step: "createCurrentPlanPayment",
+        meta: { paymentMethod: "PIX", planCode: planCodeLabel, billingCycle },
+      });
+      return "Não consegui gerar sua cobrança PIX agora. Tente novamente em instantes.";
+    }
 
     await resolveAndTrackCampaignConversion(waId, "checkout_completed", "checkout_flow_pix", {
       paymentMethod: "PIX",
       planCode: planCodeLabel,
       billingCycle,
     });
-    await markCheckoutInteraction(waId);
-    await setUserStatus(waId, ST.PAYMENT_PENDING);
+
+    try {
+      await markCheckoutInteraction(waId);
+      await setUserStatus(waId, ST.PAYMENT_PENDING);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_pix_checkout_state_update_failed",
+        step: "createCurrentPlanPayment",
+        meta: { paymentMethod: "PIX", planCode: planCodeLabel, billingCycle, paymentId: cleanText(pay?.id) },
+      });
+      return "Gerei sua cobrança, mas não consegui finalizar o estado da contratação agora. Tente novamente em instantes.";
+    }
 
     const url = pay?.invoiceUrl || pay?.bankSlipUrl || pay?.paymentLink || "";
     const lines = [
@@ -3400,8 +3797,18 @@ async function createCurrentPlanPayment(waId) {
       planCode: planCodeLabel,
       billingCycle,
     });
-    await markCheckoutInteraction(waId);
-    await setUserStatus(waId, ST.PAYMENT_PENDING);
+
+    try {
+      await markCheckoutInteraction(waId);
+      await setUserStatus(waId, ST.PAYMENT_PENDING);
+    } catch (stateErr) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, stateErr, {
+        event: "flow_card_checkout_state_update_failed",
+        step: "createCurrentPlanPayment",
+        meta: { paymentMethod: "CREDIT_CARD", planCode: planCodeLabel, billingCycle, paymentId: cleanText(link?.id) },
+      });
+      return "Gerei seu link de pagamento, mas não consegui finalizar o estado da contratação agora. Tente novamente em instantes.";
+    }
 
     const url = link?.url || link?.paymentLink || link?.link || "";
     const lines = [
@@ -3419,7 +3826,15 @@ async function createCurrentPlanPayment(waId) {
     return lines.join("\n");
   } catch (err) {
     if (err?.code === "recurring_first_charge_discount_not_supported") {
-      await setUserStatus(waId, ST.WAIT_PAYMENT_METHOD);
+      try {
+        await setUserStatus(waId, ST.WAIT_PAYMENT_METHOD);
+      } catch (stateErr) {
+        await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, stateErr, {
+          event: "flow_status_wait_payment_method_after_card_coupon_restriction_failed",
+          step: "createCurrentPlanPayment",
+        });
+        return "Esse desconto não pode ser finalizado no cartão recorrente agora. Tente novamente em instantes.";
+      }
       const lines = [
         "⚠️ Esse cupom gera um desconto válido apenas para a primeira cobrança.",
         "No fluxo atual, esse tipo de desconto não pode ser finalizado no *Cartão* recorrente.",
@@ -3430,7 +3845,12 @@ async function createCurrentPlanPayment(waId) {
       return lines.join("\n");
     }
 
-    throw err;
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.ASAAS_CLIENT_ERROR, waId, err, {
+      event: "flow_card_checkout_create_failed",
+      step: "createCurrentPlanPayment",
+      meta: { paymentMethod: "CREDIT_CARD", planCode: planCodeLabel, billingCycle },
+    });
+    return "Não consegui gerar seu link de pagamento agora. Tente novamente em instantes.";
   }
 }
 
@@ -4626,7 +5046,12 @@ async function handleFirstResultFlowChoice({ waId, choice }) {
       sourceText,
       targetMode: "FREE",
     });
-  } catch {
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.OPENAI_ERROR, id, err, {
+      event: "flow_template_preview_generation_failed",
+      step: "handleFirstResultFlowChoice",
+      meta: { targetMode: "FREE" },
+    });
     return reply(await getCopyText("FLOW_OPENAI_ERROR", { waId: id }));
   }
 
@@ -4799,21 +5224,41 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
 
     const r = await generateAdText({ userText: promptToSend, mode, systemKey });
     ad = r.text;
-  } catch {
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.OPENAI_ERROR, id, err, {
+      event: "flow_ad_generation_failed",
+      step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+      meta: { isTrial: !!isTrial, isRefinement: !!isRefinement, mode: cleanText(mode) },
+    });
     return reply(await getCopyText("FLOW_OPENAI_ERROR", { waId: id }));
   }
 
-  // salva prompt (último texto do usuário)
-  await setLastPrompt(id, userText);
-
-  // salva o último anúncio para refinamentos
-  await setLastAd(id, ad);
+  try {
+    await setLastPrompt(id, userText);
+    await setLastAd(id, ad);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, id, err, {
+      event: "flow_generated_ad_state_persist_failed",
+      step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+      meta: { isTrial: !!isTrial, isRefinement: !!isRefinement },
+    });
+    return reply("Consegui gerar seu anúncio, mas não consegui salvar essa etapa agora. Tente novamente em instantes.");
+  }
 
   // controla contagem de refinamentos e consumo de créditos
-  if (isRefinement) {
-    await setRefineCount(id, nextRefines);
-  } else {
-    await clearRefineCount(id);
+  try {
+    if (isRefinement) {
+      await setRefineCount(id, nextRefines);
+    } else {
+      await clearRefineCount(id);
+    }
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, id, err, {
+      event: "flow_refine_state_update_failed",
+      step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+      meta: { isTrial: !!isTrial, isRefinement: !!isRefinement, nextRefines },
+    });
+    return reply("Consegui gerar seu anúncio, mas não consegui concluir a atualização agora. Tente novamente em instantes.");
   }
 
   // conta uso apenas quando há consumo de crédito
@@ -4825,20 +5270,26 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
     try {
       await incDescriptionMetrics(id, creditsNeeded);
     } catch (err) {
-      console.warn(
-        JSON.stringify({
-          level: "warn",
-          tag: "metrics_inc_failed",
-          waId: id,
-          isTrial: !!isTrial,
-          error: String(err?.message || err),
-        })
-      );
+      flowRuntimeLog("warn", "flow_description_metrics_increment_failed", {
+        userId: cleanText(id),
+        step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+        meta: { isTrial: !!isTrial, creditsNeeded },
+        error: serializeFlowError(err),
+      });
     }
   }
 
-  await markUserAdCreated(id);
-  await setLastCampaignInteractionAt(id, nowIso());
+  try {
+    await markUserAdCreated(id);
+    await setLastCampaignInteractionAt(id, nowIso());
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, id, err, {
+      event: "flow_post_generation_state_mark_failed",
+      step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+      meta: { isTrial: !!isTrial, isRefinement: !!isRefinement },
+    });
+    return reply("Consegui gerar seu anúncio, mas não consegui concluir a etapa agora. Tente novamente em instantes.");
+  }
 
   if (isFirstPaidGenerationAttempt) {
     await trackFlowMetricSafe(trackFirstAdGenerated, id, {
@@ -4866,41 +5317,110 @@ async function handleGenerateAdInTrialOrActive({ waId, inboundText, isTrial, cur
   const alreadyPrompted = await getTemplatePrompted(id);
 
   if (!alreadyPrompted) {
-    await setLastCampaignInteractionAt(id, nowIso());
-    await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
-    await setUserStatus(id, ST.WAIT_FIRST_RESULT_PROMPT);
+    try {
+      await setLastCampaignInteractionAt(id, nowIso());
+      await setPrevStatus(id, currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE));
+      await setUserStatus(id, ST.WAIT_FIRST_RESULT_PROMPT);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, id, err, {
+        event: "flow_first_result_state_transition_failed",
+        step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+        meta: { isTrial: !!isTrial },
+      });
+      return reply("Consegui gerar seu anúncio, mas não consegui avançar para a próxima etapa agora. Tente novamente em instantes.");
+    }
     return replyMulti([formattedAd, await msgFirstResultPrompt(id)]);
   }
 
-  // Mantém o status atual e apenas orienta refinamentos
   const refineMsg = await msgRefinementPrompt(id, maxRefinements);
-  await setLastCampaignInteractionAt(id, nowIso());
-  await armPostAdIdleReminder(id, "REFINE_OR_OK");
+  try {
+    await setLastCampaignInteractionAt(id, nowIso());
+    await armPostAdIdleReminder(id, "REFINE_OR_OK");
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, id, err, {
+      event: "flow_refinement_followup_state_failed",
+      step: currentStatus || (isTrial ? ST.TRIAL : ST.ACTIVE),
+      meta: { isTrial: !!isTrial },
+    });
+  }
 
   return replyMulti([formattedAd, refineMsg]);
 }
 
 // -------------------- Asaas helpers --------------------
 async function ensureAsaasCustomer({ waId, fullName, cpfCnpj }) {
-  // 1) se já tem customerId, usa
-  const existing = await getAsaasCustomerId(waId);
+
+// -------------------- Asaas helpers --------------------
+async function ensureAsaasCustomer({ waId, fullName, cpfCnpj }) {
+  let existing = "";
+  try {
+    existing = await getAsaasCustomerId(waId);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_asaas_customer_existing_read_failed",
+      step: "ensureAsaasCustomer",
+    });
+    throw err;
+  }
   if (existing) return existing;
 
-  // 2) tenta achar por externalReference
-  const found = await findCustomerByExternalReference(waId).catch(() => null);
+  let found = null;
+  try {
+    found = await findCustomerByExternalReference(waId);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.ASAAS_CLIENT_ERROR, waId, err, {
+      event: "flow_asaas_customer_lookup_failed",
+      step: "ensureAsaasCustomer",
+      level: "warn",
+    });
+  }
   if (found?.id) {
-    await setAsaasCustomerId(waId, found.id);
+    try {
+      await setAsaasCustomerId(waId, found.id);
+    } catch (err) {
+      await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+        event: "flow_asaas_customer_found_persist_failed",
+        step: "ensureAsaasCustomer",
+      });
+      throw err;
+    }
     return found.id;
   }
 
-  // 3) cria
-  const customer = await createCustomer({
-    name: fullName || waId,
-    cpfCnpj, // ⚠️ não logar
-    externalReference: waId,
-  });
+  let customer;
+  try {
+    customer = await createCustomer({
+      name: fullName || waId,
+      cpfCnpj,
+      externalReference: waId,
+    });
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.ASAAS_CLIENT_ERROR, waId, err, {
+      event: "flow_asaas_customer_create_failed",
+      step: "ensureAsaasCustomer",
+    });
+    throw err;
+  }
 
-  if (!customer?.id) throw new Error("Asaas: customer not created");
-  await setAsaasCustomerId(waId, customer.id);
+  if (!customer?.id) {
+    const err = new Error("Asaas: customer not created");
+    err.code = "asaas_customer_not_created";
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.ASAAS_CLIENT_ERROR, waId, err, {
+      event: "flow_asaas_customer_create_missing_id",
+      step: "ensureAsaasCustomer",
+    });
+    throw err;
+  }
+
+  try {
+    await setAsaasCustomerId(waId, customer.id);
+  } catch (err) {
+    await reportFlowRuntimeError(FLOW_ERROR_KIND.STATE_ERROR, waId, err, {
+      event: "flow_asaas_customer_created_persist_failed",
+      step: "ensureAsaasCustomer",
+      meta: { customerId: cleanText(customer?.id) },
+    });
+    throw err;
+  }
   return customer.id;
 }
