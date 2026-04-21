@@ -13,6 +13,20 @@ const ADMIN_AUDIT_KEY = "audit:admin";
 const ADMIN_AUDIT_MAX_ITEMS = 2000;
 const ADMIN_AUDIT_TTL_SECONDS = 180 * 24 * 60 * 60;
 
+
+const ADMIN_AUTH_AUDIT_ACTIONS = Object.freeze([
+  "ADMIN_AUTH_MISSING_HEADER",
+  "ADMIN_AUTH_INVALID_CREDENTIALS",
+  "ADMIN_AUTH_BLOCKED",
+  "ADMIN_AUTH_SUCCESS",
+  "ADMIN_AUTH_RUNTIME_ERROR",
+]);
+
+function normalizeAdminAuthAction(value) {
+  const action = safeStr(value).toUpperCase();
+  return ADMIN_AUTH_AUDIT_ACTIONS.includes(action) ? action : "ADMIN_AUTH_RUNTIME_ERROR";
+}
+
 const COUPON_AUDIT_MAX_ITEMS = 2000;
 const COUPON_AUDIT_TTL_SECONDS = 180 * 24 * 60 * 60;
 
@@ -156,6 +170,43 @@ function parseAuditItems(raw) {
         summary: safeStr(entry),
       });
     }
+  });
+}
+
+
+export async function logAdminAuthAudit(input = {}) {
+  const actor = normalizeObject(input.actor);
+  const meta = normalizeObject(input.meta);
+
+  const event = normalizeEvent({
+    module: safeStr(input.module) || "ADMIN_AUTH",
+    action: normalizeAdminAuthAction(input.action || input.event),
+    waId: safeStr(input.waId),
+    internalUserId: safeStr(input.internalUserId),
+    targetId: safeStr(input.targetId || input.username || actor.user || input.ip),
+    targetLabel: safeStr(input.targetLabel) || "admin_auth",
+    summary: safeStr(input.summary || input.message || input.event),
+    actor: {
+      type: safeStr(actor.type || "admin"),
+      user: safeStr(actor.user || input.username),
+      ip: safeStr(actor.ip || input.ip),
+      userAgent: safeStr(actor.userAgent),
+    },
+    meta: {
+      username: safeStr(input.username || meta.username || actor.user),
+      ip: safeStr(input.ip || meta.ip || actor.ip),
+      code: safeStr(input.code || meta.code),
+      authMode: safeStr(input.authMode || meta.authMode),
+      event: safeStr(input.event || input.action),
+      ...meta,
+    },
+    before: normalizeObject(input.before),
+    after: normalizeObject(input.after),
+  });
+
+  return pushAuditEvent(ADMIN_AUDIT_KEY, event, {
+    maxItems: ADMIN_AUDIT_MAX_ITEMS,
+    ttlSeconds: ADMIN_AUDIT_TTL_SECONDS,
   });
 }
 
