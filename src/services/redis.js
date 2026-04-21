@@ -409,3 +409,53 @@ export async function redisNextCampaignSequence() {
 export async function redisNextCampaignExecutionSequence() {
   return redisIncrBy(redisCampaignExecutionSequenceKey(), 1);
 }
+
+
+// -----------------
+// Identity Conflict Keys
+// -----------------
+
+export function redisIdentityConflictSequenceKey() {
+  return "seq:identityConflict";
+}
+
+export function redisIdentityConflictKey(conflictId) {
+  const cid = requireKeyPart("conflictId", conflictId);
+  return `identityConflict:${cid}`;
+}
+
+export function redisIdentityConflictPendingIndexKey() {
+  return "idx:identityConflict:pending";
+}
+
+export function redisIdentityConflictResolvedIndexKey() {
+  return "idx:identityConflict:resolved";
+}
+
+export function redisIdentityConflictStatusIndexKey(status) {
+  const s = requireKeyPart("status", status).toLowerCase();
+  return `idx:identityConflict:status:${s}`;
+}
+
+export function redisIdentityConflictUserIndexKey(userId) {
+  const uid = requireKeyPart("userId", userId);
+  return `idx:user:${uid}:identityConflict`;
+}
+
+export function redisIdentityConflictAliasIndexKey(kind, value) {
+  const k = requireKeyPart("kind", kind).toLowerCase();
+  const v = requireKeyPart("value", value);
+  return `idx:identityConflict:alias:${k}:${v}`;
+}
+
+export function redisIdentityConflictWaIdIndexKey(waId) {
+  return redisIdentityConflictAliasIndexKey("waid", waId);
+}
+
+export function redisIdentityConflictBsuidIndexKey(bsuid) {
+  return redisIdentityConflictAliasIndexKey("bsuid", bsuid);
+}
+
+export async function redisNextIdentityConflictSequence() {
+  return redisIncrBy(redisIdentityConflictSequenceKey(), 1);
+}
