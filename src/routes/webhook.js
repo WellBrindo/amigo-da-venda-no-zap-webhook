@@ -18,6 +18,7 @@ import {
 const WEBHOOK_ERROR = Object.freeze({
   PAYLOAD_ERROR: "WEBHOOK_PAYLOAD_ERROR",
   IDENTITY_ERROR: "WEBHOOK_IDENTITY_ERROR",
+  IDENTITY_REVIEW_REQUIRED: "WEBHOOK_IDENTITY_REVIEW_REQUIRED",
   DEDUPE_ERROR: "WEBHOOK_DEDUPE_ERROR",
   FLOW_ERROR: "WEBHOOK_FLOW_ERROR",
   SEND_ERROR: "WEBHOOK_SEND_ERROR",
@@ -161,6 +162,31 @@ async function reportWebhookError({
   });
 }
 
+async function reportWebhookSuppressed({
+  event = "webhook_suppressed",
+  errorCode = "",
+  message = "",
+  step = "",
+  userId = "",
+  waId = "",
+  deliveryId = "",
+  messageId = "",
+  internalUserId = "",
+  extra = {},
+} = {}) {
+  await logWebhookEvent("info", safeStr(event) || "webhook_suppressed", {
+    errorCode: safeStr(errorCode),
+    message: safeStr(message),
+    step: safeStr(step),
+    messageId: safeStr(messageId),
+    waId: safeStr(waId),
+    deliveryId: safeStr(deliveryId),
+    internalUserId: safeStr(internalUserId || userId),
+    status: "suppressed",
+    ...extra,
+  });
+}
+
 async function markMessageSeen(messageId) {
   const dedupeKey = `wa:msg:${messageId}`;
   const seen = await redisGet(dedupeKey);
@@ -207,6 +233,10 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
   let inboundWaId = rawWaId;
   let inboundBsuid = "";
   let deliveryId = "";
+  let identityConflictId = "";
+  let identityReviewRequired = false;
+  let identityBlockSensitiveOps = false;
+  let identityAllowConversation = true;
 
   try {
     identity = await resolveOrCreateUserFromInbound({
@@ -220,6 +250,10 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
     inboundWaId = safeStr(identity?.inbound?.waId || rawWaId);
     inboundBsuid = safeStr(identity?.inbound?.bsuid);
     deliveryId = safeStr(identity?.inbound?.deliveryId || inboundWaId || inboundBsuid);
+    identityConflictId = safeStr(identity?.conflictId);
+    identityReviewRequired = Boolean(identity?.reviewRequired);
+    identityBlockSensitiveOps = Boolean(identity?.blockSensitiveOps);
+    identityAllowConversation = identity?.allowConversation !== false;
   } catch (err) {
     await reportWebhookError({
       errorCode: WEBHOOK_ERROR.IDENTITY_ERROR,
@@ -242,6 +276,42 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
       messageId,
       internalUserId,
       extra: { messageType },
+    });
+    return;
+  }
+
+  if (identityReviewRequired) {
+    await reportWebhookSuppressed({
+      event: "identity_conflict_pending_review",
+      errorCode: WEBHOOK_ERROR.IDENTITY_REVIEW_REQUIRED,
+      message: "Identity conflict pending manual review; conversation allowed and sensitive ops blocked.",
+      step: "identity_review_pending",
+      waId: inboundWaId || rawWaId,
+      deliveryId,
+      messageId,
+      internalUserId,
+      extra: {
+        messageType,
+        conflictId: identityConflictId,
+        allowConversation: identityAllowConversation ? "true" : "false",
+        blockSensitiveOps: identityBlockSensitiveOps ? "true" : "false",
+        bsuid: inboundBsuid,
+      },
+    });
+  }
+
+  if (!identityAllowConversation) {
+    await logWebhookEvent("warn", "identity_conversation_blocked", {
+      step: "identity_allow_conversation_check",
+      messageId,
+      waId: inboundWaId,
+      deliveryId,
+      internalUserId,
+      status: "blocked",
+      errorCode: WEBHOOK_ERROR.IDENTITY_REVIEW_REQUIRED,
+      meta: {
+        conflictId: identityConflictId,
+      },
     });
     return;
   }
@@ -305,7 +375,16 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
 
   let flowResult = null;
   try {
-    flowResult = await handleInboundText({ waId: internalUserId, text: inboundText });
+    flowResult = await handleInboundText({
+      waId: internalUserId,
+      text: inboundText,
+      identityContext: {
+        reviewRequired: identityReviewRequired,
+        conflictId: identityConflictId,
+        allowConversation: identityAllowConversation,
+        blockSensitiveOps: identityBlockSensitiveOps,
+      },
+    });
   } catch (err) {
     await reportWebhookError({
       errorCode: WEBHOOK_ERROR.FLOW_ERROR,
@@ -347,21 +426,37 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
   }
 
   if (inboundWaId) {
-    try {
-      await processPendingForWaId(inboundWaId);
-    } catch (err) {
-      await reportWebhookError({
-        errorCode: WEBHOOK_ERROR.PENDING_PROCESS_ERROR,
-        message: err?.message || String(err),
+    if (identityBlockSensitiveOps) {
+      await logWebhookEvent("info", "pending_campaigns_suppressed_by_identity_review", {
         step: "process_pending_campaigns",
+        messageId,
         waId: inboundWaId,
         deliveryId,
-        messageId,
         internalUserId,
-        extra: {
+        status: "suppressed",
+        errorCode: WEBHOOK_ERROR.IDENTITY_REVIEW_REQUIRED,
+        meta: {
+          conflictId: identityConflictId,
           bsuid: safeStr(inboundBsuid),
         },
       });
+    } else {
+      try {
+        await processPendingForWaId(inboundWaId);
+      } catch (err) {
+        await reportWebhookError({
+          errorCode: WEBHOOK_ERROR.PENDING_PROCESS_ERROR,
+          message: err?.message || String(err),
+          step: "process_pending_campaigns",
+          waId: inboundWaId,
+          deliveryId,
+          messageId,
+          internalUserId,
+          extra: {
+            bsuid: safeStr(inboundBsuid),
+          },
+        });
+      }
     }
   }
 }
