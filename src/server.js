@@ -1,4 +1,3 @@
-// src/server.js
 import express from "express";
 
 import { webhookRouter } from "./routes/webhook.js";
@@ -11,7 +10,7 @@ import { startLifecycleAutomationLoop } from "./services/broadcast.js";
 import * as audit from "./services/audit.js";
 
 const APP_NAME = "amigo-das-vendas";
-const APP_VERSION = "16.1.0-campaign-orchestrator-bootstrap";
+const APP_VERSION = "16.1.1-admin-auth-hardening";
 
 const ADMIN_SECRET = String(process.env.ADMIN_SECRET || "").trim();
 const PORT = Number(process.env.PORT || 10000);
@@ -154,6 +153,27 @@ function scheduleFatalShutdown(reason, error = null) {
   }, FATAL_EXIT_DELAY_MS).unref?.();
 }
 
+function extractClientIp(req) {
+  const forwarded = safeStr(req?.headers?.["x-forwarded-for"]).split(",")[0].trim();
+  const realIp = safeStr(req?.headers?.["x-real-ip"]);
+  const reqIp = safeStr(req?.ip);
+  const socketIp = safeStr(req?.socket?.remoteAddress);
+  return forwarded || realIp || reqIp || socketIp || "unknown";
+}
+
+function decodeBasicAuthUsername(headerValue) {
+  const header = safeStr(headerValue);
+  if (!header.startsWith("Basic ")) return "";
+  try {
+    const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
+    const separator = decoded.indexOf(":");
+    if (separator < 0) return "";
+    return safeStr(decoded.slice(0, separator)).toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 async function basicAuth(req, res, next) {
   const h = String(req.headers.authorization || "");
   if (!h.startsWith("Basic ")) {
@@ -161,18 +181,40 @@ async function basicAuth(req, res, next) {
     return res.status(401).send("Auth required");
   }
 
+  const clientIp = extractClientIp(req);
+  const authUsername = decodeBasicAuthUsername(h);
+
   try {
     const session = await resolveAdminSession({
       authorization: h,
       sharedSecret: ADMIN_SECRET,
+      ip: clientIp,
+      auditContext: {
+        route: safeStr(req?.originalUrl || req?.url),
+        method: safeStr(req?.method),
+        usernameHint: authUsername,
+      },
     });
 
-    if (!session?.ok || !session?.admin) {
+    if (session?.ok && session?.admin) {
+      req.adminAuth = session.admin;
+      return next();
+    }
+
+    if (safeStr(session?.code) === "INVALID_BASIC_AUTH") {
+      res.setHeader("WWW-Authenticate", 'Basic realm="Admin"');
+      return res.status(401).send("Auth required");
+    }
+
+    if (session?.blocked || safeStr(session?.code) === "ADMIN_AUTH_BLOCKED") {
       return res.status(403).send("Forbidden");
     }
 
-    req.adminAuth = session.admin;
-    return next();
+    if (!session?.ok) {
+      return res.status(403).send("Forbidden");
+    }
+
+    return res.status(500).send("Auth error");
   } catch (err) {
     void logServerEvent({
       level: "error",
@@ -183,9 +225,11 @@ async function basicAuth(req, res, next) {
       meta: {
         route: safeStr(req?.originalUrl || req?.url),
         method: safeStr(req?.method),
+        clientIp,
+        usernameHint: authUsername,
       },
     });
-    return res.status(500).send(String(err?.message || err || "Auth error"));
+    return res.status(500).send("Auth error");
   }
 }
 
