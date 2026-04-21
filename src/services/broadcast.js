@@ -37,7 +37,7 @@ import * as metrics from "./metrics.js";
 import * as audit from "./audit.js";
 import { getCopyText } from "./copy.js";
 import { pushSystemAlert } from "./alerts.js";
-import { getInternalUserIdByWaId, getPreferredOutboundRecipient } from "./identity.js";
+import { getInternalUserIdByWaId, getPreferredOutboundRecipient, getPendingIdentityConflictForUser } from "./identity.js";
 import {
   listExpiredPendingCouponReservations,
   expireCouponReservation,
@@ -79,6 +79,7 @@ const BROADCAST_ERROR = Object.freeze({
   PERSISTENCE: "BROADCAST_PERSISTENCE_ERROR",
   CAMPAIGN_LOOKUP: "BROADCAST_CAMPAIGN_LOOKUP_ERROR",
   COUPON_EXPIRATION: "BROADCAST_COUPON_EXPIRATION_ERROR",
+  IDENTITY_REVIEW_REQUIRED: "BROADCAST_IDENTITY_REVIEW_REQUIRED",
   RUNTIME: "BROADCAST_RUNTIME_ERROR",
 });
 
@@ -148,6 +149,75 @@ async function logBroadcastOperational(entry = {}) {
   try {
     console.warn(JSON.stringify({ level: payload.level, tag: payload.event, ...payload }));
   } catch {}
+}
+
+async function reportIdentityReviewSuppression({
+  userId = "",
+  recipient = "",
+  campaignId = "",
+  campaignCode = "",
+  step = "",
+  conflictId = "",
+  status = "PENDING_REVIEW",
+  source = "",
+} = {}) {
+  const payload = buildBroadcastErrorContext({
+    errorCode: BROADCAST_ERROR.IDENTITY_REVIEW_REQUIRED,
+    campaignId,
+    campaignCode,
+    userId,
+    recipient,
+    step,
+    extra: {
+      conflictId: safeStr(conflictId),
+      conflictStatus: safeStr(status || "PENDING_REVIEW"),
+      suppressionSource: safeStr(source),
+    },
+  });
+
+  await logBroadcastOperational({
+    event: "broadcast_identity_review_suppressed",
+    level: "info",
+    status: "suppressed",
+    message: "Campanha automática suprimida por conflito de identidade pendente.",
+    ...payload,
+    meta: payload,
+  });
+
+  try {
+    if (typeof audit.logIdentityConflictAudit === "function") {
+      await audit.logIdentityConflictAudit({
+        action: "IDENTITY_CONFLICT_SENSITIVE_OP_BLOCKED",
+        conflictId: safeStr(conflictId),
+        waUserId: safeStr(userId),
+        status: safeStr(status || "PENDING_REVIEW"),
+        summary: "Campanha automática suprimida por conflito de identidade pendente.",
+        meta: {
+          campaignId: safeStr(campaignId),
+          campaignCode: safeStr(campaignCode),
+          step: safeStr(step),
+          recipient: safeStr(recipient),
+          source: safeStr(source || "broadcast"),
+          classification: "suppressed_controlled",
+        },
+      });
+    }
+  } catch {}
+
+  return {
+    ...payload,
+    classification: "suppressed_controlled",
+  };
+}
+
+async function getPendingIdentityConflictForBroadcastUser(userId) {
+  const id = safeStr(userId);
+  if (!id) return null;
+  try {
+    return await getPendingIdentityConflictForUser(id);
+  } catch {
+    return null;
+  }
 }
 
 async function reportBroadcastFailure({
@@ -744,6 +814,20 @@ export async function reprocessCampaignForActiveWindow(campaignId, { limit = 500
         await markCampaignError(id, userId, "Missing outbound recipient for pending campaign user").catch(() => ({}));
         continue;
       }
+      const pendingIdentityConflict = await getPendingIdentityConflictForBroadcastUser(userId);
+      if (pendingIdentityConflict) {
+        await reportIdentityReviewSuppression({
+          userId,
+          recipient,
+          campaignId: id,
+          campaignCode: campaign.code,
+          step: "reprocess_identity_review_gate",
+          conflictId: pendingIdentityConflict.conflictId,
+          status: pendingIdentityConflict.status,
+          source: "reprocess_active_window",
+        });
+        continue;
+      }
       if (!windowSet.has(recipient)) continue;
 
       attempted += 1;
@@ -830,6 +914,21 @@ export async function processPendingForWaId(waId) {
         await reportBroadcastFailure({ error: recipientInfo?.error || "Missing outbound recipient for pending campaign user", errorCode: recipientInfo?.errorCode || BROADCAST_ERROR.RECIPIENT, campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient: inboundWaId, step: "process_pending_resolve_recipient" });
         await recordError(cpId, id, "Missing outbound recipient for pending campaign user");
         await markCampaignError(cpId, id, "Missing outbound recipient for pending campaign user").catch(() => ({}));
+        continue;
+      }
+
+      const pendingIdentityConflict = await getPendingIdentityConflictForBroadcastUser(id);
+      if (pendingIdentityConflict) {
+        await reportIdentityReviewSuppression({
+          userId: id,
+          recipient,
+          campaignId: cpId,
+          campaignCode: campaign?.code,
+          step: "process_pending_identity_review_gate",
+          conflictId: pendingIdentityConflict.conflictId,
+          status: pendingIdentityConflict.status,
+          source: "pending_after_inbound",
+        });
         continue;
       }
 
@@ -1052,6 +1151,21 @@ async function dispatchLifecycleWinner(userId, evaluation) {
       await recordError(campaign.id, userId, "Missing outbound recipient for lifecycle campaign");
       await markCampaignError(campaign.id, userId, "Missing outbound recipient for lifecycle campaign").catch(() => ({}));
       return { sent: false };
+    }
+
+    const pendingIdentityConflict = await getPendingIdentityConflictForBroadcastUser(userId);
+    if (pendingIdentityConflict) {
+      await reportIdentityReviewSuppression({
+        userId,
+        recipient,
+        campaignId: campaign.id,
+        campaignCode: campaign.code,
+        step: "lifecycle_identity_review_gate",
+        conflictId: pendingIdentityConflict.conflictId,
+        status: pendingIdentityConflict.status,
+        source: "lifecycle_automation",
+      });
+      return { sent: false, suppressed: true };
     }
 
     const text = await renderCampaignMessage(campaign, userId);
