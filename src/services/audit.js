@@ -27,6 +27,28 @@ function normalizeAdminAuthAction(value) {
   return ADMIN_AUTH_AUDIT_ACTIONS.includes(action) ? action : "ADMIN_AUTH_RUNTIME_ERROR";
 }
 
+
+const IDENTITY_CONFLICT_AUDIT_ACTIONS = Object.freeze([
+  "IDENTITY_CONFLICT_DETECTED",
+  "IDENTITY_CONFLICT_REOPENED",
+  "IDENTITY_CONFLICT_REVIEWED",
+  "IDENTITY_CONFLICT_RESOLVED",
+  "IDENTITY_CONFLICT_DISMISSED",
+  "IDENTITY_CONFLICT_ARCHIVED",
+  "IDENTITY_CONFLICT_SENSITIVE_OP_BLOCKED",
+  "IDENTITY_CONFLICT_MERGED",
+  "IDENTITY_CONFLICT_ALIASES_REASSIGNED",
+  "IDENTITY_CONFLICT_USERS_SEPARATED",
+  "IDENTITY_CONFLICT_USER_BLOCKED",
+]);
+
+function normalizeIdentityConflictAction(value) {
+  const action = safeStr(value).toUpperCase();
+  return IDENTITY_CONFLICT_AUDIT_ACTIONS.includes(action)
+    ? action
+    : "IDENTITY_CONFLICT_DETECTED";
+}
+
 const COUPON_AUDIT_MAX_ITEMS = 2000;
 const COUPON_AUDIT_TTL_SECONDS = 180 * 24 * 60 * 60;
 
@@ -197,6 +219,48 @@ export async function logAdminAuthAudit(input = {}) {
       ip: safeStr(input.ip || meta.ip || actor.ip),
       code: safeStr(input.code || meta.code),
       authMode: safeStr(input.authMode || meta.authMode),
+      event: safeStr(input.event || input.action),
+      ...meta,
+    },
+    before: normalizeObject(input.before),
+    after: normalizeObject(input.after),
+  });
+
+  return pushAuditEvent(ADMIN_AUDIT_KEY, event, {
+    maxItems: ADMIN_AUDIT_MAX_ITEMS,
+    ttlSeconds: ADMIN_AUDIT_TTL_SECONDS,
+  });
+}
+
+
+
+export async function logIdentityConflictAudit(input = {}) {
+  const actor = normalizeObject(input.actor);
+  const meta = normalizeObject(input.meta);
+
+  const event = normalizeEvent({
+    module: safeStr(input.module) || "IDENTITY_CONFLICT",
+    action: normalizeIdentityConflictAction(input.action || input.event),
+    waId: safeStr(input.waId),
+    internalUserId: safeStr(input.internalUserId || input.waUserId),
+    targetId: safeStr(input.targetId || input.conflictId || input.waUserId || input.bsuidUserId),
+    targetLabel: safeStr(input.targetLabel) || "identity_conflict",
+    summary: safeStr(input.summary || input.message || input.event),
+    actor: {
+      type: safeStr(actor.type || "system"),
+      user: safeStr(actor.user || input.reviewedBy),
+      ip: safeStr(actor.ip),
+      userAgent: safeStr(actor.userAgent),
+    },
+    meta: {
+      conflictId: safeStr(input.conflictId || meta.conflictId),
+      waUserId: safeStr(input.waUserId || meta.waUserId),
+      bsuidUserId: safeStr(input.bsuidUserId || meta.bsuidUserId),
+      status: safeStr(input.status || meta.status),
+      reviewDecision: safeStr(input.reviewDecision || meta.reviewDecision),
+      reviewedBy: safeStr(input.reviewedBy || meta.reviewedBy || actor.user),
+      waId: safeStr(input.waId || meta.waId),
+      bsuid: safeStr(input.bsuid || meta.bsuid),
       event: safeStr(input.event || input.action),
       ...meta,
     },
