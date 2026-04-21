@@ -600,6 +600,70 @@ async function reportFlowRuntimeError(kind, waId, err, extra = {}) {
   return { errorCode, message: cleanText(err?.message || err) };
 }
 
+function normalizeIdentityContext(identityContext = {}) {
+  return {
+    reviewRequired: Boolean(identityContext?.reviewRequired),
+    conflictId: cleanText(identityContext?.conflictId),
+    allowConversation: identityContext?.allowConversation !== false,
+    blockSensitiveOps: Boolean(identityContext?.blockSensitiveOps),
+  };
+}
+
+async function msgIdentitySensitiveOpBlocked(waId) {
+  return "Seu atendimento continua normalmente, mas esta etapa precisa de validação interna antes de prosseguir.";
+}
+
+async function reportIdentitySensitiveOpBlocked(waId, identityContext = {}, step = "", meta = {}) {
+  const ctx = normalizeIdentityContext(identityContext);
+  await flowRuntimeLog("warn", "flow_identity_sensitive_op_blocked", {
+    userId: cleanText(waId),
+    waId: cleanText(waId),
+    step: cleanText(step),
+    errorCode: "IDENTITY_REVIEW_REQUIRED",
+    kind: "IDENTITY_REVIEW_REQUIRED",
+    status: "blocked",
+    meta: {
+      conflictId: ctx.conflictId,
+      reviewRequired: ctx.reviewRequired,
+      blockSensitiveOps: ctx.blockSensitiveOps,
+      ...(meta && typeof meta === "object" ? meta : {}),
+    },
+  });
+
+  try {
+    if (typeof audit?.logIdentityConflictAudit === "function") {
+      await audit.logIdentityConflictAudit({
+        action: "IDENTITY_CONFLICT_SENSITIVE_OP_BLOCKED",
+        conflictId: ctx.conflictId,
+        status: "PENDING_REVIEW",
+        summary: "Operação sensível bloqueada no flow por conflito de identidade pendente.",
+        meta: {
+          step: cleanText(step),
+          ...(meta && typeof meta === "object" ? meta : {}),
+        },
+      });
+    }
+  } catch (_) {
+    // best effort
+  }
+
+  return await msgIdentitySensitiveOpBlocked(waId);
+}
+
+async function ensureIdentitySensitiveOpAllowed(waId, identityContext = {}, { step = "", meta = {} } = {}) {
+  const ctx = normalizeIdentityContext(identityContext);
+  if (!ctx.reviewRequired || !ctx.blockSensitiveOps) {
+    return { ok: true, identityContext: ctx };
+  }
+
+  const blockedText = await reportIdentitySensitiveOpBlocked(waId, ctx, step, meta);
+  return {
+    ok: false,
+    identityContext: ctx,
+    replyText: blockedText,
+  };
+}
+
 async function trackFlowMetricSafe(tracker, waId, extra = {}) {
   if (typeof tracker !== "function") return null;
   try {
@@ -2707,7 +2771,14 @@ async function persistCheckoutQuoteState(waId, { planCode = "", billingCycle = "
   }
 }
 
-async function prepareCheckoutQuote(waId, { planCode = "", billingCycle = "monthly", couponCode = "" } = {}) {
+async function prepareCheckoutQuote(waId, { planCode = "", billingCycle = "monthly", couponCode = "", identityContext = {} } = {}) {
+  const sensitiveOp = await ensureIdentitySensitiveOpAllowed(waId, identityContext, {
+    step: "prepareCheckoutQuote",
+    meta: { planCode, billingCycle, couponCode },
+  });
+  if (!sensitiveOp?.ok) {
+    return { ok: false, code: "identity_review_pending", reason: sensitiveOp.replyText };
+  }
   try {
     await clearCheckoutQuoteState(waId, {
       releaseReservation: true,
@@ -3581,7 +3652,13 @@ async function msgMenuCancelOk(waId, { renewalBr = "", daysLeft = "" } = {}) {
 async function msgMenuMySubscription(waId) {
   return await msgMenuSubscription(waId);
 }
-async function createCurrentPlanPayment(waId) {
+async function createCurrentPlanPayment(waId, identityContext = {}) {
+  const sensitiveOp = await ensureIdentitySensitiveOpAllowed(waId, identityContext, {
+    step: "createCurrentPlanPayment",
+  });
+  if (!sensitiveOp?.ok) {
+    return sensitiveOp.replyText;
+  }
   let selection;
   try {
     selection = await getCurrentCheckoutSelection(waId);
@@ -3901,7 +3978,7 @@ async function trackInboundActivity({ waId, status }) {
   };
 }
 
-export async function handleInboundText({ waId, userId, text }) {
+export async function handleInboundText({ waId, userId, text, identityContext = {} }) {
   const id = cleanText(userId || waId);
   const inbound = cleanText(text);
 
@@ -3916,7 +3993,7 @@ export async function handleInboundText({ waId, userId, text }) {
   if (activity?.isFirstInbound) {
     await trackFlowMetricSafe(trackFirstInboundReceived, id, { step: currentStatus || ST.WAIT_NAME });
   }
-  const outcome = await handleInboundTextCore({ userId: id, text: inbound });
+  const outcome = await handleInboundTextCore({ userId: id, text: inbound, identityContext });
 
   const prefixes = [];
   if (activity.shouldWarnFlood) {
@@ -3926,7 +4003,7 @@ export async function handleInboundText({ waId, userId, text }) {
   return prependReplies(outcome, prefixes);
 }
 
-async function handleInboundTextCore({ waId, userId, text }) {
+async function handleInboundTextCore({ waId, userId, text, identityContext = {} }) {
   const id = cleanText(userId || waId);
   const inbound = cleanText(text);
 
@@ -4693,8 +4770,12 @@ async function handleInboundTextCore({ waId, userId, text }) {
         planCode: selection.planCode,
         billingCycle,
         couponCode: "",
+        identityContext,
       });
       if (!prepared?.ok) {
+        if (prepared?.code === "identity_review_pending") {
+          return reply(prepared.reason || await msgIdentitySensitiveOpBlocked(id));
+        }
         return reply(await msgCouponInvalid(id, prepared?.quote));
       }
       await trackFlowMetricSafe(trackCheckoutStarted, id, {
@@ -4720,9 +4801,13 @@ async function handleInboundTextCore({ waId, userId, text }) {
       planCode: selection.planCode,
       billingCycle,
       couponCode,
+      identityContext,
     });
 
     if (!prepared?.ok) {
+      if (prepared?.code === "identity_review_pending") {
+        return reply(prepared.reason || await msgIdentitySensitiveOpBlocked(id));
+      }
       await trackFlowMetricSafe(trackCouponRejected, id, {
         planCode: selection.planCode,
         billingCycle,
@@ -4813,7 +4898,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
 
     const customerId = await getAsaasCustomerId(id);
     if (customerId) {
-      return reply(await createCurrentPlanPayment(id));
+      return reply(await createCurrentPlanPayment(id, identityContext));
     }
 
     await setUserStatus(id, ST.WAIT_DOC);
@@ -4841,7 +4926,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     }
 
     await ensureAsaasCustomer({ waId: id, fullName: await getUserFullName(id), cpfCnpj: v.digits });
-    return reply(await createCurrentPlanPayment(id));
+    return reply(await createCurrentPlanPayment(id, identityContext));
   }
 
   // 6.1) Cidade/UF (após pagamento confirmado)
@@ -4874,7 +4959,7 @@ async function handleInboundTextCore({ waId, userId, text }) {
     const c = normalizeChoice(inbound);
     if (c === "1" || c === "2") {
       await setPaymentMethod(id, c === "1" ? "CARD" : "PIX");
-      return reply(await createCurrentPlanPayment(id));
+      return reply(await createCurrentPlanPayment(id, identityContext));
     }
 
     if (c === "3") {
