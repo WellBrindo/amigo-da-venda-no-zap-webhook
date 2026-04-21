@@ -124,6 +124,9 @@ import {
   getUserIdentifiers,
   getPreferredOutboundRecipient,
   deleteIdentityForUser,
+  listIdentityConflicts,
+  getIdentityConflict,
+  resolveIdentityConflictDecision,
 } from "../services/identity.js";
 
 
@@ -289,6 +292,25 @@ function layoutBase({ title, activePath = "/admin", content = "", headExtra = ""
     </main>
   </div>
   ${scriptExtra || ""}
+  <script>
+    (function(){
+      if (typeof window === "undefined" || typeof fetch !== "function") return;
+      const badgeEl = document.getElementById("identity-conflicts-badge");
+      if (!badgeEl) return;
+      fetch("/admin/identity-conflicts/pending-count", { headers: { "Accept": "application/json" } })
+        .then((res) => res.ok ? res.json() : null)
+        .then((data) => {
+          const count = Number(data && data.count || 0) || 0;
+          if (count > 0) {
+            badgeEl.textContent = String(count > 99 ? "99+" : count);
+            badgeEl.style.display = "inline-flex";
+          } else {
+            badgeEl.style.display = "none";
+          }
+        })
+        .catch(() => { badgeEl.style.display = "none"; });
+    })();
+  </script>
 </body>
 </html>`;
 }
@@ -297,12 +319,16 @@ function renderSidebar(activePath){
   const ap = String(activePath||"");
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm") || ap.startsWith("/admin/bulk") || ap.startsWith("/admin/feedback");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
-  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/ops") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings") || ap.startsWith("/admin/admin-users");
+  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/ops") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings") || ap.startsWith("/admin/admin-users") || ap.startsWith("/admin/identity-conflicts");
   const reportsOpen = ap.startsWith("/admin/reports");
 
   const item = (href, label, icon) => {
     const active = ap === href ? "active" : "";
     return `<a class="item ${active}" href="${href}"><span>${icon||"•"}</span><span>${escapeHtml(label)}</span></a>`;
+  };
+  const itemWithBadge = (href, label, icon, badgeId) => {
+    const active = ap === href ? "active" : "";
+    return `<a class="item ${active}" href="${href}"><span>${icon||"•"}</span><span style="display:flex; align-items:center; justify-content:space-between; width:100%; gap:8px;"><span>${escapeHtml(label)}</span><span id="${escapeHtml(badgeId)}" class="badge danger" style="display:none; min-width:24px; justify-content:center;">0</span></span></a>`;
   };
 
   // Cascata (details)
@@ -364,6 +390,7 @@ function renderSidebar(activePath){
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
         ${item("/admin/settings-ui", "Configurações Globais", "🛠️")}
         ${item("/admin/admin-users-ui", "Administradores e Acessos", "🛡️")}
+        ${itemWithBadge("/admin/identity-conflicts-ui", "Conflitos de identidade", "🧩", "identity-conflicts-badge")}
         ${item("/admin/asaas-test-ui", "Asaas Teste", "🧪")}
       </details>
 
@@ -608,6 +635,7 @@ function getAdminRequiredPermission(pathname) {
   if (path.startsWith("/audit")) return "audit.view";
   if (path.startsWith("/inconsistencies")) return "inconsistencies.view";
   if (path.startsWith("/admin-users")) return "admin.manage";
+  if (path.startsWith("/identity-conflicts")) return "admin.manage";
   if (path.startsWith("/state-test") || path.startsWith("/send-test")) return "admin.manage";
   return "dashboard.view";
 }
@@ -2181,6 +2209,131 @@ async function buildOperationalDashboardData(filters = {}) {
       latestCampaignFailure: campaignSummary.latestFailure,
     },
   };
+}
+
+
+function formatAdminDateTime(value) {
+  const n = Number(value || 0);
+  if (!n) return "";
+  try {
+    return new Date(n).toLocaleString("pt-BR");
+  } catch {
+    return String(value || "");
+  }
+}
+
+function summarizeObjectKeys(value) {
+  if (!value || typeof value !== "object") return "";
+  const keys = Object.keys(value);
+  return keys.length ? keys.join(", ") : "";
+}
+
+function normalizeIdentityConflictActionInput(value) {
+  const action = String(value || "").trim().toLowerCase();
+  const allowed = new Set([
+    "merge_into_wa_user",
+    "merge_into_bsuid_user",
+    "reassign_aliases",
+    "separate_users",
+    "block_wa_user",
+    "block_bsuid_user",
+    "dismiss",
+    "archive",
+  ]);
+  return allowed.has(action) ? action : "";
+}
+
+async function loadIdentityConflictUserComparison(conflict) {
+  const waUserId = String(conflict?.waUserId || "").trim();
+  const bsuidUserId = String(conflict?.bsuidUserId || "").trim();
+  const ids = Array.from(new Set([waUserId, bsuidUserId].filter(Boolean)));
+  const snapshots = new Map();
+
+  await mapLimit(ids, 2, async (userId) => {
+    const [snapshot, identifiers, outbound] = await Promise.all([
+      getUserSnapshot(userId).catch(() => null),
+      getUserIdentifiers(userId).catch(() => null),
+      getPreferredOutboundRecipient(userId).catch(() => null),
+    ]);
+    snapshots.set(userId, { snapshot, identifiers, outbound });
+  });
+
+  const buildSide = (userId) => {
+    const entry = snapshots.get(userId) || {};
+    const snap = entry.snapshot || {};
+    const identifiers = entry.identifiers || {};
+    const outbound = entry.outbound || {};
+    return {
+      userId,
+      fullName: String(snap?.fullName || "").trim(),
+      status: String(snap?.status || "").trim(),
+      plan: String(snap?.plan || "").trim(),
+      paymentMethod: String(snap?.paymentMethod || "").trim(),
+      asaasCustomerId: String(snap?.asaasCustomerId || "").trim(),
+      asaasSubscriptionId: String(snap?.asaasSubscriptionId || "").trim(),
+      quotaUsed: Number(snap?.quotaUsed || 0),
+      trialUsed: Number(snap?.trialUsed || 0),
+      billingCityState: String(snap?.billingCityState || "").trim(),
+      billingAddress: String(snap?.billingAddress || "").trim(),
+      lastPrompt: String(snap?.lastPrompt || "").trim(),
+      aliases: {
+        waId: String(identifiers?.waId || "").trim(),
+        bsuid: String(identifiers?.bsuid || "").trim(),
+        primaryDeliveryId: String(identifiers?.primaryDeliveryId || "").trim(),
+      },
+      outbound: {
+        recipient: String(outbound?.recipient || "").trim(),
+        channel: String(outbound?.channel || "").trim(),
+      },
+      bizProfileKeys: summarizeObjectKeys(snap?.bizProfile),
+      pendingBizProfileKeys: summarizeObjectKeys(snap?.pendingBizProfile),
+    };
+  };
+
+  return {
+    waSide: buildSide(waUserId),
+    bsuidSide: buildSide(bsuidUserId),
+  };
+}
+
+function renderIdentityConflictSideCard(title, side, highlight = false) {
+  const s = side || {};
+  return `
+    <div class="card pad" style="border-color:${highlight ? 'rgba(37,99,235,.35)' : 'var(--border)'};">
+      <div class="row" style="justify-content:space-between; align-items:flex-start;">
+        <div>
+          <div class="muted">${escapeHtml(title)}</div>
+          <div style="font-size:18px; font-weight:800; margin-top:6px;">${escapeHtml(s.fullName || 'Sem nome')}</div>
+          <div class="muted" style="margin-top:4px;"><code>${escapeHtml(s.userId || '')}</code></div>
+        </div>
+        <div class="badge ${String(s.status || '').toUpperCase() === 'ACTIVE' ? 'ok' : 'info'}">${escapeHtml(s.status || 'SEM STATUS')}</div>
+      </div>
+      <div class="hr"></div>
+      <div class="grid cols2">
+        <div><div class="muted">Plano</div><div><b>${escapeHtml(s.plan || '—')}</b></div></div>
+        <div><div class="muted">Pagamento</div><div><b>${escapeHtml(s.paymentMethod || '—')}</b></div></div>
+        <div><div class="muted">Assinatura Asaas</div><div><code>${escapeHtml(s.asaasSubscriptionId || '—')}</code></div></div>
+        <div><div class="muted">Cliente Asaas</div><div><code>${escapeHtml(s.asaasCustomerId || '—')}</code></div></div>
+        <div><div class="muted">Quota usada</div><div><b>${escapeHtml(String(s.quotaUsed || 0))}</b></div></div>
+        <div><div class="muted">Trial usado</div><div><b>${escapeHtml(String(s.trialUsed || 0))}</b></div></div>
+      </div>
+      <div class="hr"></div>
+      <div class="grid cols2">
+        <div><div class="muted">WA ID</div><div><code>${escapeHtml(s.aliases?.waId || '—')}</code></div></div>
+        <div><div class="muted">BSUID</div><div><code>${escapeHtml(s.aliases?.bsuid || '—')}</code></div></div>
+        <div><div class="muted">Primary delivery</div><div><code>${escapeHtml(s.aliases?.primaryDeliveryId || '—')}</code></div></div>
+        <div><div class="muted">Destino preferido</div><div><code>${escapeHtml(s.outbound?.recipient || '—')}</code></div></div>
+        <div><div class="muted">Canal preferido</div><div>${escapeHtml(s.outbound?.channel || '—')}</div></div>
+        <div><div class="muted">Identificador</div><div><code>${escapeHtml(s.userId || '—')}</code></div></div>
+      </div>
+      <div class="hr"></div>
+      <div class="grid cols2">
+        <div><div class="muted">Cidade/UF</div><div>${escapeHtml(s.billingCityState || '—')}</div></div>
+        <div><div class="muted">Endereço</div><div>${escapeHtml(s.billingAddress || '—')}</div></div>
+        <div><div class="muted">Perfil empresa</div><div>${escapeHtml(s.bizProfileKeys || '—')}</div></div>
+        <div><div class="muted">Perfil pendente</div><div>${escapeHtml(s.pendingBizProfileKeys || '—')}</div></div>
+      </div>
+    </div>`;
 }
 
 export function adminRouter() {
@@ -11299,6 +11452,263 @@ router.get("/window24h-ui", async (req, res) => {
       return res.json({ ok: true, userId, sentTo: recipient?.recipient || "", text, meta });
     } catch (err) {
       return res.status(err.statusCode || 500).json({ ok: false, error: err.message });
+    }
+  });
+
+
+  router.get("/identity-conflicts/pending-count", async (req, res) => {
+    try {
+      const items = await listIdentityConflicts({ status: "PENDING_REVIEW", limit: 1000 });
+      return res.json({ ok: true, count: Array.isArray(items) ? items.length : 0 });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err?.message || String(err), count: 0 });
+    }
+  });
+
+  router.get("/identity-conflicts/data", async (req, res) => {
+    try {
+      const status = String(req.query?.status || "PENDING_REVIEW").trim().toUpperCase();
+      const limit = Math.max(1, Math.min(Number(req.query?.limit || 200), 1000));
+      const items = await listIdentityConflicts({ status, limit });
+      return res.json({ ok: true, status, count: Array.isArray(items) ? items.length : 0, items });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err?.message || String(err) });
+    }
+  });
+
+  router.get("/identity-conflicts-ui", async (req, res) => {
+    try {
+      const status = String(req.query?.status || "PENDING_REVIEW").trim().toUpperCase();
+      const items = await listIdentityConflicts({ status, limit: 300 });
+      const rows = (Array.isArray(items) ? items : []).map((item) => `
+        <tr>
+          <td><a href="/admin/identity-conflicts-ui/${encodeURIComponent(item.conflictId)}"><code>${escapeHtml(item.conflictId)}</code></a></td>
+          <td><code>${escapeHtml(item.waId || '—')}</code></td>
+          <td><code>${escapeHtml(item.bsuid || '—')}</code></td>
+          <td><code>${escapeHtml(item.waUserId || '—')}</code></td>
+          <td><code>${escapeHtml(item.bsuidUserId || '—')}</code></td>
+          <td>${escapeHtml(formatAdminDateTime(item.detectedAt) || '—')}</td>
+          <td>${escapeHtml(formatAdminDateTime(item.lastSeenAt) || '—')}</td>
+          <td>${escapeHtml(String(item.timesDetected || 0))}</td>
+          <td><span class="badge ${item.status === 'PENDING_REVIEW' ? 'danger' : 'info'}">${escapeHtml(item.status || '—')}</span></td>
+        </tr>`).join('');
+
+      return res.send(layoutBase({
+        title: 'Conflitos de identidade',
+        activePath: '/admin/identity-conflicts-ui',
+        content: `
+          <div class="grid cols3" style="margin-bottom:12px;">
+            <div class="kpi"><div class="t">Pendentes</div><div class="v">${escapeHtml(String((items || []).length))}</div></div>
+            <div class="kpi"><div class="t">Status filtrado</div><div class="v" style="font-size:20px;">${escapeHtml(status)}</div></div>
+            <div class="kpi"><div class="t">Ação</div><div class="v" style="font-size:18px;"><a href="/admin/identity-conflicts-ui?status=PENDING_REVIEW">Atualizar</a></div></div>
+          </div>
+          <div class="card pad">
+            <div class="row" style="justify-content:space-between; margin-bottom:10px;">
+              <div>
+                <h3 style="margin:0;">Central de Conflitos de Identidade</h3>
+                <div class="muted" style="margin-top:6px;">Casos pendentes de revisão manual. A conversa do usuário continua, mas operações sensíveis ficam bloqueadas até a decisão administrativa.</div>
+              </div>
+              <form method="get" action="/admin/identity-conflicts-ui" class="row">
+                <select name="status">
+                  ${renderSelectOptions([
+                    { value: 'PENDING_REVIEW', label: 'PENDENTE' },
+                    { value: 'RESOLVED', label: 'RESOLVIDO' },
+                    { value: 'DISMISSED', label: 'DISPENSADO' },
+                    { value: 'ARCHIVED', label: 'ARQUIVADO' },
+                  ], status)}
+                </select>
+                <button class="primary" type="submit">Filtrar</button>
+              </form>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Conflict ID</th>
+                  <th>WA ID</th>
+                  <th>BSUID</th>
+                  <th>Usuário WA</th>
+                  <th>Usuário BSUID</th>
+                  <th>Detectado em</th>
+                  <th>Última ocorrência</th>
+                  <th>Ocorrências</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows || '<tr><td colspan="9" class="muted">Nenhum conflito encontrado.</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        `,
+      }));
+    } catch (err) {
+      return res.status(500).send(layoutBase({ title: 'Conflitos de identidade', activePath: '/admin/identity-conflicts-ui', content: `<div class="card pad"><h3>Erro ao carregar</h3><div class="muted">${escapeHtml(err?.message || String(err))}</div></div>` }));
+    }
+  });
+
+  router.get("/identity-conflicts-ui/:conflictId", async (req, res) => {
+    try {
+      const conflictId = String(req.params?.conflictId || '').trim();
+      const conflict = await getIdentityConflict(conflictId);
+      if (!conflict) {
+        return res.status(404).send(layoutBase({ title: 'Conflito não encontrado', activePath: '/admin/identity-conflicts-ui', content: `<div class="card pad"><h3>Conflito não encontrado</h3><div class="muted">ID informado: <code>${escapeHtml(conflictId)}</code></div></div>` }));
+      }
+      const comparison = await loadIdentityConflictUserComparison(conflict);
+      const waSide = comparison.waSide || {};
+      const bsuidSide = comparison.bsuidSide || {};
+
+      return res.send(layoutBase({
+        title: `Conflito ${conflict.conflictId}`,
+        activePath: '/admin/identity-conflicts-ui',
+        content: `
+          <div class="card pad" style="margin-bottom:12px;">
+            <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+              <div>
+                <h3 style="margin:0;">Conflito ${escapeHtml(conflict.conflictId)}</h3>
+                <div class="muted" style="margin-top:6px;">Status atual: <span class="badge ${conflict.status === 'PENDING_REVIEW' ? 'danger' : 'info'}">${escapeHtml(conflict.status || '—')}</span></div>
+              </div>
+              <div class="row">
+                <span class="pill">Detectado em: <b>${escapeHtml(formatAdminDateTime(conflict.detectedAt) || '—')}</b></span>
+                <span class="pill">Última ocorrência: <b>${escapeHtml(formatAdminDateTime(conflict.lastSeenAt) || '—')}</b></span>
+                <span class="pill">Ocorrências: <b>${escapeHtml(String(conflict.timesDetected || 0))}</b></span>
+              </div>
+            </div>
+            <div class="hr"></div>
+            <div class="grid cols2">
+              <div><div class="muted">WA ID</div><div><code>${escapeHtml(conflict.waId || '—')}</code></div></div>
+              <div><div class="muted">BSUID</div><div><code>${escapeHtml(conflict.bsuid || '—')}</code></div></div>
+              <div><div class="muted">Review decision</div><div>${escapeHtml(conflict.reviewDecision || '—')}</div></div>
+              <div><div class="muted">Revisado por</div><div>${escapeHtml(conflict.reviewedBy || '—')}</div></div>
+              <div><div class="muted">Operações sensíveis bloqueadas</div><div><span class="badge ${conflict.blockSensitiveOps ? 'danger' : 'ok'}">${conflict.blockSensitiveOps ? 'SIM' : 'NÃO'}</span></div></div>
+              <div><div class="muted">Conversa permitida</div><div><span class="badge ${conflict.allowConversation === false ? 'danger' : 'ok'}">${conflict.allowConversation === false ? 'NÃO' : 'SIM'}</span></div></div>
+              <div><div class="muted">Observações</div><div>${escapeHtml(conflict.notes || '—')}</div></div>
+              <div><div class="muted">Revisado em</div><div>${escapeHtml(formatAdminDateTime(conflict.reviewedAt) || '—')}</div></div>
+            </div>
+          </div>
+          <div class="grid cols2" style="margin-bottom:12px;">
+            ${renderIdentityConflictSideCard('Usuário do WA ID', waSide, true)}
+            ${renderIdentityConflictSideCard('Usuário do BSUID', bsuidSide, false)}
+          </div>
+          <div class="card pad">
+            <h3 style="margin-top:0;">Ações manuais</h3>
+            <div class="muted" style="margin-bottom:10px;">Escolha a ação adequada para resolver o caso. As ações executam a regra administrativa real da Central e registram auditoria.</div>
+            <form method="post" action="/admin/identity-conflicts/resolve" class="grid" style="gap:14px;">
+              <input type="hidden" name="conflictId" value="${escapeHtml(conflict.conflictId)}" />
+              <div class="grid cols2">
+                <div>
+                  <label>Ação</label>
+                  <select name="action" required>
+                    ${renderSelectOptions([
+                      { value: 'merge_into_wa_user', label: 'Unir no usuário do WA ID' },
+                      { value: 'merge_into_bsuid_user', label: 'Unir no usuário do BSUID' },
+                      { value: 'reassign_aliases', label: 'Reatribuir aliases' },
+                      { value: 'separate_users', label: 'Separar definitivamente' },
+                      { value: 'block_wa_user', label: 'Bloquear usuário do WA ID' },
+                      { value: 'block_bsuid_user', label: 'Bloquear usuário do BSUID' },
+                      { value: 'dismiss', label: 'Ignorar / dismiss' },
+                      { value: 'archive', label: 'Arquivar' },
+                    ])}
+                  </select>
+                </div>
+                <div>
+                  <label>Resumo da decisão atual</label>
+                  <div class="pill" style="min-height:42px; align-items:center;">${escapeHtml(conflict.reviewDecision || 'Sem decisão anterior')}</div>
+                </div>
+                <div>
+                  <label>Destino do WA ID</label>
+                  <select name="waAliasTargetUserId">
+                    ${renderSelectOptions([
+                      { value: waSide.userId, label: `WA user · ${waSide.userId}` },
+                      { value: bsuidSide.userId, label: `BSUID user · ${bsuidSide.userId}` },
+                    ], waSide.userId)}
+                  </select>
+                </div>
+                <div>
+                  <label>Destino do BSUID</label>
+                  <select name="bsuidAliasTargetUserId">
+                    ${renderSelectOptions([
+                      { value: waSide.userId, label: `WA user · ${waSide.userId}` },
+                      { value: bsuidSide.userId, label: `BSUID user · ${bsuidSide.userId}` },
+                    ], bsuidSide.userId)}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label>Observação administrativa</label>
+                <textarea name="notes" placeholder="Descreva a decisão tomada, contexto e impactos.">${escapeHtml(conflict.notes || '')}</textarea>
+              </div>
+              <div class="row">
+                <button class="primary" type="submit">Salvar decisão</button>
+                <a class="pill" href="/admin/identity-conflicts-ui">Voltar à lista</a>
+              </div>
+            </form>
+          </div>
+        `,
+      }));
+    } catch (err) {
+      return res.status(500).send(layoutBase({ title: 'Conflito de identidade', activePath: '/admin/identity-conflicts-ui', content: `<div class="card pad"><h3>Erro ao carregar conflito</h3><div class="muted">${escapeHtml(err?.message || String(err))}</div></div>` }));
+    }
+  });
+
+  router.post("/identity-conflicts/resolve", async (req, res) => {
+    try {
+      const conflictId = String(req.body?.conflictId || '').trim();
+      const action = normalizeIdentityConflictActionInput(req.body?.action);
+      const notes = String(req.body?.notes || '').trim();
+      const reviewedBy = parseBasicAuthUser(req);
+      const waAliasTargetUserId = String(req.body?.waAliasTargetUserId || '').trim();
+      const bsuidAliasTargetUserId = String(req.body?.bsuidAliasTargetUserId || '').trim();
+
+      if (!conflictId) return res.status(400).send('conflictId required');
+      if (!action) return res.status(400).send('invalid action');
+
+      const current = await getIdentityConflict(conflictId);
+      if (!current) return res.status(404).send('identity conflict not found');
+
+      const validTargets = new Set([String(current.waUserId || '').trim(), String(current.bsuidUserId || '').trim()].filter(Boolean));
+      if (action === 'reassign_aliases') {
+        if (waAliasTargetUserId && !validTargets.has(waAliasTargetUserId)) return res.status(400).send('invalid waAliasTargetUserId');
+        if (bsuidAliasTargetUserId && !validTargets.has(bsuidAliasTargetUserId)) return res.status(400).send('invalid bsuidAliasTargetUserId');
+        if (!waAliasTargetUserId && !bsuidAliasTargetUserId) return res.status(400).send('alias target required');
+      }
+
+      const result = await resolveIdentityConflictDecision(conflictId, action, {
+        reviewedBy,
+        notes,
+        moveWaIdToUserId: waAliasTargetUserId,
+        moveBsuidToUserId: bsuidAliasTargetUserId,
+        waTargetUserId: waAliasTargetUserId,
+        bsuidTargetUserId: bsuidAliasTargetUserId,
+      });
+
+      if (result?.requiresAdminStateAction && result?.blockedUserId) {
+        await setUserStatus(result.blockedUserId, result.nextStatus || 'BLOCKED');
+      }
+
+      const updatedConflict = result?.conflict?.conflictId ? result.conflict : await getIdentityConflict(conflictId);
+
+      await safeRecordAdminAudit(req, {
+        module: 'IDENTITY_CONFLICT',
+        action: 'IDENTITY_CONFLICT_REVIEWED',
+        targetId: conflictId,
+        targetLabel: 'identity_conflict',
+        summary: `Conflito ${conflictId} revisado com ação ${action}.`,
+        before: current,
+        after: updatedConflict || result || {},
+        meta: {
+          action,
+          waUserId: current.waUserId,
+          bsuidUserId: current.bsuidUserId,
+          blockedUserId: String(result?.blockedUserId || ''),
+          requiresAdminStateAction: Boolean(result?.requiresAdminStateAction),
+          waAliasTargetUserId,
+          bsuidAliasTargetUserId,
+        },
+      });
+
+      return res.redirect(`/admin/identity-conflicts-ui/${encodeURIComponent(conflictId)}`);
+    } catch (err) {
+      return res.status(err.statusCode || 500).send(layoutBase({ title: 'Conflitos de identidade', activePath: '/admin/identity-conflicts-ui', content: `<div class="card pad"><h3>Erro ao aplicar ação</h3><div class="muted">${escapeHtml(err?.message || String(err))}</div><div class="hr"></div><a class="pill" href="/admin/identity-conflicts-ui">Voltar</a></div>` }));
     }
   });
 
