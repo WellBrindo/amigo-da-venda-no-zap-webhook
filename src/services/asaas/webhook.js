@@ -19,7 +19,7 @@ import {
 import { getCopyText } from "../copy.js";
 import { sendWhatsAppText } from "../meta/whatsapp.js";
 import { recordAsaasEvent } from "./ledger.js";
-import { getPreferredOutboundRecipient } from "../identity.js";
+import { getPreferredOutboundRecipient, getPendingIdentityConflictForUser } from "../identity.js";
 import {
   trackPaymentConfirmed,
   trackPaymentFailed,
@@ -49,6 +49,7 @@ const ASAAS_WEBHOOK_ERROR = Object.freeze({
   LEDGER: "ASAAS_WEBHOOK_LEDGER_ERROR",
   COUPON: "ASAAS_WEBHOOK_COUPON_ERROR",
   NOTIFICATION: "ASAAS_WEBHOOK_NOTIFICATION_ERROR",
+  IDENTITY_REVIEW_REQUIRED: "ASAAS_WEBHOOK_IDENTITY_REVIEW_REQUIRED",
   UNKNOWN_STATUS: "ASAAS_WEBHOOK_UNKNOWN_STATUS",
   RUNTIME: "ASAAS_WEBHOOK_RUNTIME_ERROR",
 });
@@ -501,6 +502,86 @@ async function resolveUserForWebhook(userId) {
   return normalizedUserId;
 }
 
+async function getPendingIdentityConflictSafe(userId) {
+  const normalizedUserId = safeStr(userId);
+  if (!normalizedUserId) return null;
+  try {
+    return await getPendingIdentityConflictForUser(normalizedUserId);
+  } catch (err) {
+    await logWebhookOperational("warn", buildWebhookOperationalContext({
+      userId: normalizedUserId,
+      event: "identity_review_lookup_failed",
+      step: "identity_review_lookup",
+      errorCode: ASAAS_WEBHOOK_ERROR.IDENTITY_REVIEW_REQUIRED,
+      message: err?.message || String(err),
+    }));
+    return null;
+  }
+}
+
+async function handleIdentityReviewPending({
+  userId = "",
+  event = "",
+  payment = null,
+  subscription = null,
+  conflict = null,
+  step = "",
+  message = "",
+  meta = {},
+} = {}) {
+  const conflictId = safeStr(conflict?.conflictId);
+  const conflictStatus = safeStr(conflict?.status || "PENDING_REVIEW");
+
+  await logWebhookOperational("info", buildWebhookOperationalContext({
+    userId,
+    event,
+    payment,
+    subscription,
+    step: safeStr(step || "identity_review_pending"),
+    errorCode: ASAAS_WEBHOOK_ERROR.IDENTITY_REVIEW_REQUIRED,
+    message: safeStr(message || "Evento financeiro registrado, mas automações irreversíveis foram suprimidas por conflito de identidade pendente."),
+    status: "suppressed",
+    meta: {
+      conflictId,
+      conflictStatus,
+      classification: "suppressed_controlled",
+      ...((meta && typeof meta === "object") ? meta : {}),
+    },
+  }));
+
+  try {
+    if (typeof audit?.logIdentityConflictAudit === "function") {
+      await audit.logIdentityConflictAudit({
+        action: "IDENTITY_CONFLICT_SENSITIVE_OP_BLOCKED",
+        conflictId,
+        waUserId: safeStr(conflict?.waUserId || userId),
+        bsuidUserId: safeStr(conflict?.bsuidUserId),
+        status: conflictStatus,
+        waId: safeStr(conflict?.waId),
+        bsuid: safeStr(conflict?.bsuid),
+        summary: safeStr(message || "Evento financeiro processado com automações irreversíveis suprimidas por conflito de identidade pendente."),
+        meta: {
+          source: "asaas_webhook",
+          webhookEvent: safeStr(event),
+          paymentId: safeStr(payment?.id),
+          subscriptionId: safeStr(subscription?.id),
+          step: safeStr(step || "identity_review_pending"),
+          ...((meta && typeof meta === "object") ? meta : {}),
+        },
+      });
+    }
+  } catch {}
+
+  return {
+    ok: true,
+    reviewRequired: true,
+    suppressed: true,
+    classification: "suppressed_controlled",
+    conflictId,
+    conflictStatus,
+  };
+}
+
 function daysLeftUntilIso(iso) {
   const value = safeStr(iso);
   const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -645,6 +726,24 @@ export async function handleAsaasWebhookEvent(body) {
         await emitWebhookMetricSafe(trackSubscriptionActivated, trackingContext);
       }
       await emitWebhookMetricSafe(trackPlanActivated, trackingContext);
+
+      const pendingIdentityConflict = await getPendingIdentityConflictSafe(userId);
+      if (pendingIdentityConflict) {
+        return await handleIdentityReviewPending({
+          userId,
+          event,
+          payment,
+          subscription,
+          conflict: pendingIdentityConflict,
+          step: "payment_confirmed_identity_review_gate",
+          message: "Pagamento confirmado registrado em ledger, mas ativação automática e notificações foram suprimidas por conflito de identidade pendente.",
+          meta: {
+            paymentConfirmed: true,
+            ledgerRecorded: Boolean(ledgerResult?.ok),
+            couponFinalized: Boolean(couponFinalize?.ok || couponFinalize?.skipped),
+          },
+        });
+      }
 
       let billingCityState = "";
       let billingAddress = "";
@@ -827,6 +926,23 @@ export async function handleAsaasWebhookEvent(body) {
         })
       );
 
+      const pendingIdentityConflict = await getPendingIdentityConflictSafe(userId);
+      if (pendingIdentityConflict) {
+        return await handleIdentityReviewPending({
+          userId,
+          event,
+          payment,
+          subscription,
+          conflict: pendingIdentityConflict,
+          step: "payment_failed_identity_review_gate",
+          message: "Falha de pagamento registrada em ledger, mas recuperação automática e notificações foram suprimidas por conflito de identidade pendente.",
+          meta: {
+            ledgerRecorded: Boolean(ledgerResult?.ok),
+            couponFinalized: Boolean(couponFinalize?.ok || couponFinalize?.skipped),
+          },
+        });
+      }
+
       try {
         await setUserStatus(userId, "WAIT_PAYMENT_RECOVERY");
       } catch (err) {
@@ -908,6 +1024,23 @@ export async function handleAsaasWebhookEvent(body) {
         })
       );
 
+      const pendingIdentityConflict = await getPendingIdentityConflictSafe(userId);
+      if (pendingIdentityConflict) {
+        return await handleIdentityReviewPending({
+          userId,
+          event,
+          payment,
+          subscription,
+          conflict: pendingIdentityConflict,
+          step: "payment_overdue_identity_review_gate",
+          message: "Pagamento vencido registrado em ledger, mas transição automática de status foi suprimida por conflito de identidade pendente.",
+          meta: {
+            ledgerRecorded: Boolean(ledgerResult?.ok),
+            couponFinalized: Boolean(couponFinalize?.ok || couponFinalize?.skipped),
+          },
+        });
+      }
+
       try {
         await setUserStatus(userId, "PAYMENT_PENDING");
       } catch (err) {
@@ -967,6 +1100,23 @@ export async function handleAsaasWebhookEvent(body) {
           payment,
           subscription,
           step: "payment_deleted_reset_checkout_state",
+        });
+      }
+
+      const pendingIdentityConflict = await getPendingIdentityConflictSafe(userId);
+      if (pendingIdentityConflict) {
+        return await handleIdentityReviewPending({
+          userId,
+          event,
+          payment,
+          subscription,
+          conflict: pendingIdentityConflict,
+          step: "payment_deleted_identity_review_gate",
+          message: "Exclusão de pagamento registrada em ledger, mas bloqueio automático foi suprimido por conflito de identidade pendente.",
+          meta: {
+            ledgerRecorded: Boolean(ledgerResult?.ok),
+            couponFinalized: Boolean(couponFinalize?.ok || couponFinalize?.skipped),
+          },
         });
       }
 
@@ -1033,6 +1183,23 @@ export async function handleAsaasWebhookEvent(body) {
           payment,
           subscription,
           step: "subscription_inactivated_reset_checkout_state",
+        });
+      }
+
+      const pendingIdentityConflict = await getPendingIdentityConflictSafe(userId);
+      if (pendingIdentityConflict) {
+        return await handleIdentityReviewPending({
+          userId,
+          event,
+          payment,
+          subscription,
+          conflict: pendingIdentityConflict,
+          step: "subscription_inactivated_identity_review_gate",
+          message: "Inativação de assinatura registrada em ledger, mas transições automáticas dependentes de identidade foram suprimidas por conflito pendente.",
+          meta: {
+            ledgerRecorded: Boolean(ledgerResult?.ok),
+            couponFinalized: Boolean(couponFinalize?.ok || couponFinalize?.skipped),
+          },
         });
       }
 
