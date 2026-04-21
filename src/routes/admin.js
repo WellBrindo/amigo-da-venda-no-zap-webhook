@@ -297,7 +297,7 @@ function renderSidebar(activePath){
   const ap = String(activePath||"");
   const usersOpen = ap.startsWith("/admin/users") || ap.startsWith("/admin/window24h") || ap.startsWith("/admin/crm") || ap.startsWith("/admin/bulk") || ap.startsWith("/admin/feedback");
   const financeOpen = ap.startsWith("/admin/finance") || ap.startsWith("/admin/finance-");
-  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings") || ap.startsWith("/admin/admin-users");
+  const systemOpen = ap.startsWith("/admin/alerts") || ap.startsWith("/admin/ops") || ap.startsWith("/admin/audit") || ap.startsWith("/admin/inconsistencies") || ap.startsWith("/admin/copy") || ap.startsWith("/admin/asaas-test") || ap.startsWith("/admin/settings") || ap.startsWith("/admin/admin-users");
   const reportsOpen = ap.startsWith("/admin/reports");
 
   const item = (href, label, icon) => {
@@ -358,6 +358,7 @@ function renderSidebar(activePath){
       <details ${systemOpen ? "open" : ""}>
         <summary>⚙️ Sistema <span>▾</span></summary>
         ${item("/admin/alerts-ui", "Alertas", "🚨")}
+        ${item("/admin/ops-ui", "Observabilidade Operacional", "🧠")}
         ${item("/admin/audit-ui", "Auditoria administrativa", "📚")}
         ${item("/admin/inconsistencies-ui", "Inconsistências", "🩺")}
         ${item("/admin/copy-ui", "Textos do Bot", "📝")}
@@ -1858,6 +1859,330 @@ async function buildOperationalReadModel() {
   };
 }
 
+function parseOpsPeriodHours(value) {
+  const text = String(value || "24h").trim().toLowerCase();
+  if (text === "72h" || text === "3d") return 72;
+  if (text === "7d") return 24 * 7;
+  if (text === "30d") return 24 * 30;
+  return 24;
+}
+
+function safeOpsDateMs(ts) {
+  const ms = Date.parse(String(ts || ""));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function inOpsWindow(ts, nowMsValue, hours) {
+  const ms = safeOpsDateMs(ts);
+  if (!ms) return true;
+  return (nowMsValue - ms) <= (hours * 60 * 60 * 1000);
+}
+
+function opsBadgeClass(level) {
+  const normalized = normalizeOperationalLevel(level);
+  if (normalized === "error") return "danger";
+  if (normalized === "warn") return "warn";
+  if (normalized === "ok") return "ok";
+  return "info";
+}
+
+function humanizeOpsModule(moduleName) {
+  const key = normalizeOperationalModule(moduleName);
+  const map = {
+    flow: "Flow",
+    webhook_route: "Webhook",
+    meta_whatsapp: "Meta / WhatsApp",
+    asaas_client: "Asaas Client",
+    asaas_webhook: "Asaas Webhook",
+    campaigns: "Campanhas",
+    broadcast: "Broadcast",
+    pricing: "Pricing",
+    state: "State",
+    server: "Server",
+    asaas_ledger: "Ledger Asaas",
+    admin: "Admin",
+  };
+  return map[key] || key;
+}
+
+function deriveOperationalAlerts({ operational = {}, filters = {} } = {}) {
+  const alerts = [];
+  const recentErrors = Array.isArray(operational.recentErrors) ? operational.recentErrors : [];
+  const modules = Array.isArray(operational.modules) ? operational.modules : [];
+  const financial = operational.financial || {};
+  const nowIso = new Date().toISOString();
+
+  function pushAlert(payload) {
+    alerts.push({
+      id: String(payload.id || `alert_${alerts.length + 1}`),
+      level: String(payload.level || "info"),
+      title: String(payload.title || "Alerta operacional"),
+      summary: String(payload.summary || ""),
+      module: String(payload.module || "system"),
+      reason: String(payload.reason || ""),
+      recommendedAction: String(payload.recommendedAction || "Revisar eventos recentes no painel operacional."),
+      count: Number(payload.count || 0),
+      firstSeenAt: String(payload.firstSeenAt || nowIso),
+      lastSeenAt: String(payload.lastSeenAt || nowIso),
+      meta: payload.meta && typeof payload.meta === "object" ? payload.meta : {},
+    });
+  }
+
+  const topModule = modules.find((item) => Number(item?.errorCount || 0) > 0);
+  if (topModule && Number(topModule.errorCount || 0) >= 3) {
+    pushAlert({
+      id: `module_hotspot_${topModule.module}`,
+      level: Number(topModule.errorCount || 0) >= 10 ? "danger" : "warn",
+      title: `Alta concentração de erros em ${humanizeOpsModule(topModule.module)}`,
+      summary: `${humanizeOpsModule(topModule.module)} concentrou ${topModule.errorCount} erro(s) na janela consultada.`,
+      module: topModule.module,
+      reason: "Volume de falhas acima do esperado no módulo.",
+      recommendedAction: `Abrir os eventos recentes de ${humanizeOpsModule(topModule.module)} e validar a última ocorrência em ${formatDateTimeLabel(Date.parse(String(topModule.lastTs || ""))) || topModule.lastTs || "tempo não disponível"}.`,
+      count: Number(topModule.errorCount || 0),
+      firstSeenAt: String(topModule.lastTs || nowIso),
+      lastSeenAt: String(topModule.lastTs || nowIso),
+    });
+  }
+
+  const financialFailures = Number(financial.recentFailures || 0) + Number(financial.recentInconsistencies || 0);
+  if (financialFailures > 0) {
+    pushAlert({
+      id: "financial_failures",
+      level: financialFailures >= 5 ? "danger" : "warn",
+      title: "Ocorrências financeiras recentes",
+      summary: `Foram detectadas ${financialFailures} ocorrência(s) financeiras sensíveis na janela consultada.`,
+      module: "asaas_financial",
+      reason: "Falhas, expirações ou inconsistências financeiras recentes no ledger.",
+      recommendedAction: "Revisar a leitura financeira operacional e validar pagamentos falhados, expirados e inconsistências.",
+      count: financialFailures,
+      firstSeenAt: String((financial.latest && financial.latest[financial.latest.length - 1]?.ts) || nowIso),
+      lastSeenAt: String(financial.latest?.[0]?.ts || nowIso),
+    });
+  }
+
+  const campaignErrors = recentErrors.filter((item) => ["campaigns", "broadcast"].includes(String(item?.module || "")));
+  if (campaignErrors.length > 0) {
+    pushAlert({
+      id: "campaign_runtime_issue",
+      level: campaignErrors.length >= 5 ? "danger" : "warn",
+      title: "Campanhas com falhas operacionais",
+      summary: `${campaignErrors.length} evento(s) de erro/atenção relacionados a campanhas foram encontrados.`,
+      module: "campaigns",
+      reason: "Erros ou avisos recentes nos módulos de campanhas/broadcast.",
+      recommendedAction: "Revisar campanhas recentes, conflitos e últimos envios no painel operacional.",
+      count: campaignErrors.length,
+      firstSeenAt: String(campaignErrors[campaignErrors.length - 1]?.ts || nowIso),
+      lastSeenAt: String(campaignErrors[0]?.ts || nowIso),
+    });
+  }
+
+  const metaErrors = recentErrors.filter((item) => String(item?.module || "") === "meta_whatsapp");
+  if (metaErrors.length > 0) {
+    pushAlert({
+      id: "meta_whatsapp_issue",
+      level: metaErrors.length >= 5 ? "danger" : "warn",
+      title: "Falhas recentes na integração Meta / WhatsApp",
+      summary: `${metaErrors.length} evento(s) de erro/atenção foram encontrados na integração Meta / WhatsApp.`,
+      module: "meta_whatsapp",
+      reason: "Possível impacto em envio de mensagens ou autenticação do provedor.",
+      recommendedAction: "Validar últimos envios e erros do módulo Meta / WhatsApp.",
+      count: metaErrors.length,
+      firstSeenAt: String(metaErrors[metaErrors.length - 1]?.ts || nowIso),
+      lastSeenAt: String(metaErrors[0]?.ts || nowIso),
+    });
+  }
+
+  const webhookErrors = recentErrors.filter((item) => String(item?.module || "") === "webhook_route");
+  if (webhookErrors.length > 0) {
+    pushAlert({
+      id: "webhook_route_issue",
+      level: webhookErrors.length >= 5 ? "danger" : "warn",
+      title: "Falhas recentes no webhook de entrada",
+      summary: `${webhookErrors.length} evento(s) de erro/atenção foram encontrados no webhook de entrada.`,
+      module: "webhook_route",
+      reason: "Possível impacto em ingestão de mensagens ou processamento inicial do fluxo.",
+      recommendedAction: "Revisar parsing, dedupe e erros recentes do webhook.",
+      count: webhookErrors.length,
+      firstSeenAt: String(webhookErrors[webhookErrors.length - 1]?.ts || nowIso),
+      lastSeenAt: String(webhookErrors[0]?.ts || nowIso),
+    });
+  }
+
+  const fatalEvents = recentErrors.filter((item) => String(item?.level || "") === "error" && /fatal|uncaughtexception|unhandledrejection/i.test(`${item?.event || ""} ${item?.message || ""}`));
+  if (fatalEvents.length > 0) {
+    pushAlert({
+      id: "fatal_runtime_issue",
+      level: "danger",
+      title: "Evento fatal recente detectado",
+      summary: `${fatalEvents.length} evento(s) com sinal de falha fatal foram encontrados.`,
+      module: String(fatalEvents[0]?.module || "server"),
+      reason: "Há indícios de erro fatal ou exceção não tratada no runtime.",
+      recommendedAction: "Priorizar a revisão dos eventos fatais e checar estabilidade do processo no Render.",
+      count: fatalEvents.length,
+      firstSeenAt: String(fatalEvents[fatalEvents.length - 1]?.ts || nowIso),
+      lastSeenAt: String(fatalEvents[0]?.ts || nowIso),
+    });
+  }
+
+  return alerts;
+}
+
+function buildOperationalExecutiveSummary({ operational = {}, alerts = [] } = {}) {
+  const health = operational.health || {};
+  const errorsCount = Number(operational.errorsCount || 0);
+  const warningsCount = Number(operational.warningsCount || 0);
+  const financialFailures = Number(operational?.financial?.recentFailures || 0) + Number(operational?.financial?.recentInconsistencies || 0);
+  const criticalAlerts = alerts.filter((item) => String(item?.level || "") === "danger");
+  const warningAlerts = alerts.filter((item) => String(item?.level || "") === "warn");
+
+  if (criticalAlerts.length > 0) {
+    return `Crítico: ${criticalAlerts[0]?.summary || 'há falhas operacionais relevantes exigindo atenção imediata.'}`;
+  }
+  if (warningAlerts.length > 0) {
+    return `Atenção: ${warningAlerts[0]?.summary || 'foram identificados sinais de degradação operacional.'}`;
+  }
+  if (errorsCount === 0 && financialFailures === 0) {
+    return "Sistema saudável nas últimas 24h, sem falhas operacionais relevantes na janela consultada.";
+  }
+  if (warningsCount > 0) {
+    return `Atenção: ${warningsCount} aviso(s) operacional(is) foram registrados recentemente, sem concentração crítica de falhas.`;
+  }
+  return String(health.summary || "Leitura operacional disponível, sem alertas inteligentes ativos.");
+}
+
+async function buildOperationalDashboardData(filters = {}) {
+  const periodHours = parseOpsPeriodHours(filters.period);
+  const moduleFilter = normalizeOperationalModule(filters.module || "");
+  const levelFilter = normalizeOperationalLevel(filters.level || "");
+  const onlyFailures = parseBoolInput(filters.onlyFailures, false);
+  const onlyInconsistencies = parseBoolInput(filters.onlyInconsistencies, false);
+  const query = String(filters.query || filters.search || "").trim().toLowerCase();
+  const nowValue = nowMs();
+
+  const base = await buildOperationalReadModel();
+  const allEvents = Array.isArray(base.recentEvents) ? base.recentEvents : [];
+  const filteredEvents = allEvents.filter((item) => {
+    if (!inOpsWindow(item?.ts, nowValue, periodHours)) return false;
+    if (moduleFilter && moduleFilter !== "unknown" && normalizeOperationalModule(item?.module) !== moduleFilter) return false;
+    if (levelFilter && levelFilter !== "info" && normalizeOperationalLevel(item?.level) !== levelFilter) return false;
+    if (onlyFailures && !["error", "warn"].includes(normalizeOperationalLevel(item?.level))) return false;
+    if (query) {
+      const hay = [item?.module, item?.event, item?.message, item?.userId, item?.waId, item?.status, item?.errorCode]
+        .map((v) => String(v || "").toLowerCase())
+        .join(" ");
+      if (!hay.includes(query)) return false;
+    }
+    return true;
+  });
+
+  const moduleMap = new Map();
+  let errorsCount = 0;
+  let warningsCount = 0;
+  for (const item of filteredEvents) {
+    const moduleName = normalizeOperationalModule(item?.module);
+    const level = normalizeOperationalLevel(item?.level);
+    const prev = moduleMap.get(moduleName) || { module: moduleName, count: 0, errorCount: 0, warnCount: 0, infoCount: 0, lastTs: "", lastEvent: "", lastLevel: "" };
+    prev.count += 1;
+    if (level === "error") { prev.errorCount += 1; errorsCount += 1; }
+    else if (level === "warn") { prev.warnCount += 1; warningsCount += 1; }
+    else prev.infoCount += 1;
+    if (!prev.lastTs || String(item?.ts || "") > prev.lastTs) {
+      prev.lastTs = String(item?.ts || "");
+      prev.lastEvent = String(item?.event || "");
+      prev.lastLevel = level;
+    }
+    moduleMap.set(moduleName, prev);
+  }
+  const failuresByModule = Array.from(moduleMap.values()).sort((a,b)=> (b.errorCount-a.errorCount) || (b.warnCount-a.warnCount) || (b.count-a.count) || String(a.module).localeCompare(String(b.module))).slice(0,10);
+
+  const financeBase = base.financial || {};
+  const financeLatest = Array.isArray(financeBase.latest) ? financeBase.latest : [];
+  const financialLatest = financeLatest.filter((item) => {
+    if (!inOpsWindow(item?.ts, nowValue, periodHours)) return false;
+    if (onlyInconsistencies && !item?.isInconsistency) return false;
+    if (onlyFailures && !(item?.isFailure || item?.isInconsistency)) return false;
+    if (query) {
+      const hay = [item?.event, item?.eventType, item?.category, item?.status, item?.userId, item?.waId, item?.paymentId, item?.subscriptionId, item?.couponCode, item?.summary]
+        .map((v) => String(v || "").toLowerCase())
+        .join(" ");
+      if (!hay.includes(query)) return false;
+    }
+    return true;
+  });
+  const financial = {
+    totalEvents: financialLatest.length,
+    recentFailures: financialLatest.filter((item) => item?.isFailure).length,
+    recentInconsistencies: financialLatest.filter((item) => item?.isInconsistency).length,
+    latest: financialLatest.slice(0, 20),
+  };
+
+  const campaignEvents = filteredEvents.filter((item) => ["campaigns", "broadcast"].includes(normalizeOperationalModule(item?.module)));
+  const campaignSummary = {
+    recentEvents: campaignEvents.length,
+    errors: campaignEvents.filter((item) => normalizeOperationalLevel(item?.level) === "error").length,
+    warnings: campaignEvents.filter((item) => normalizeOperationalLevel(item?.level) === "warn").length,
+    latestFailure: campaignEvents.find((item) => ["error", "warn"].includes(normalizeOperationalLevel(item?.level))) || null,
+  };
+
+  const operational = {
+    ok: base.ok,
+    error: base.error,
+    totalStored: base.totalStored,
+    recentCount: filteredEvents.length,
+    errorsCount,
+    warningsCount,
+    modules: failuresByModule,
+    recentEvents: filteredEvents.slice(0, 100),
+    recentErrors: filteredEvents.filter((item) => ["error", "warn"].includes(normalizeOperationalLevel(item?.level))).slice(0, 20),
+    financial,
+    campaignSummary,
+    health: summarizeOperationalHealth({ modules: failuresByModule, errorsCount, warningsCount, financial }),
+  };
+
+  const alerts = deriveOperationalAlerts({ operational, filters });
+  const executiveSummary = buildOperationalExecutiveSummary({ operational, alerts });
+  const lastFatal = operational.recentErrors.find((item) => /fatal|uncaughtexception|unhandledrejection/i.test(`${item?.event || ""} ${item?.message || ""}`)) || null;
+  const mostUnstableModule = failuresByModule[0] || null;
+  const latestFinancialInconsistency = financial.latest.find((item) => item?.isInconsistency) || null;
+
+  return {
+    ok: operational.ok,
+    generatedAt: new Date().toISOString(),
+    filters: {
+      period: String(filters.period || "24h"),
+      module: String(filters.module || ""),
+      level: String(filters.level || ""),
+      onlyFailures,
+      onlyInconsistencies,
+      query: String(filters.query || filters.search || ""),
+    },
+    summary: {
+      totalEvents: operational.recentCount,
+      totalErrors: operational.errorsCount,
+      totalWarnings: operational.warningsCount,
+      totalFinancialEvents: financial.totalEvents,
+      totalFinancialFailures: financial.recentFailures,
+      totalFinancialInconsistencies: financial.recentInconsistencies,
+      modulesWithErrors: failuresByModule.filter((item) => Number(item?.errorCount || 0) > 0).length,
+      executiveSummary,
+      lastErrorAt: operational.recentErrors[0]?.ts || "",
+    },
+    health: operational.health,
+    failuresByModule,
+    alerts,
+    recentEvents: operational.recentEvents,
+    recentErrors: operational.recentErrors,
+    financial,
+    campaignSummary,
+    highlights: {
+      lastFatal,
+      mostUnstableModule,
+      latestFinancialInconsistency,
+      latestCampaignFailure: campaignSummary.latestFailure,
+    },
+  };
+}
+
 export function adminRouter() {
   const router = Router();
 
@@ -2726,6 +3051,301 @@ export function adminRouter() {
       scriptExtra,
     });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  });
+
+  router.get("/ops/data", async (req, res) => {
+    try {
+      const data = await buildOperationalDashboardData({
+        period: req.query?.period,
+        module: req.query?.module,
+        level: req.query?.level,
+        onlyFailures: req.query?.onlyFailures,
+        onlyInconsistencies: req.query?.onlyInconsistencies,
+        query: req.query?.q || req.query?.query,
+      });
+      return res.json(data);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/ops-ui", async (req, res) => {
+    const inner = `
+      <div class="card pad" style="margin-bottom:14px;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">🧠 Observabilidade Operacional</h3>
+            <div class="muted">Este painel mostra eventos reais de execução do sistema, separando métricas, auditoria administrativa e comportamento técnico do runtime.</div>
+          </div>
+          <div class="row">
+            <a class="pill" href="/admin/dashboard">Dashboard</a>
+            <a class="pill" href="/admin/finance-asaas-ui">Financeiro Asaas</a>
+            <a class="pill" href="/admin/audit-ui">Auditoria administrativa</a>
+            <button type="button" class="primary" id="reloadOpsBtn">Atualizar</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card pad" style="margin-bottom:12px;">
+        <div class="row" style="gap:8px; align-items:flex-end;">
+          <div>
+            <div class="muted" style="font-size:12px; margin-bottom:4px;">Período</div>
+            <select id="opsPeriod">
+              <option value="24h">Últimas 24h</option>
+              <option value="72h">Últimos 3 dias</option>
+              <option value="7d">Últimos 7 dias</option>
+              <option value="30d">Últimos 30 dias</option>
+            </select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px; margin-bottom:4px;">Módulo</div>
+            <select id="opsModule">
+              <option value="">Todos</option>
+              <option value="flow">Flow</option>
+              <option value="webhook_route">Webhook</option>
+              <option value="meta_whatsapp">Meta / WhatsApp</option>
+              <option value="asaas_client">Asaas Client</option>
+              <option value="asaas_webhook">Asaas Webhook</option>
+              <option value="campaigns">Campanhas</option>
+              <option value="broadcast">Broadcast</option>
+              <option value="pricing">Pricing</option>
+              <option value="state">State</option>
+              <option value="server">Server</option>
+              <option value="asaas_ledger">Ledger Asaas</option>
+            </select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px; margin-bottom:4px;">Nível</div>
+            <select id="opsLevel">
+              <option value="">Todos</option>
+              <option value="error">Erro</option>
+              <option value="warn">Aviso</option>
+              <option value="info">Info</option>
+            </select>
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px; margin-bottom:4px;">Buscar</div>
+            <input id="opsQuery" placeholder="userId, paymentId, campaignId..." />
+          </div>
+          <label class="pill"><input type="checkbox" id="opsOnlyFailures" style="margin-right:6px;" /> Somente falhas</label>
+          <label class="pill"><input type="checkbox" id="opsOnlyInconsistencies" style="margin-right:6px;" /> Somente inconsistências</label>
+          <button type="button" id="applyOpsFilters" class="primary">Aplicar</button>
+        </div>
+      </div>
+
+      <div class="card pad" style="margin-bottom:12px;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+          <div>
+            <h4 style="margin:0 0 6px 0;">Resumo automático</h4>
+            <div class="muted" id="opsExecutiveSummary">Carregando leitura operacional...</div>
+          </div>
+          <div class="pill" id="opsHealthPill">Saúde operacional: —</div>
+        </div>
+      </div>
+
+      <div class="grid cols3">
+        <div class="kpi"><div class="t">Eventos recentes</div><div class="v" id="opsTotalEvents">—</div><div class="muted">Leitura operacional na janela consultada</div></div>
+        <div class="kpi"><div class="t">Erros recentes</div><div class="v" id="opsTotalErrors">—</div><div class="muted">Falhas em runtime</div></div>
+        <div class="kpi"><div class="t">Warnings recentes</div><div class="v" id="opsTotalWarnings">—</div><div class="muted">Eventos que exigem atenção</div></div>
+      </div>
+      <div class="grid cols3" style="margin-top:12px;">
+        <div class="kpi"><div class="t">Falhas financeiras</div><div class="v" id="opsFinanceFailures">—</div><div class="muted">Pagamentos/expirações recentes</div></div>
+        <div class="kpi"><div class="t">Inconsistências financeiras</div><div class="v" id="opsFinanceInconsistencies">—</div><div class="muted">Ledger operacional</div></div>
+        <div class="kpi"><div class="t">Módulos com erro</div><div class="v" id="opsModulesWithErrors">—</div><div class="muted">Hotspots operacionais</div></div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Alertas automáticos inteligentes</h4><span class="muted">Derivados dos eventos reais</span></div>
+          <div class="hr"></div>
+          <div id="opsAlertsList" class="grid"></div>
+        </div>
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Destaques rápidos</h4><span class="muted">Resumo executivo</span></div>
+          <div class="hr"></div>
+          <div id="opsHighlights"></div>
+        </div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Falhas por módulo</h4><span class="muted">Top 10</span></div>
+          <div class="hr"></div>
+          <div style="overflow:auto;"><table><thead><tr><th>Módulo</th><th>Erros</th><th>Avisos</th><th>Último evento</th><th>Severidade</th></tr></thead><tbody id="opsModulesBody"><tr><td colspan="5" class="muted">Carregando...</td></tr></tbody></table></div>
+        </div>
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Campanhas sob ótica operacional</h4><span class="muted">Runtime recente</span></div>
+          <div class="hr"></div>
+          <div id="opsCampaignSummary"></div>
+        </div>
+      </div>
+
+      <div class="grid cols2" style="margin-top:14px;">
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Últimos erros / avisos</h4><span class="muted">Máx. 20</span></div>
+          <div class="hr"></div>
+          <div style="overflow:auto;"><table><thead><tr><th>Tempo</th><th>Módulo</th><th>Evento</th><th>Nível</th><th>Status</th><th>Resumo</th></tr></thead><tbody id="opsErrorsBody"><tr><td colspan="6" class="muted">Carregando...</td></tr></tbody></table></div>
+        </div>
+        <div class="card pad">
+          <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Últimos eventos operacionais</h4><span class="muted">Máx. 100</span></div>
+          <div class="hr"></div>
+          <div style="overflow:auto;"><table><thead><tr><th>Tempo</th><th>Módulo</th><th>Evento</th><th>Nível</th><th>Status</th><th>Usuário</th></tr></thead><tbody id="opsEventsBody"><tr><td colspan="6" class="muted">Carregando...</td></tr></tbody></table></div>
+        </div>
+      </div>
+
+      <div class="card pad" style="margin-top:14px;">
+        <div class="row" style="justify-content:space-between;"><h4 style="margin:0;">Leitura financeira operacional</h4><span class="muted">Ledger / Asaas</span></div>
+        <div class="hr"></div>
+        <div class="grid cols3" style="margin-bottom:10px;">
+          <div class="pill">Eventos: <b id="opsFinTotal">—</b></div>
+          <div class="pill">Falhas: <b id="opsFinFailures">—</b></div>
+          <div class="pill">Inconsistências: <b id="opsFinInconsistencies">—</b></div>
+        </div>
+        <div style="overflow:auto;"><table><thead><tr><th>Tempo</th><th>Evento</th><th>Categoria</th><th>Status</th><th>Severidade</th><th>Referência</th><th>Resumo</th></tr></thead><tbody id="opsFinancialBody"><tr><td colspan="7" class="muted">Carregando...</td></tr></tbody></table></div>
+      </div>
+    `;
+
+    const scriptExtra = `
+      <script>
+        (function(){
+          function esc(v){ return String(v ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;'); }
+          function badge(level){
+            const normalized = String(level || '').toLowerCase();
+            if (normalized === 'danger' || normalized === 'error') return '<span class="badge danger">ERRO</span>';
+            if (normalized === 'warn' || normalized === 'warning') return '<span class="badge warn">AVISO</span>';
+            if (normalized === 'ok') return '<span class="badge ok">OK</span>';
+            return '<span class="badge info">INFO</span>';
+          }
+          function fmt(value){
+            if (!value) return '—';
+            try { return new Date(value).toLocaleString('pt-BR'); } catch(_) { return String(value); }
+          }
+          function humanModule(value){
+            const key = String(value || '').trim();
+            const map = { flow:'Flow', webhook_route:'Webhook', meta_whatsapp:'Meta / WhatsApp', asaas_client:'Asaas Client', asaas_webhook:'Asaas Webhook', campaigns:'Campanhas', broadcast:'Broadcast', pricing:'Pricing', state:'State', server:'Server', asaas_ledger:'Ledger Asaas' };
+            return map[key] || key || '—';
+          }
+          async function loadOps(){
+            const p = new URLSearchParams();
+            const period = document.getElementById('opsPeriod').value;
+            const module = document.getElementById('opsModule').value;
+            const level = document.getElementById('opsLevel').value;
+            const query = document.getElementById('opsQuery').value;
+            if (period) p.set('period', period);
+            if (module) p.set('module', module);
+            if (level) p.set('level', level);
+            if (query) p.set('q', query);
+            if (document.getElementById('opsOnlyFailures').checked) p.set('onlyFailures', '1');
+            if (document.getElementById('opsOnlyInconsistencies').checked) p.set('onlyInconsistencies', '1');
+            const res = await fetch('/admin/ops/data?' + p.toString());
+            const data = await res.json();
+            if (!res.ok || data.ok === false) throw new Error(data.error || 'Falha ao carregar observabilidade operacional');
+
+            const summary = data.summary || {};
+            const health = data.health || {};
+            document.getElementById('opsExecutiveSummary').textContent = summary.executiveSummary || 'Sem leitura resumida.';
+            document.getElementById('opsHealthPill').innerHTML = 'Saúde operacional: ' + badge(health.level || 'info') + ' <span class="muted">' + esc(health.summary || 'Sem leitura disponível') + '</span>';
+            document.getElementById('opsTotalEvents').textContent = summary.totalEvents ?? 0;
+            document.getElementById('opsTotalErrors').textContent = summary.totalErrors ?? 0;
+            document.getElementById('opsTotalWarnings').textContent = summary.totalWarnings ?? 0;
+            document.getElementById('opsFinanceFailures').textContent = summary.totalFinancialFailures ?? 0;
+            document.getElementById('opsFinanceInconsistencies').textContent = summary.totalFinancialInconsistencies ?? 0;
+            document.getElementById('opsModulesWithErrors').textContent = summary.modulesWithErrors ?? 0;
+            document.getElementById('opsFinTotal').textContent = data?.financial?.totalEvents ?? 0;
+            document.getElementById('opsFinFailures').textContent = data?.financial?.recentFailures ?? 0;
+            document.getElementById('opsFinInconsistencies').textContent = data?.financial?.recentInconsistencies ?? 0;
+
+            const alerts = Array.isArray(data.alerts) ? data.alerts : [];
+            document.getElementById('opsAlertsList').innerHTML = alerts.length ? alerts.map(function(item){
+              return '<div class="card pad">' +
+                '<div class="row" style="justify-content:space-between; align-items:flex-start; gap:10px;">' +
+                  '<div><div style="font-weight:800;">' + esc(item.title || 'Alerta') + '</div><div class="muted" style="margin-top:4px;">' + esc(item.summary || '') + '</div></div>' +
+                  '<div>' + badge(item.level) + '</div>' +
+                '</div>' +
+                '<div class="hr"></div>' +
+                '<div class="muted">Módulo: <b>' + esc(humanModule(item.module)) + '</b> · Ocorrências: <b>' + esc(item.count || 0) + '</b></div>' +
+                '<div class="muted" style="margin-top:4px;">Ação sugerida: ' + esc(item.recommendedAction || 'Revisar detalhes operacionais.') + '</div>' +
+              '</div>';
+            }).join('') : '<div class="muted">Nenhum alerta automático ativo na janela consultada.</div>';
+
+            const highlights = data.highlights || {};
+            const hl = [];
+            if (highlights.lastFatal) hl.push('<div class="pill">Último fatal: <b>' + esc(humanModule(highlights.lastFatal.module)) + '</b> · ' + esc(fmt(highlights.lastFatal.ts)) + '</div>');
+            if (highlights.mostUnstableModule) hl.push('<div class="pill">Módulo mais instável: <b>' + esc(humanModule(highlights.mostUnstableModule.module)) + '</b> · ' + esc(highlights.mostUnstableModule.errorCount || 0) + ' erro(s)</div>');
+            if (highlights.latestFinancialInconsistency) hl.push('<div class="pill">Última inconsistência financeira: <b>' + esc(highlights.latestFinancialInconsistency.eventType || highlights.latestFinancialInconsistency.event || 'financeiro') + '</b></div>');
+            if (highlights.latestCampaignFailure) hl.push('<div class="pill">Última falha de campanha: <b>' + esc(humanModule(highlights.latestCampaignFailure.module)) + '</b> · ' + esc(fmt(highlights.latestCampaignFailure.ts)) + '</div>');
+            document.getElementById('opsHighlights').innerHTML = hl.length ? '<div class="row">' + hl.join('') + '</div>' : '<div class="muted">Sem destaques críticos no momento.</div>';
+
+            const modules = Array.isArray(data.failuresByModule) ? data.failuresByModule : [];
+            document.getElementById('opsModulesBody').innerHTML = modules.length ? modules.map(function(item){
+              return '<tr>' +
+                '<td>' + esc(humanModule(item.module)) + '</td>' +
+                '<td>' + esc(item.errorCount || 0) + '</td>' +
+                '<td>' + esc(item.warnCount || 0) + '</td>' +
+                '<td>' + esc(item.lastEvent || '—') + '<div class="muted">' + esc(fmt(item.lastTs)) + '</div></td>' +
+                '<td>' + badge(item.lastLevel || 'info') + '</td>' +
+              '</tr>';
+            }).join('') : '<tr><td colspan="5" class="muted">Sem falhas por módulo na janela consultada.</td></tr>';
+
+            const campaign = data.campaignSummary || {};
+            document.getElementById('opsCampaignSummary').innerHTML = '<div class="grid cols2">' +
+              '<div class="pill">Eventos recentes: <b>' + esc(campaign.recentEvents || 0) + '</b></div>' +
+              '<div class="pill">Erros: <b>' + esc(campaign.errors || 0) + '</b></div>' +
+              '<div class="pill">Avisos: <b>' + esc(campaign.warnings || 0) + '</b></div>' +
+              '<div class="pill">Última falha: <b>' + esc(campaign.latestFailure ? fmt(campaign.latestFailure.ts) : '—') + '</b></div>' +
+            '</div>';
+
+            const recentErrors = Array.isArray(data.recentErrors) ? data.recentErrors : [];
+            document.getElementById('opsErrorsBody').innerHTML = recentErrors.length ? recentErrors.map(function(item){
+              return '<tr>' +
+                '<td>' + esc(fmt(item.ts)) + '</td>' +
+                '<td>' + esc(humanModule(item.module)) + '</td>' +
+                '<td>' + esc(item.event || '—') + '</td>' +
+                '<td>' + badge(item.level || 'info') + '</td>' +
+                '<td>' + esc(item.status || '—') + '</td>' +
+                '<td>' + esc(item.message || item.errorCode || '—') + '</td>' +
+              '</tr>';
+            }).join('') : '<tr><td colspan="6" class="muted">Sem erros ou avisos recentes na janela consultada.</td></tr>';
+
+            const recentEvents = Array.isArray(data.recentEvents) ? data.recentEvents : [];
+            document.getElementById('opsEventsBody').innerHTML = recentEvents.length ? recentEvents.map(function(item){
+              return '<tr>' +
+                '<td>' + esc(fmt(item.ts)) + '</td>' +
+                '<td>' + esc(humanModule(item.module)) + '</td>' +
+                '<td>' + esc(item.event || '—') + '</td>' +
+                '<td>' + badge(item.level || 'info') + '</td>' +
+                '<td>' + esc(item.status || '—') + '</td>' +
+                '<td>' + esc(item.userId || item.waId || '—') + '</td>' +
+              '</tr>';
+            }).join('') : '<tr><td colspan="6" class="muted">Sem eventos recentes na janela consultada.</td></tr>';
+
+            const fin = data.financial || {};
+            const finRows = Array.isArray(fin.latest) ? fin.latest : [];
+            document.getElementById('opsFinancialBody').innerHTML = finRows.length ? finRows.map(function(item){
+              const ref = item.paymentId || item.subscriptionId || item.userId || item.waId || '—';
+              return '<tr>' +
+                '<td>' + esc(fmt(item.ts)) + '</td>' +
+                '<td>' + esc(item.eventType || item.event || '—') + '</td>' +
+                '<td>' + esc(item.category || '—') + '</td>' +
+                '<td>' + esc(item.status || '—') + '</td>' +
+                '<td>' + badge(item.severity || (item.isFailure ? 'error' : (item.isInconsistency ? 'warn' : 'info'))) + '</td>' +
+                '<td>' + esc(ref) + '</td>' +
+                '<td>' + esc(item.summary || item.message || '—') + '</td>' +
+              '</tr>';
+            }).join('') : '<tr><td colspan="7" class="muted">Sem eventos financeiros operacionais na janela consultada.</td></tr>';
+          }
+
+          document.getElementById('reloadOpsBtn').addEventListener('click', loadOps);
+          document.getElementById('applyOpsFilters').addEventListener('click', loadOps);
+          loadOps().catch(function(err){
+            document.getElementById('opsExecutiveSummary').textContent = String(err?.message || err || 'Falha ao carregar observabilidade operacional.');
+          });
+        })();
+      </script>
+    `;
+
+    const html = layoutBase({ title: "Observabilidade Operacional", activePath: "/admin/ops-ui", content: inner, scriptExtra });
     return res.status(200).send(html);
   });
 
@@ -3804,6 +4424,7 @@ router.get("/", async (req, res) => {
               <a class="pill" href="/admin/health-plans">🧾 Health Planos (JSON)</a>
               <a class="pill" href="/admin/alerts-ui">🚨 Alertas</a>
               <a class="pill" href="/admin/audit-ui">📚 Auditoria</a>
+              <a class="pill" href="/admin/ops-ui">🧠 Observabilidade Operacional</a>
               <a class="pill" href="/admin/executive-ui">🧠 Dashboard Executivo</a>
               <a class="pill" href="/admin/reports-ui">📑 Relatórios</a>
               <a class="pill" href="/admin/asaas-test-ui">🧪 Asaas Teste</a>
