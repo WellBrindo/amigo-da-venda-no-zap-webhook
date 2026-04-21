@@ -11,6 +11,7 @@
 
 import * as metrics from "../metrics.js";
 import * as audit from "../audit.js";
+import { getPendingIdentityConflictForUser } from "../identity.js";
 
 function env(name, def = "") {
   return String(process.env[name] || def).trim();
@@ -111,6 +112,7 @@ export const ASAAS_CLIENT_ERROR_CODE = Object.freeze({
   PAYMENT_LINK: "ASAAS_PAYMENT_LINK_ERROR",
   SUBSCRIPTION: "ASAAS_SUBSCRIPTION_ERROR",
   RESPONSE_PARSE: "ASAAS_RESPONSE_PARSE_ERROR",
+  IDENTITY_REVIEW_REQUIRED: "ASAAS_IDENTITY_REVIEW_REQUIRED",
   UNKNOWN: "ASAAS_UNKNOWN_ERROR",
 });
 
@@ -323,6 +325,48 @@ function assertRequiredString(value, label, { errorCode = ASAAS_CLIENT_ERROR_COD
     });
   }
   return text;
+}
+
+async function assertNoPendingIdentityConflictForQuote(quote = {}, { source = "asaas_client", step = "identityReviewGate" } = {}) {
+  const internalUserId = safeStr(quote?.internalUserId);
+  if (!internalUserId) return null;
+
+  let conflict = null;
+  try {
+    conflict = await getPendingIdentityConflictForUser(internalUserId);
+  } catch (cause) {
+    throw buildAsaasClientError({
+      errorCode: ASAAS_CLIENT_ERROR_CODE.IDENTITY_REVIEW_REQUIRED,
+      message: "Unable to confirm identity review state before financial materialization.",
+      retryable: false,
+      httpStatus: 409,
+      source,
+      step,
+      cause,
+      context: {
+        internalUserId,
+        identityReviewLookupFailed: true,
+      },
+    });
+  }
+
+  if (!conflict) return null;
+
+  throw buildAsaasClientError({
+    errorCode: ASAAS_CLIENT_ERROR_CODE.IDENTITY_REVIEW_REQUIRED,
+    message: "Checkout requires internal validation before financial materialization.",
+    retryable: false,
+    httpStatus: 409,
+    source,
+    step,
+    context: {
+      internalUserId,
+      conflictId: safeStr(conflict?.conflictId),
+      conflictStatus: safeStr(conflict?.status || "PENDING_REVIEW"),
+      blockSensitiveOps: Boolean(conflict?.blockSensitiveOps),
+      classification: "identity_review_block",
+    },
+  });
 }
 
 function normalizeQuotePayload(quote = {}) {
@@ -680,6 +724,11 @@ export async function createPixPaymentFromQuote({
   trackCheckoutLifecycle = false,
   source = "asaas_client",
 }) {
+  await assertNoPendingIdentityConflictForQuote(quote, {
+    source,
+    step: "createPixPaymentFromQuote:identity_review_gate",
+  });
+
   const context = buildAsaasChargeContextFromQuote({
     quote,
     paymentMethod: "pix",
@@ -816,6 +865,11 @@ export async function createRecurringCardPaymentLinkFromQuote({
   trackCheckoutLifecycle = false,
   source = "asaas_client",
 }) {
+  await assertNoPendingIdentityConflictForQuote(quote, {
+    source,
+    step: "createRecurringCardPaymentLinkFromQuote:identity_review_gate",
+  });
+
   const context = buildAsaasChargeContextFromQuote({
     quote,
     paymentMethod: "credit_card",
@@ -920,6 +974,10 @@ export async function createAsaasCheckoutFromQuote({
   const method = safeLower(paymentMethod);
 
   try {
+    await assertNoPendingIdentityConflictForQuote(quote, {
+      source,
+      step: "createAsaasCheckoutFromQuote:identity_review_gate",
+    });
     if (method === "pix") {
       return await createPixPaymentFromQuote({
         customerId,
