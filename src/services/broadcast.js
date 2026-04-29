@@ -19,6 +19,7 @@ import {
   redisLRange,
   redisLTrim,
   redisExpire,
+  getRedisHealthSnapshot,
 } from "./redis.js";
 
 import {
@@ -36,7 +37,7 @@ import { sendWhatsAppText } from "./meta/whatsapp.js";
 import * as metrics from "./metrics.js";
 import * as audit from "./audit.js";
 import { getCopyText } from "./copy.js";
-import { pushSystemAlert } from "./alerts.js";
+import { pushSystemAlert, raiseSystemIncident } from "./alerts.js";
 import { getInternalUserIdByWaId, getPreferredOutboundRecipient, getPendingIdentityConflictForUser } from "./identity.js";
 import {
   listExpiredPendingCouponReservations,
@@ -254,11 +255,94 @@ async function reportBroadcastFailure({
   return { ...context, message };
 }
 
+
+async function reportBroadcastDegraded({
+  error,
+  errorCode = BROADCAST_ERROR.PERSISTENCE,
+  campaignId = "",
+  campaignCode = "",
+  userId = "",
+  recipient = "",
+  step = "",
+  impact = "",
+  severity = "HIGH",
+  extra = {},
+} = {}) {
+  const context = buildBroadcastErrorContext({
+    errorCode, campaignId, campaignCode, userId, recipient, step, extra,
+  });
+  const message = extractErrorMessage(error);
+  const redisStatus = typeof getRedisHealthSnapshot === "function"
+    ? safeStr(getRedisHealthSnapshot()?.status) || "DEGRADED"
+    : "DEGRADED";
+
+  await logBroadcastOperational({
+    event: safeStr(step) || "broadcast_degraded",
+    level: "warn",
+    status: "degraded",
+    message,
+    ...context,
+    meta: {
+      impact: safeStr(impact),
+      severity: safeStr(severity),
+      redisStatus,
+      ...(extra && typeof extra === "object" ? extra : {}),
+    },
+  });
+
+  try {
+    if (redisStatus === "DOWN" && typeof metrics.trackRedisDown === "function") {
+      await metrics.trackRedisDown({
+        userId: safeStr(userId),
+        waId: safeStr(recipient),
+        source: "broadcast",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    } else if (typeof metrics.trackRedisDegraded === "function") {
+      await metrics.trackRedisDegraded({
+        userId: safeStr(userId),
+        waId: safeStr(recipient),
+        source: "broadcast",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    }
+  } catch {}
+
+  try {
+    await raiseSystemIncident({
+      type: "REDIS",
+      severity: safeStr(severity) || "HIGH",
+      module: "broadcast",
+      step: safeStr(step),
+      errorCode: safeStr(errorCode),
+      message,
+      impact: safeStr(impact),
+      dedupeKey: ["broadcast", safeStr(step), safeStr(errorCode), safeStr(impact), safeStr(campaignId)].filter(Boolean).join("|"),
+      meta: {
+        campaignId: safeStr(campaignId),
+        campaignCode: safeStr(campaignCode),
+        userId: safeStr(userId),
+        recipient: safeStr(recipient),
+        redisStatus,
+        ...(extra && typeof extra === "object" ? extra : {}),
+      },
+    });
+  } catch {}
+
+  return { ...context, message, classification: "degraded" };
+}
+
 async function redisBestEffort(action, fallback, failureContext = {}) {
   try {
     return await action();
   } catch (error) {
-    await reportBroadcastFailure({
+    await reportBroadcastDegraded({
       error,
       errorCode: BROADCAST_ERROR.PERSISTENCE,
       step: failureContext.step || "redis_operation",
@@ -266,6 +350,8 @@ async function redisBestEffort(action, fallback, failureContext = {}) {
       campaignCode: failureContext.campaignCode,
       userId: failureContext.userId,
       recipient: failureContext.recipient,
+      impact: safeStr(failureContext.impact || "redis_persistence_fallback"),
+      severity: safeStr(failureContext.severity || "HIGH"),
       extra: failureContext.extra,
     });
     return fallback;
@@ -390,12 +476,14 @@ async function recordError(id, userRef, errorMsg) {
     await ensureCampaignTTL(id);
     return true;
   } catch (error) {
-    await reportBroadcastFailure({
+    await reportBroadcastDegraded({
       error,
       errorCode: BROADCAST_ERROR.PERSISTENCE,
       campaignId: safeStr(id),
       userId: safeStr(userRef),
       step: "record_campaign_error",
+      impact: "campaign_error_log_persistence_failed",
+      severity: "MEDIUM",
       extra: { originalError: entry.error },
     });
     return false;
@@ -692,17 +780,60 @@ export async function createCampaignAndDispatch({
     const recipient = safeStr(entry?.recipient);
     try {
       await sendWhatsAppText({ to: recipient, text: msg });
-      await redisBestEffort(() => redisSAdd(campaignKeySent(campaign.id), userId), 0, { campaignId: campaign.id, campaignCode: campaign.code, userId, recipient, step: "mark_campaign_sent" });
-      await markCampaignSent(campaign.id, userId, {
-        source: "broadcast",
-        details: buildCampaignDispatchDetails({
-          dispatchSource: "manual_dispatch",
+      const markSentStored = await redisBestEffort(
+        () => redisSAdd(campaignKeySent(campaign.id), userId),
+        0,
+        {
+          campaignId: campaign.id,
+          campaignCode: campaign.code,
+          userId,
           recipient,
-          channel: entry?.channel,
-          runtimeMeta,
-          campaign,
-        }),
-      }).catch(() => ({}));
+          step: "mark_campaign_sent",
+          impact: "post_send_sent_set_persistence",
+          severity: "CRITICAL",
+        }
+      );
+      if (!Number(markSentStored || 0)) {
+        await reportBroadcastDegraded({
+          error: "Campaign delivered but sent persistence could not be confirmed",
+          errorCode: BROADCAST_ERROR.PERSISTENCE,
+          campaignId: campaign.id,
+          campaignCode: campaign.code,
+          userId,
+          recipient,
+          step: "mark_campaign_sent",
+          impact: "post_send_sent_set_persistence",
+          severity: "CRITICAL",
+          extra: { classification: "critical_post_send_persistence" },
+        });
+        continue;
+      }
+
+      try {
+        await markCampaignSent(campaign.id, userId, {
+          source: "broadcast",
+          details: buildCampaignDispatchDetails({
+            dispatchSource: "manual_dispatch",
+            recipient,
+            channel: entry?.channel,
+            runtimeMeta,
+            campaign,
+          }),
+        });
+      } catch (error) {
+        await reportBroadcastDegraded({
+          error,
+          errorCode: BROADCAST_ERROR.PERSISTENCE,
+          campaignId: campaign.id,
+          campaignCode: campaign.code,
+          userId,
+          recipient,
+          step: "mark_campaign_sent_core",
+          impact: "post_send_campaign_sent_core_failed",
+          severity: "CRITICAL",
+        });
+        continue;
+      }
     } catch (error) {
       await reportBroadcastFailure({
         error,
@@ -832,18 +963,64 @@ export async function reprocessCampaignForActiveWindow(campaignId, { limit = 500
 
       attempted += 1;
       await sendWhatsAppText({ to: recipient, text: msg });
-      await redisBestEffort(() => redisSAdd(campaignKeySent(id), userId), 0, { campaignId: id, campaignCode: campaign.code, userId, recipient, step: "reprocess_mark_sent" });
-      await redisBestEffort(() => redisSRem(campaignKeyPending(id), userId), 0, { campaignId: id, campaignCode: campaign.code, userId, recipient, step: "reprocess_remove_pending" });
-      await markCampaignSent(id, userId, {
-        source: "broadcast",
-        details: buildCampaignDispatchDetails({
-          dispatchSource: "reprocess_active_window",
+      const reprocessSentStored = await redisBestEffort(() => redisSAdd(campaignKeySent(id), userId), 0, {
+        campaignId: id,
+        campaignCode: campaign.code,
+        userId,
+        recipient,
+        step: "reprocess_mark_sent",
+        impact: "post_send_sent_set_persistence",
+        severity: "CRITICAL",
+      });
+      if (!Number(reprocessSentStored || 0)) {
+        await reportBroadcastDegraded({
+          error: "Reprocess delivery succeeded but sent persistence could not be confirmed",
+          errorCode: BROADCAST_ERROR.PERSISTENCE,
+          campaignId: id,
+          campaignCode: campaign.code,
+          userId,
           recipient,
-          channel: recipientInfo?.channel,
-          runtimeMeta,
-          campaign,
-        }),
-      }).catch(() => ({}));
+          step: "reprocess_mark_sent",
+          impact: "post_send_sent_set_persistence",
+          severity: "CRITICAL",
+        });
+        continue;
+      }
+
+      await redisBestEffort(() => redisSRem(campaignKeyPending(id), userId), 0, {
+        campaignId: id,
+        campaignCode: campaign.code,
+        userId,
+        recipient,
+        step: "reprocess_remove_pending",
+        impact: "pending_set_cleanup_failed",
+        severity: "HIGH",
+      });
+      try {
+        await markCampaignSent(id, userId, {
+          source: "broadcast",
+          details: buildCampaignDispatchDetails({
+            dispatchSource: "reprocess_active_window",
+            recipient,
+            channel: recipientInfo?.channel,
+            runtimeMeta,
+            campaign,
+          }),
+        });
+      } catch (error) {
+        await reportBroadcastDegraded({
+          error,
+          errorCode: BROADCAST_ERROR.PERSISTENCE,
+          campaignId: id,
+          campaignCode: campaign.code,
+          userId,
+          recipient,
+          step: "reprocess_mark_campaign_sent_core",
+          impact: "post_send_campaign_sent_core_failed",
+          severity: "CRITICAL",
+        });
+        continue;
+      }
       sent += 1;
     } catch (error) {
       errors += 1;
@@ -933,19 +1110,67 @@ export async function processPendingForWaId(waId) {
       }
 
       await sendWhatsAppText({ to: recipient, text: msg });
-      await redisBestEffort(() => redisSAdd(campaignKeySent(cpId), id), 0, { campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient, step: "process_pending_mark_sent" });
-      await redisBestEffort(() => redisSRem(campaignKeyPending(cpId), id), 0, { campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient, step: "process_pending_remove_pending" });
-      await markCampaignSent(cpId, id, {
-        source: "broadcast",
-        details: buildCampaignDispatchDetails({
-          dispatchSource: "pending_after_inbound",
+      const pendingSentStored = await redisBestEffort(() => redisSAdd(campaignKeySent(cpId), id), 0, {
+        campaignId: cpId,
+        campaignCode: campaign?.code,
+        userId: id,
+        recipient,
+        step: "process_pending_mark_sent",
+        impact: "post_send_sent_set_persistence",
+        severity: "CRITICAL",
+      });
+      if (!Number(pendingSentStored || 0)) {
+        await reportBroadcastDegraded({
+          error: "Pending campaign delivered but sent persistence could not be confirmed",
+          errorCode: BROADCAST_ERROR.PERSISTENCE,
+          campaignId: cpId,
+          campaignCode: campaign?.code,
+          userId: id,
           recipient,
-          channel: recipientInfo?.channel,
-          runtimeMeta,
-          campaign: campaign || { id: cpId },
+          step: "process_pending_mark_sent",
+          impact: "post_send_sent_set_persistence",
+          severity: "CRITICAL",
           extra: { inboundWaId },
-        }),
-      }).catch(() => ({}));
+        });
+        continue;
+      }
+
+      await redisBestEffort(() => redisSRem(campaignKeyPending(cpId), id), 0, {
+        campaignId: cpId,
+        campaignCode: campaign?.code,
+        userId: id,
+        recipient,
+        step: "process_pending_remove_pending",
+        impact: "pending_set_cleanup_failed",
+        severity: "HIGH",
+      });
+      try {
+        await markCampaignSent(cpId, id, {
+          source: "broadcast",
+          details: buildCampaignDispatchDetails({
+            dispatchSource: "pending_after_inbound",
+            recipient,
+            channel: recipientInfo?.channel,
+            runtimeMeta,
+            campaign: campaign || { id: cpId },
+            extra: { inboundWaId },
+          }),
+        });
+      } catch (error) {
+        await reportBroadcastDegraded({
+          error,
+          errorCode: BROADCAST_ERROR.PERSISTENCE,
+          campaignId: cpId,
+          campaignCode: campaign?.code,
+          userId: id,
+          recipient,
+          step: "process_pending_mark_campaign_sent_core",
+          impact: "post_send_campaign_sent_core_failed",
+          severity: "CRITICAL",
+          extra: { inboundWaId },
+        });
+        continue;
+      }
       processed += 1;
 
       const pendingLeft = await redisBestEffort(() => redisSCard(campaignKeyPending(cpId)), 0, { campaignId: cpId, campaignCode: campaign?.code, userId: id, recipient, step: "process_pending_pending_left" });
@@ -1177,19 +1402,58 @@ async function dispatchLifecycleWinner(userId, evaluation) {
     }
 
     await sendWhatsAppText({ to: recipient, text });
-    await markCampaignSent(campaign.id, userId, {
-      source: "broadcast",
-      details: buildCampaignDispatchDetails({
-        dispatchSource: "lifecycle_automation",
+    const lifecycleSentStored = await redisBestEffort(() => redisSAdd(campaignKeySent(campaign.id), userId), 0, {
+      campaignId: campaign.id,
+      campaignCode: campaign.code,
+      userId,
+      recipient,
+      step: "dispatch_lifecycle_mark_sent",
+      impact: "post_send_sent_set_persistence",
+      severity: "CRITICAL",
+    });
+    if (!Number(lifecycleSentStored || 0)) {
+      await reportBroadcastDegraded({
+        error: "Lifecycle campaign delivered but sent persistence could not be confirmed",
+        errorCode: BROADCAST_ERROR.PERSISTENCE,
+        campaignId: campaign.id,
+        campaignCode: campaign.code,
+        userId,
         recipient,
-        channel: recipientInfo?.channel,
-        campaign,
-        extra: {
-          evaluationReason: safeStr(evaluation?.primaryReason),
-          evaluationAt: safeStr(evaluation?.evaluatedAt),
-        },
-      }),
-    }).catch(() => ({}));
+        step: "dispatch_lifecycle_mark_sent",
+        impact: "post_send_sent_set_persistence",
+        severity: "CRITICAL",
+      });
+      return { sent: false, degraded: true };
+    }
+
+    try {
+      await markCampaignSent(campaign.id, userId, {
+        source: "broadcast",
+        details: buildCampaignDispatchDetails({
+          dispatchSource: "lifecycle_automation",
+          recipient,
+          channel: recipientInfo?.channel,
+          campaign,
+          extra: {
+            evaluationReason: safeStr(evaluation?.primaryReason),
+            evaluationAt: safeStr(evaluation?.evaluatedAt),
+          },
+        }),
+      });
+    } catch (error) {
+      await reportBroadcastDegraded({
+        error,
+        errorCode: BROADCAST_ERROR.PERSISTENCE,
+        campaignId: campaign.id,
+        campaignCode: campaign.code,
+        userId,
+        recipient,
+        step: "dispatch_lifecycle_mark_campaign_sent_core",
+        impact: "post_send_campaign_sent_core_failed",
+        severity: "CRITICAL",
+      });
+      return { sent: false, degraded: true };
+    }
     return { sent: true, campaignId: campaign.id };
   } catch (error) {
     await reportBroadcastFailure({ error, errorCode: BROADCAST_ERROR.SEND, campaignId: campaign.id, campaignCode: campaign.code, userId, step: "dispatch_lifecycle_winner", metricsKind: "whatsapp" });
