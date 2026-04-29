@@ -45,7 +45,8 @@ const ADMIN_AUTH_CODE = Object.freeze({
 const ADMIN_PERMISSION_CATALOG = [
   { key: "dashboard.view", label: "Dashboard", description: "Pode acessar a visão inicial, dashboard operacional e executivo." },
   { key: "reports.view", label: "Relatórios", description: "Pode abrir relatórios e exportações do Admin." },
-  { key: "users.manage", label: "Usuários", description: "Pode consultar usuários, CRM, ações em massa e janela de 24h." },
+  { key: "users.manage", label: "Usuários", description: "Pode consultar usuários, CRM, ações em massa e janela de 24h. Inclui compatibilidade para edição individual de usuários." },
+  { key: "users.edit", label: "Editar usuários", description: "Editar dados cadastrais, operacionais e administrativos de usuários." },
   { key: "plans.manage", label: "Planos", description: "Pode criar, editar e ativar planos comerciais." },
   { key: "finance.view", label: "Financeiro", description: "Pode acessar dashboards financeiros, reconciliação Asaas e testes financeiros." },
   { key: "marketing.manage", label: "Comunicação", description: "Pode operar broadcast e campanhas." },
@@ -68,19 +69,19 @@ const ADMIN_ROLE_DEFINITIONS = [
     key: "FINANCEIRO",
     label: "Financeiro",
     description: "Acesso a financeiro, relatórios, inconsistências e consulta operacional para cobrança.",
-    permissions: ["dashboard.view", "reports.view", "finance.view", "users.manage", "inconsistencies.view", "audit.view", "alerts.view"],
+    permissions: ["dashboard.view", "reports.view", "finance.view", "users.manage", "users.edit", "inconsistencies.view", "audit.view", "alerts.view"],
   },
   {
     key: "SUPORTE",
     label: "Suporte",
     description: "Acesso ao CRM, usuários, relatórios e textos do bot para atendimento diário.",
-    permissions: ["dashboard.view", "reports.view", "users.manage", "copy.manage", "alerts.view"],
+    permissions: ["dashboard.view", "reports.view", "users.manage", "users.edit", "copy.manage", "alerts.view"],
   },
   {
     key: "OPERACAO",
     label: "Operação",
     description: "Acesso a usuários, planos, inconsistências, alertas e relatórios operacionais.",
-    permissions: ["dashboard.view", "reports.view", "users.manage", "plans.manage", "inconsistencies.view", "alerts.view"],
+    permissions: ["dashboard.view", "reports.view", "users.manage", "users.edit", "plans.manage", "inconsistencies.view", "alerts.view"],
   },
   {
     key: "MARKETING",
