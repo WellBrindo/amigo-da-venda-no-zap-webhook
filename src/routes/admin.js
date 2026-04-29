@@ -49,6 +49,10 @@ import {
   listSystemAlerts,
   getSystemAlertsCount,
 } from "../services/plans.js";
+import {
+  listSystemIncidents,
+  getOpenIncidentsCount,
+} from "../services/alerts.js";
 
 import {
   listCoupons,
@@ -100,7 +104,7 @@ import {
 import { listPayments, getSubscription, cancelSubscription } from "../services/asaas/client.js";
 import { listAsaasEvents } from "../services/asaas/ledger.js";
 
-import { redisGet, redisSet, redisDel } from "../services/redis.js";
+import { redisGet, redisSet, redisDel, getRedisHealthSnapshot } from "../services/redis.js";
 import {
   logAdminAudit,
   listAdminAudit,
@@ -433,6 +437,151 @@ async function requireBodyUserRef(req) {
 }
 
 const GLOBAL_SETTINGS_PREFIX = "cfg:global:";
+
+const OPERATIONAL_ALERT_RECIPIENTS_KEY = `${GLOBAL_SETTINGS_PREFIX}alerts.operationalRecipients`;
+const OPERATIONAL_ALERT_CHANNELS_KEY = `${GLOBAL_SETTINGS_PREFIX}alerts.operationalChannels`;
+const OPERATIONAL_ALERT_COOLDOWNS_KEY = `${GLOBAL_SETTINGS_PREFIX}alerts.operationalCooldowns`;
+
+const OPERATIONAL_ALERT_SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
+const OPERATIONAL_ALERT_CHANNELS = ["WHATSAPP", "EMAIL"];
+
+function normalizeOperationalAlertSeverity(value, fallback = "HIGH") {
+  const normalized = String(value || "").trim().toUpperCase();
+  return OPERATIONAL_ALERT_SEVERITIES.includes(normalized) ? normalized : fallback;
+}
+
+function normalizeOperationalAlertChannel(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  return OPERATIONAL_ALERT_CHANNELS.includes(normalized) ? normalized : "";
+}
+
+function normalizeOperationalAlertRecipient(input = {}, index = 0) {
+  const item = input && typeof input === "object" ? input : {};
+  const channel = normalizeOperationalAlertChannel(item.channel);
+  const contact = String(item.contact || "").trim();
+  if (!channel || !contact) return null;
+  return {
+    id: String(item.id || `rcpt_${index + 1}`).trim(),
+    name: String(item.name || item.label || contact).trim(),
+    channel,
+    contact,
+    minSeverity: normalizeOperationalAlertSeverity(item.minSeverity || item.severity || "HIGH"),
+    active: parseBoolInput(item.active, true),
+  };
+}
+
+async function getOperationalAlertSettings() {
+  const [recipientsRaw, channelsRaw, cooldownsRaw] = await Promise.all([
+    redisGet(OPERATIONAL_ALERT_RECIPIENTS_KEY).catch(() => "[]"),
+    redisGet(OPERATIONAL_ALERT_CHANNELS_KEY).catch(() => "{}"),
+    redisGet(OPERATIONAL_ALERT_COOLDOWNS_KEY).catch(() => "{}"),
+  ]);
+
+  const recipientsParsed = (() => {
+    try {
+      const parsed = JSON.parse(String(recipientsRaw || "[]"));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  })();
+
+  const channelsObj = (() => {
+    try { return JSON.parse(String(channelsRaw || "{}")) || {}; } catch { return {}; }
+  })();
+
+  const cooldownsObj = (() => {
+    try { return JSON.parse(String(cooldownsRaw || "{}")) || {}; } catch { return {}; }
+  })();
+
+  return {
+    recipients: recipientsParsed.map((item, index) => normalizeOperationalAlertRecipient(item, index)).filter(Boolean),
+    channels: {
+      whatsapp: normalizeOperationalAlertSeverity(channelsObj.whatsapp || "CRITICAL", "CRITICAL"),
+      email: normalizeOperationalAlertSeverity(channelsObj.email || "HIGH", "HIGH"),
+      notifyResolution: parseBoolInput(channelsObj.notifyResolution, true),
+    },
+    cooldowns: {
+      LOW: parseIntInput(cooldownsObj.LOW ?? cooldownsObj.low, 1800, { min: 0, max: 86400 }),
+      MEDIUM: parseIntInput(cooldownsObj.MEDIUM ?? cooldownsObj.medium, 900, { min: 0, max: 86400 }),
+      HIGH: parseIntInput(cooldownsObj.HIGH ?? cooldownsObj.high, 300, { min: 0, max: 86400 }),
+      CRITICAL: parseIntInput(cooldownsObj.CRITICAL ?? cooldownsObj.critical, 60, { min: 0, max: 86400 }),
+    },
+  };
+}
+
+async function setOperationalAlertRecipients(recipients = []) {
+  const normalized = (Array.isArray(recipients) ? recipients : [])
+    .map((item, index) => normalizeOperationalAlertRecipient(item, index))
+    .filter(Boolean);
+  await redisSet(OPERATIONAL_ALERT_RECIPIENTS_KEY, JSON.stringify(normalized));
+  return normalized;
+}
+
+async function setOperationalAlertMeta({ channels = null, cooldowns = null } = {}) {
+  if (channels) {
+    await redisSet(OPERATIONAL_ALERT_CHANNELS_KEY, JSON.stringify({
+      whatsapp: normalizeOperationalAlertSeverity(channels.whatsapp || "CRITICAL", "CRITICAL"),
+      email: normalizeOperationalAlertSeverity(channels.email || "HIGH", "HIGH"),
+      notifyResolution: parseBoolInput(channels.notifyResolution, true),
+    }));
+  }
+  if (cooldowns) {
+    await redisSet(OPERATIONAL_ALERT_COOLDOWNS_KEY, JSON.stringify({
+      LOW: parseIntInput(cooldowns.LOW ?? cooldowns.low, 1800, { min: 0, max: 86400 }),
+      MEDIUM: parseIntInput(cooldowns.MEDIUM ?? cooldowns.medium, 900, { min: 0, max: 86400 }),
+      HIGH: parseIntInput(cooldowns.HIGH ?? cooldowns.high, 300, { min: 0, max: 86400 }),
+      CRITICAL: parseIntInput(cooldowns.CRITICAL ?? cooldowns.critical, 60, { min: 0, max: 86400 }),
+    }));
+  }
+}
+
+async function buildRedisOpsReadModel() {
+  const snapshot = typeof getRedisHealthSnapshot === "function" ? (getRedisHealthSnapshot() || {}) : {};
+  const incidents = await listSystemIncidents({ limit: 100 }).catch(() => []);
+  const openCount = await getOpenIncidentsCount().catch(() => 0);
+  const redisIncidents = (Array.isArray(incidents) ? incidents : []).filter((item) => {
+    const hay = [
+      item?.type,
+      item?.module,
+      item?.errorCode,
+      item?.message,
+      item?.impact,
+    ].map((v) => String(v || "").toLowerCase()).join(" ");
+    return hay.includes("redis");
+  });
+  const latestOpenIncident = redisIncidents
+    .filter((item) => String(item?.status || "").toUpperCase() !== "RESOLVED")
+    .sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0))[0] || null;
+
+  const operational = await listOperationalAudit({ limit: 250 }).catch(() => []);
+  const moduleMap = new Map();
+  let lastRedisEvent = null;
+  for (const item of Array.isArray(operational) ? operational : []) {
+    const hay = [
+      item?.event,
+      item?.errorCode,
+      item?.message,
+      JSON.stringify(item?.meta || {}),
+    ].map((v) => String(v || "").toLowerCase()).join(" ");
+    if (!hay.includes("redis")) continue;
+    const moduleName = String(item?.module || "unknown").trim() || "unknown";
+    moduleMap.set(moduleName, Number(moduleMap.get(moduleName) || 0) + 1);
+    if (!lastRedisEvent || String(item?.ts || "") > String(lastRedisEvent?.ts || "")) lastRedisEvent = item;
+  }
+
+  return {
+    ok: true,
+    snapshot,
+    openIncidentsCount: Number(openCount || 0),
+    latestOpenIncident,
+    lastRedisEvent,
+    recentByModule: Array.from(moduleMap.entries())
+      .map(([module, count]) => ({ module, count }))
+      .sort((a, b) => b.count - a.count || String(a.module).localeCompare(String(b.module)))
+      .slice(0, 8),
+  };
+}
 
 
 const GLOBAL_SETTINGS_CATALOG = [
@@ -3240,6 +3389,46 @@ export function adminRouter() {
         </div>
       </div>
 
+      <div id="redisOpsBanner" class="card pad" style="margin-bottom:12px; display:none; border-color:rgba(239,68,68,.28); background:rgba(254,242,242,.95);">
+        <div class="row" style="justify-content:space-between; align-items:center; gap:12px;">
+          <div>
+            <div style="font-weight:800;">🚨 Saúde Redis / Modo degradado</div>
+            <div class="muted" id="redisOpsBannerText">Detectando status do Redis…</div>
+          </div>
+          <span id="redisOpsBannerBadge" class="badge danger">DEGRADED</span>
+        </div>
+      </div>
+
+      <div class="card pad" style="margin-bottom:12px;">
+        <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+          <div>
+            <h3 style="margin:0 0 6px 0;">🧠 Saúde Redis / Modo degradado</h3>
+            <div class="muted">Snapshot atual da camada resiliente do Redis, com último incidente aberto e distribuição recente por módulo.</div>
+          </div>
+          <div class="row">
+            <span id="redisHealthStatus" class="badge soft">HEALTHY</span>
+            <span id="redisOpenIncidents" class="badge info">0 abertos</span>
+          </div>
+        </div>
+        <div class="hr"></div>
+        <div class="grid cols3">
+          <div class="kpi"><div class="t">Status atual</div><div class="v" id="redisHealthStatusValue">—</div></div>
+          <div class="kpi"><div class="t">Último erro</div><div class="v" style="font-size:16px;" id="redisHealthLastError">—</div></div>
+          <div class="kpi"><div class="t">Último incidente aberto</div><div class="v" style="font-size:16px;" id="redisHealthLatestIncident">—</div></div>
+        </div>
+        <div class="hr"></div>
+        <div class="grid cols2">
+          <div class="card pad">
+            <div style="font-weight:700; margin-bottom:8px;">Detalhes do snapshot</div>
+            <div class="muted" id="redisHealthDetails">Carregando…</div>
+          </div>
+          <div class="card pad">
+            <div style="font-weight:700; margin-bottom:8px;">Contagem recente por módulo</div>
+            <div id="redisHealthModules" class="muted">Carregando…</div>
+          </div>
+        </div>
+      </div>
+
       <div class="card pad" style="margin-bottom:12px;">
         <div class="row" style="gap:8px; align-items:flex-end;">
           <div>
@@ -3379,6 +3568,41 @@ export function adminRouter() {
             const map = { flow:'Flow', webhook_route:'Webhook', meta_whatsapp:'Meta / WhatsApp', asaas_client:'Asaas Client', asaas_webhook:'Asaas Webhook', campaigns:'Campanhas', broadcast:'Broadcast', pricing:'Pricing', state:'State', server:'Server', asaas_ledger:'Ledger Asaas' };
             return map[key] || key || '—';
           }
+          async function loadRedisHealth(){
+            const res = await fetch('/admin/ops/redis-health');
+            const data = await res.json().catch(()=>({}));
+            if (!res.ok || data.ok === false) throw new Error(data.error || 'Falha ao carregar saúde Redis');
+            const snapshot = data.snapshot || {};
+            const latest = data.latestOpenIncident || null;
+            const lastEvent = data.lastRedisEvent || null;
+            const modules = Array.isArray(data.recentByModule) ? data.recentByModule : [];
+            const status = String(snapshot.status || 'HEALTHY').trim().toUpperCase() || 'HEALTHY';
+            const statusClass = status === 'DOWN' ? 'danger' : (status === 'DEGRADED' ? 'warn' : 'ok');
+            document.getElementById('redisHealthStatus').innerHTML = '<span class="badge ' + statusClass + '">' + esc(status) + '</span>';
+            document.getElementById('redisHealthStatusValue').textContent = status;
+            document.getElementById('redisOpenIncidents').textContent = String(Number(data.openIncidentsCount || 0) || 0) + ' abertos';
+            document.getElementById('redisHealthLastError').textContent = String(snapshot.lastErrorCode || snapshot.lastErrorMessage || '—');
+            document.getElementById('redisHealthLatestIncident').textContent = latest ? String((latest.module || 'redis') + ' · ' + (latest.step || latest.errorCode || latest.status || 'OPEN')) : 'Nenhum';
+            document.getElementById('redisHealthDetails').innerHTML =
+              '<div><b>Resumo:</b> ' + esc(snapshot.summary || '—') + '</div>' +
+              '<div class="muted" style="margin-top:6px;">Último comando com falha: <code>' + esc(snapshot.lastFailingCommand || '—') + '</code></div>' +
+              '<div class="muted" style="margin-top:6px;">Último evento: ' + esc(lastEvent ? ((lastEvent.module || 'unknown') + ' · ' + (lastEvent.step || lastEvent.event || 'runtime')) : '—') + '</div>' +
+              '<div class="muted" style="margin-top:6px;">Impacto: ' + esc(latest?.impact || latest?.message || '—') + '</div>';
+            document.getElementById('redisHealthModules').innerHTML = modules.length
+              ? '<table><thead><tr><th>Módulo</th><th>Ocorrências recentes</th></tr></thead><tbody>' + modules.map(function(item){
+                  return '<tr><td>' + esc(item.module || 'unknown') + '</td><td><b>' + esc(item.count || 0) + '</b></td></tr>';
+                }).join('') + '</tbody></table>'
+              : '<div class="muted">Nenhuma ocorrência recente vinculada a Redis.</div>';
+            const banner = document.getElementById('redisOpsBanner');
+            if (status === 'DOWN' || status === 'DEGRADED') {
+              banner.style.display = 'block';
+              document.getElementById('redisOpsBannerText').textContent = snapshot.summary || 'Redis em modo degradado.';
+              document.getElementById('redisOpsBannerBadge').textContent = status;
+              document.getElementById('redisOpsBannerBadge').className = 'badge ' + (status === 'DOWN' ? 'danger' : 'warn');
+            } else {
+              banner.style.display = 'none';
+            }
+          }
           async function loadOps(){
             const p = new URLSearchParams();
             const period = document.getElementById('opsPeriod').value;
@@ -3394,6 +3618,7 @@ export function adminRouter() {
             const res = await fetch('/admin/ops/data?' + p.toString());
             const data = await res.json();
             if (!res.ok || data.ok === false) throw new Error(data.error || 'Falha ao carregar observabilidade operacional');
+            await loadRedisHealth();
 
             const summary = data.summary || {};
             const health = data.health || {};
@@ -4593,6 +4818,53 @@ router.get("/", async (req, res) => {
     return res.status(200).send(html);
   });
 
+
+  router.get("/ops/redis-health", async (req, res) => {
+    try {
+      const data = await buildRedisOpsReadModel();
+      return res.json(data);
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.get("/settings/operational-alerts", async (req, res) => {
+    try {
+      const data = await getOperationalAlertSettings();
+      return res.json({ ok: true, ...data });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
+  router.post("/settings/operational-alerts", async (req, res) => {
+    try {
+      const recipients = await setOperationalAlertRecipients(req.body?.recipients);
+      await setOperationalAlertMeta({
+        channels: req.body?.channels,
+        cooldowns: req.body?.cooldowns,
+      });
+      const resolved = await getOperationalAlertSettings();
+      await safeRecordAdminAudit(req, {
+        module: "settings",
+        action: "SET_OPERATIONAL_ALERTS",
+        targetId: "operational_alerts",
+        targetLabel: "Alertas Operacionais",
+        summary: "Atualizou os destinatários e regras de alertas operacionais.",
+        before: {},
+        after: {
+          recipientsCount: recipients.length,
+          channels: resolved.channels,
+          cooldowns: resolved.cooldowns,
+        },
+        meta: { recipients },
+      });
+      return res.json({ ok: true, ...resolved });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
+  });
+
   // -----------------------------
   // 🛠️ Configurações Globais
   // -----------------------------
@@ -4658,6 +4930,7 @@ router.get("/", async (req, res) => {
   router.get("/settings-ui", async (req, res) => {
     const rows = await getResolvedGlobalSettings();
     const groups = groupGlobalSettings(rows);
+    const operationalAlerts = await getOperationalAlertSettings();
 
     const cards = groups.map(({ section, items }) => {
       const body = items.map((row) => {
@@ -4736,6 +5009,45 @@ router.get("/", async (req, res) => {
           </div>
         </div>
         ${cards}
+        <div class="card pad" style="margin-bottom:14px;">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:12px;">
+            <div>
+              <h3 style="margin:0 0 6px 0;">🚨 Alertas Operacionais</h3>
+              <div class="muted">Cadastre os destinatários que receberão alertas imediatos por WhatsApp e e-mail quando houver incidentes operacionais.</div>
+            </div>
+            <div class="pill">Destinatários ativos: <b>${escapeHtml(String((operationalAlerts.recipients || []).filter((item) => item && item.active).length))}</b></div>
+          </div>
+          <div class="hr"></div>
+          <div class="grid cols2">
+            <div class="card pad">
+              <div style="font-weight:700; margin-bottom:8px;">Destinatários</div>
+              <div class="muted" style="font-size:12px; margin-bottom:8px;">Informe nome, canal, contato, severidade mínima e se o destinatário está ativo.</div>
+              <div id="operationalAlertRecipients"></div>
+              <div class="row" style="margin-top:10px;">
+                <button type="button" id="addOperationalRecipientBtn">Adicionar destinatário</button>
+                <button type="button" class="primary" id="saveOperationalAlertsBtn">Salvar alertas operacionais</button>
+              </div>
+            </div>
+            <div class="card pad">
+              <div style="font-weight:700; margin-bottom:8px;">Regras por canal e cooldown</div>
+              <div class="grid">
+                <label>WhatsApp mínimo
+                  <select id="operationalAlertWhatsappMin">${OPERATIONAL_ALERT_SEVERITIES.map((item) => `<option value="${escapeHtml(item)}" ${operationalAlerts.channels.whatsapp === item ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}</select>
+                </label>
+                <label>E-mail mínimo
+                  <select id="operationalAlertEmailMin">${OPERATIONAL_ALERT_SEVERITIES.map((item) => `<option value="${escapeHtml(item)}" ${operationalAlerts.channels.email === item ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}</select>
+                </label>
+                <label class="pill"><input type="checkbox" id="operationalAlertNotifyResolution" ${operationalAlerts.channels.notifyResolution ? "checked" : ""} /> Notificar resolução do incidente</label>
+                <div class="grid cols2">
+                  <label>Cooldown LOW (s)<input type="number" id="cooldownLow" value="${escapeHtml(String(operationalAlerts.cooldowns.LOW || 1800))}" min="0" max="86400" /></label>
+                  <label>Cooldown MEDIUM (s)<input type="number" id="cooldownMedium" value="${escapeHtml(String(operationalAlerts.cooldowns.MEDIUM || 900))}" min="0" max="86400" /></label>
+                  <label>Cooldown HIGH (s)<input type="number" id="cooldownHigh" value="${escapeHtml(String(operationalAlerts.cooldowns.HIGH || 300))}" min="0" max="86400" /></label>
+                  <label>Cooldown CRITICAL (s)<input type="number" id="cooldownCritical" value="${escapeHtml(String(operationalAlerts.cooldowns.CRITICAL || 60))}" min="0" max="86400" /></label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="card pad">
           <details>
             <summary class="muted">Ver JSON resolvido</summary>
@@ -4746,6 +5058,51 @@ router.get("/", async (req, res) => {
       scriptExtra: `
         <script>
           (function(){
+            const operationalAlertRecipientsState = [];
+            const operationalRecipientSeed = [];
+            function recipientTemplate(item){
+              const row = item || {};
+              return '<div class="card pad" data-operational-recipient-row style="margin-bottom:8px;">' +
+                '<div class="grid cols2">' +
+                  '<label>Nome<input type="text" data-recipient-field="name" value="' + String(row.name || '').replaceAll('"','&quot;') + '" placeholder="Ex.: Wellington" /></label>' +
+                  '<label>Contato<input type="text" data-recipient-field="contact" value="' + String(row.contact || '').replaceAll('"','&quot;') + '" placeholder="Email ou 55DDXXXXXXXXX" /></label>' +
+                  '<label>Canal<select data-recipient-field="channel">' +
+                    '<option value="WHATSAPP"' + ((row.channel||'') === 'WHATSAPP' ? ' selected' : '') + '>WHATSAPP</option>' +
+                    '<option value="EMAIL"' + ((row.channel||'') === 'EMAIL' ? ' selected' : '') + '>EMAIL</option>' +
+                  '</select></label>' +
+                  '<label>Severidade mínima<select data-recipient-field="minSeverity">' +
+                    ["LOW", "MEDIUM", "HIGH", "CRITICAL"].map(function(opt){
+                      return '<option value="' + opt + '"' + ((row.minSeverity||'HIGH') === opt ? ' selected' : '') + '>' + opt + '</option>';
+                    }).join('') +
+                  '</select></label>' +
+                '</div>' +
+                '<div class="row" style="margin-top:8px; justify-content:space-between;">' +
+                  '<label class="pill"><input type="checkbox" data-recipient-field="active"' + (row.active === false ? '' : ' checked') + ' /> Ativo</label>' +
+                  '<button type="button" data-remove-operational-recipient="1">Remover</button>' +
+                '</div>' +
+              '</div>';
+            }
+            function renderOperationalRecipients(){
+              const host = document.getElementById('operationalAlertRecipients');
+              if (!host) return;
+              if (!operationalAlertRecipientsState.length) {
+                operationalAlertRecipientsState.push({ name:'', contact:'', channel:'WHATSAPP', minSeverity:'HIGH', active:true });
+              }
+              host.innerHTML = operationalAlertRecipientsState.map(function(item){
+                return recipientTemplate(item);
+              }).join('');
+            }
+            function collectOperationalRecipients(){
+              return Array.from(document.querySelectorAll('[data-operational-recipient-row]')).map(function(row){
+                return {
+                  name: row.querySelector('[data-recipient-field="name"]').value,
+                  contact: row.querySelector('[data-recipient-field="contact"]').value,
+                  channel: row.querySelector('[data-recipient-field="channel"]').value,
+                  minSeverity: row.querySelector('[data-recipient-field="minSeverity"]').value,
+                  active: !!row.querySelector('[data-recipient-field="active"]').checked,
+                };
+              }).filter(function(item){ return String(item.contact || '').trim(); });
+            }
             async function postJson(url, body){
               const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
               const j = await r.json().catch(()=>({}));
@@ -4774,7 +5131,51 @@ router.get("/", async (req, res) => {
               }
               window.location.reload();
             }
+            async function saveOperationalAlerts(){
+              const recipients = collectOperationalRecipients();
+              const body = {
+                recipients,
+                channels: {
+                  whatsapp: document.getElementById('operationalAlertWhatsappMin').value,
+                  email: document.getElementById('operationalAlertEmailMin').value,
+                  notifyResolution: !!document.getElementById('operationalAlertNotifyResolution').checked,
+                },
+                cooldowns: {
+                  LOW: document.getElementById('cooldownLow').value,
+                  MEDIUM: document.getElementById('cooldownMedium').value,
+                  HIGH: document.getElementById('cooldownHigh').value,
+                  CRITICAL: document.getElementById('cooldownCritical').value,
+                },
+              };
+              const out = await postJson('/admin/settings/operational-alerts', body);
+              if (!out.r.ok || !out.j.ok) {
+                alert('Falha ao salvar alertas operacionais.');
+                return;
+              }
+              window.location.reload();
+            }
+            operationalAlertRecipientsState.splice(0, operationalAlertRecipientsState.length, ...${JSON.stringify(operationalAlerts.recipients || [])});
+            renderOperationalRecipients();
             document.addEventListener('click', function(ev){
+              if (ev.target.closest('#addOperationalRecipientBtn')) {
+                operationalAlertRecipientsState.push({ name:'', contact:'', channel:'WHATSAPP', minSeverity:'HIGH', active:true });
+                renderOperationalRecipients();
+                return;
+              }
+              if (ev.target.closest('#saveOperationalAlertsBtn')) {
+                saveOperationalAlerts();
+                return;
+              }
+              if (ev.target.closest('[data-remove-operational-recipient]')) {
+                const rows = Array.from(document.querySelectorAll('[data-operational-recipient-row]'));
+                const current = ev.target.closest('[data-operational-recipient-row]');
+                const index = rows.indexOf(current);
+                if (index >= 0) {
+                  operationalAlertRecipientsState.splice(index, 1);
+                  renderOperationalRecipients();
+                }
+                return;
+              }
               const saveBtn = ev.target.closest('[data-save-setting]');
               if (saveBtn) {
                 saveSetting(saveBtn.getAttribute('data-save-setting'));
@@ -6558,26 +6959,46 @@ router.post("/coupons/:code/delete", async (req, res) => {
   });
 
   router.get("/alerts", async (req, res) => {
-    const limit = Number(req.query?.limit || 50);
-    const items = await listSystemAlerts(limit);
-    return res.json({ ok: true, count: items.length, items });
+    try {
+      const limit = Number(req.query?.limit || 50);
+      const items = await listSystemAlerts(limit);
+      const incidents = await listSystemIncidents({ limit });
+      const openIncidentsCount = await getOpenIncidentsCount();
+      return res.json({
+        ok: true,
+        count: Array.isArray(items) ? items.length : 0,
+        items: Array.isArray(items) ? items : [],
+        incidents: Array.isArray(incidents) ? incidents : [],
+        openIncidentsCount: Number(openIncidentsCount || 0),
+      });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: String(err?.message || err) });
+    }
   });
 
   router.get("/alerts-ui", async (req, res) => {
     const inner = `
-      <div class="card pad">
+      <div class="card pad" style="margin-bottom:14px;">
         <div class="row" style="justify-content:space-between;">
           <div>
             <h3 style="margin:0 0 6px 0;">🚨 Alertas</h3>
-            <div class="muted">Registro de avisos do sistema (para detectar falhas cedo).</div>
+            <div class="muted">Incidentes operacionais e histórico legado de alertas do sistema.</div>
           </div>
-          <button class="primary" onclick="load()">Atualizar</button>
+          <div class="row">
+            <span id="alertsOpenIncidents" class="badge warn">0 abertos</span>
+            <button class="primary" onclick="load()">Atualizar</button>
+          </div>
         </div>
+      </div>
 
-        <div class="hr"></div>
+      <div class="card pad" style="margin-bottom:12px;">
+        <div style="font-weight:700; margin-bottom:8px;">Incidentes Redis / operacionais</div>
+        <div id="incidentsOut" class="muted">Carregando…</div>
+      </div>
 
+      <div class="card pad">
+        <div style="font-weight:700; margin-bottom:8px;">Histórico legado de alertas</div>
         <div id="out" class="muted">Carregando…</div>
-
         <div class="hr"></div>
         <details>
           <summary class="muted">Ver JSON bruto</summary>
@@ -6589,29 +7010,44 @@ router.post("/coupons/:code/delete", async (req, res) => {
         function esc(s){
           return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
         }
+        function sevBadge(v){
+          const n = String(v||'').toUpperCase();
+          const cls = n === 'CRITICAL' ? 'danger' : (n === 'HIGH' ? 'warn' : (n === 'MEDIUM' ? 'info' : 'soft'));
+          return '<span class="badge ' + cls + '">' + esc(n || 'LOW') + '</span>';
+        }
         async function load(){
           const r = await fetch('/admin/alerts');
           const j = await r.json().catch(()=>({}));
           document.getElementById('raw').textContent = JSON.stringify(j, null, 2);
+          document.getElementById('alertsOpenIncidents').textContent = String(Number(j.openIncidentsCount || 0) || 0) + ' abertos';
+
+          const incidents = Array.isArray(j.incidents) ? j.incidents : [];
+          document.getElementById('incidentsOut').innerHTML = incidents.length
+            ? '<table><thead><tr><th>Severidade</th><th>Status</th><th>Módulo</th><th>Ocorrências</th><th>Último envio</th><th>Canais</th><th>Resumo</th></tr></thead><tbody>' +
+              incidents.map(function(it){
+                return '<tr>' +
+                  '<td>' + sevBadge(it.severity) + '</td>' +
+                  '<td><code>' + esc(it.status || '') + '</code></td>' +
+                  '<td>' + esc(it.module || it.type || '') + '</td>' +
+                  '<td>' + esc(it.occurrences || 0) + '</td>' +
+                  '<td><code>' + esc(it.lastNotifiedAt || it.updatedAt || '') + '</code></td>' +
+                  '<td>' + esc(Array.isArray(it.notifyChannels) ? it.notifyChannels.join(', ') : '') + '</td>' +
+                  '<td style="max-width:420px; white-space:pre-wrap;">' + esc(it.message || it.impact || '') + '</td>' +
+                '</tr>';
+              }).join('') + '</tbody></table>'
+            : '<div class="muted">Nenhum incidente operacional registrado.</div>';
 
           const items = Array.isArray(j.items) ? j.items : [];
-          if(!items.length){
-            document.getElementById('out').innerHTML = '<div class="muted">Nenhum alerta registrado.</div>';
-            return;
-          }
-
-          const html = '<table><thead><tr><th>Quando</th><th>Nível</th><th>Evento</th><th>Detalhes</th></tr></thead><tbody>' +
-            items.map(it => {
-              return '<tr>' +
-                '<td><code>'+esc(it.ts||'')+'</code></td>' +
-                '<td>'+esc(it.level||'')+'</td>' +
-                '<td>'+esc(it.event||'')+'</td>' +
-                '<td style="max-width:640px; white-space:pre-wrap;">'+esc(it.message||'')+'</td>' +
-              '</tr>';
-            }).join('') +
-            '</tbody></table>';
-
-          document.getElementById('out').innerHTML = html;
+          document.getElementById('out').innerHTML = items.length
+            ? '<table><thead><tr><th>Quando</th><th>Evento</th><th>Detalhes</th></tr></thead><tbody>' +
+              items.map(function(it){
+                return '<tr>' +
+                  '<td><code>'+esc(it.ts||'')+'</code></td>' +
+                  '<td>'+esc(it.event||'')+'</td>' +
+                  '<td style="max-width:640px; white-space:pre-wrap;">'+esc((it.message||'') || JSON.stringify(it.payload||{}))+'</td>' +
+                '</tr>';
+              }).join('') + '</tbody></table>'
+            : '<div class="muted">Nenhum alerta legado registrado.</div>';
         }
         load();
       </script>
