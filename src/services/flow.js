@@ -42,10 +42,14 @@ import {
   trackFlowError,
   trackPaymentError,
   trackCampaignError,
+  trackRedisDegraded,
+  trackRedisDown,
+  trackRedisCriticalWriteBlocked,
 } from "./metrics.js";
 import { getCopyText } from "./copy.js";
 import * as audit from "./audit.js";
-import { redisGet } from "./redis.js";
+import { redisGet, redisSafeGet, getRedisHealthSnapshot } from "./redis.js";
+import { raiseSystemIncident } from "./alerts.js";
 
 import {
   ensureUserExists,
@@ -184,8 +188,72 @@ function normalizeGlobalIntSetting(rawValue, fallback, { min = 1, max = 1000 } =
 }
 
 async function getTrialMaxDescriptions() {
-  const rawValue = await redisGet(TRIAL_MAX_DESCRIPTIONS_KEY);
-  return normalizeGlobalIntSetting(rawValue, TRIAL_LIMIT_DEFAULT, { min: 1, max: 1000 });
+  try {
+    if (typeof redisSafeGet === "function") {
+      const result = await redisSafeGet(TRIAL_MAX_DESCRIPTIONS_KEY, {
+        fallbackValue: TRIAL_LIMIT_DEFAULT,
+        critical: false,
+        module: "flow",
+        step: "get_trial_max_descriptions",
+        suppressThrow: true,
+      });
+
+      if (result?.ok) {
+        return normalizeGlobalIntSetting(result.value, TRIAL_LIMIT_DEFAULT, { min: 1, max: 1000 });
+      }
+
+      const redisStatus = typeof getRedisHealthSnapshot === "function"
+        ? getRedisHealthSnapshot()?.status || "DEGRADED"
+        : "DEGRADED";
+
+      try {
+        if (redisStatus === "DOWN" && typeof trackRedisDown === "function") {
+          await trackRedisDown({
+            userId: "",
+            waId: "",
+            source: "flow",
+            step: "get_trial_max_descriptions",
+            errorCode: "FLOW_REDIS_TRIAL_CONFIG_DEGRADED",
+            impact: "trial_config_fallback",
+            severity: "MEDIUM",
+          });
+        } else if (typeof trackRedisDegraded === "function") {
+          await trackRedisDegraded({
+            userId: "",
+            waId: "",
+            source: "flow",
+            step: "get_trial_max_descriptions",
+            errorCode: "FLOW_REDIS_TRIAL_CONFIG_DEGRADED",
+            impact: "trial_config_fallback",
+            severity: "MEDIUM",
+          });
+        }
+      } catch {}
+
+      try {
+        await raiseSystemIncident({
+          type: "REDIS",
+          severity: "MEDIUM",
+          module: "flow",
+          step: "get_trial_max_descriptions",
+          errorCode: "FLOW_REDIS_TRIAL_CONFIG_DEGRADED",
+          message: "Redis degraded while reading global trial configuration. Default fallback applied.",
+          impact: "trial_config_fallback",
+          dedupeKey: "flow|get_trial_max_descriptions|FLOW_REDIS_TRIAL_CONFIG_DEGRADED|trial_config_fallback",
+          meta: {
+            redisStatus,
+          },
+        });
+      } catch {}
+
+      return normalizeGlobalIntSetting(result?.value, TRIAL_LIMIT_DEFAULT, { min: 1, max: 1000 });
+    }
+
+    const rawValue = await redisGet(TRIAL_MAX_DESCRIPTIONS_KEY);
+    return normalizeGlobalIntSetting(rawValue, TRIAL_LIMIT_DEFAULT, { min: 1, max: 1000 });
+  } catch {
+    return TRIAL_LIMIT_DEFAULT;
+  }
 }
 
 // -------------------- Statuses (FSM) --------------------
@@ -662,6 +730,121 @@ async function ensureIdentitySensitiveOpAllowed(waId, identityContext = {}, { st
     identityContext: ctx,
     replyText: blockedText,
   };
+}
+
+async function failClosedForRedisCriticalStep(waId, {
+  step = "",
+  error = null,
+  errorCode = "FLOW_REDIS_CRITICAL_STEP_BLOCKED",
+  impact = "",
+  severity = "CRITICAL",
+  userMessage = "Estamos passando por uma instabilidade momentânea nesta etapa. Por favor, tente novamente em instantes.",
+  meta = {},
+} = {}) {
+  const redisStatus = typeof getRedisHealthSnapshot === "function"
+    ? getRedisHealthSnapshot()?.status || "DEGRADED"
+    : "DEGRADED";
+
+  try {
+    if (typeof trackRedisCriticalWriteBlocked === "function") {
+      await trackRedisCriticalWriteBlocked({
+        userId: cleanText(waId),
+        waId: cleanText(waId),
+        source: "flow",
+        step: cleanText(step),
+        errorCode: cleanText(errorCode),
+        impact: cleanText(impact),
+        severity: cleanText(severity),
+      });
+    }
+  } catch {}
+
+  try {
+    if (redisStatus === "DOWN" && typeof trackRedisDown === "function") {
+      await trackRedisDown({
+        userId: cleanText(waId),
+        waId: cleanText(waId),
+        source: "flow",
+        step: cleanText(step),
+        errorCode: cleanText(errorCode),
+        impact: cleanText(impact),
+        severity: cleanText(severity),
+      });
+    } else if (typeof trackRedisDegraded === "function") {
+      await trackRedisDegraded({
+        userId: cleanText(waId),
+        waId: cleanText(waId),
+        source: "flow",
+        step: cleanText(step),
+        errorCode: cleanText(errorCode),
+        impact: cleanText(impact),
+        severity: cleanText(severity),
+      });
+    }
+  } catch {}
+
+  try {
+    await raiseSystemIncident({
+      type: "REDIS",
+      severity: cleanText(severity) || "CRITICAL",
+      module: "flow",
+      step: cleanText(step),
+      errorCode: cleanText(errorCode),
+      message: cleanText(error?.message || error || "Critical flow step blocked due to Redis degradation."),
+      impact: cleanText(impact),
+      dedupeKey: ["flow", cleanText(step), cleanText(errorCode), cleanText(impact)].filter(Boolean).join("|"),
+      meta: {
+        redisStatus,
+        ...(meta && typeof meta === "object" ? meta : {}),
+      },
+    });
+  } catch {}
+
+  await flowRuntimeLog("warn", "flow_critical_step_blocked", {
+    userId: cleanText(waId),
+    waId: cleanText(waId),
+    step: cleanText(step),
+    errorCode: cleanText(errorCode),
+    kind: FLOW_ERROR_KIND.STATE_ERROR,
+    status: "blocked",
+    meta: {
+      redisStatus,
+      impact: cleanText(impact),
+      ...(meta && typeof meta === "object" ? meta : {}),
+    },
+    error: serializeFlowError(error),
+  });
+
+  await emitFlowFailureMetric(FLOW_ERROR_KIND.STATE_ERROR, waId, {
+    step: cleanText(step),
+    errorCode: cleanText(errorCode),
+    impact: cleanText(impact),
+    severity: cleanText(severity),
+  });
+
+  return reply(userMessage);
+}
+
+async function safeReleaseCouponReservationInFlow(reservationId, options = {}) {
+  if (!cleanText(reservationId)) return { ok: true, skipped: true };
+  try {
+    return await releaseCouponReservation(reservationId, options);
+  } catch (error) {
+    await raiseSystemIncident({
+      type: "REDIS",
+      severity: "HIGH",
+      module: "flow",
+      step: "release_coupon_reservation",
+      errorCode: cleanText(error?.errorCode || error?.code || "FLOW_COUPON_RELEASE_FAILED"),
+      message: cleanText(error?.message || error || "Failed to release coupon reservation from flow."),
+      impact: "coupon_release_failed",
+      dedupeKey: "flow|release_coupon_reservation|coupon_release_failed",
+      meta: {
+        reservationId: cleanText(reservationId),
+      },
+    }).catch(() => null);
+    throw error;
+  }
 }
 
 async function trackFlowMetricSafe(tracker, waId, extra = {}) {
@@ -2650,7 +2833,7 @@ async function clearCheckoutQuoteState(waId, { releaseReservation = false, reaso
 
   if (releaseReservation && reservationId) {
     try {
-      await releaseCouponReservation(reservationId, {
+      await safeReleaseCouponReservationInFlow(reservationId, {
         reason: reason || "checkout_selection_changed",
         meta: { ...meta, source: "flow" },
       });
