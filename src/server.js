@@ -4,7 +4,7 @@ import { webhookRouter } from "./routes/webhook.js";
 import { asaasRouter } from "./routes/asaas.js";
 import { adminRouter } from "./routes/admin.js";
 
-import { redisPing } from "./services/redis.js";
+import { redisPing, getRedisHealthSnapshot } from "./services/redis.js";
 import { resolveAdminSession } from "./services/adminAccess.js";
 import { startLifecycleAutomationLoop } from "./services/broadcast.js";
 import * as audit from "./services/audit.js";
@@ -24,6 +24,8 @@ const FATAL_EXIT_DELAY_MS = Math.max(
 );
 const STRICT_UNHANDLED_REJECTION = ["1", "true", "yes", "on"]
   .includes(String(process.env.STRICT_UNHANDLED_REJECTION || "").trim().toLowerCase());
+
+let lastRedisHealthStatus = "";
 
 function safeStr(value) {
   return String(value ?? "").trim();
@@ -45,6 +47,65 @@ function serializeError(err) {
     stack: safeStr(err?.stack),
     code: safeStr(err?.errorCode || err?.code),
   };
+}
+
+function normalizeRedisServerHealth() {
+  try {
+    const snapshot =
+      typeof getRedisHealthSnapshot === "function"
+        ? getRedisHealthSnapshot()
+        : {
+            status: "UNKNOWN",
+            summary: "Redis snapshot unavailable.",
+          };
+
+    const status = safeStr(snapshot?.status || "UNKNOWN").toUpperCase() || "UNKNOWN";
+    return {
+      status,
+      snapshot,
+      ok: status === "HEALTHY",
+      degraded: status === "DEGRADED",
+      down: status === "DOWN",
+    };
+  } catch (error) {
+    return {
+      status: "UNKNOWN",
+      snapshot: {
+        status: "UNKNOWN",
+        summary: safeStr(error?.message || error) || "Failed to read Redis health snapshot.",
+      },
+      ok: false,
+      degraded: false,
+      down: false,
+    };
+  }
+}
+
+async function maybeLogRedisRecovery(stage = "health") {
+  const current = normalizeRedisServerHealth();
+  const currentStatus = safeStr(current?.status);
+  const previousStatus = safeStr(lastRedisHealthStatus);
+
+  if (
+    currentStatus === "HEALTHY" &&
+    previousStatus &&
+    previousStatus !== "HEALTHY"
+  ) {
+    await logServerEvent({
+      level: "info",
+      event: "redis_health_recovered",
+      stage,
+      fatal: false,
+      meta: {
+        previousStatus,
+        currentStatus,
+        redis: current.snapshot,
+      },
+    });
+  }
+
+  lastRedisHealthStatus = currentStatus || previousStatus;
+  return current;
 }
 
 async function logServerEvent({
@@ -277,23 +338,76 @@ app.get("/", (req, res) =>
   res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION })
 );
 
-app.get("/health", (req, res) =>
-  res.status(200).json({ ok: true, service: APP_NAME, version: APP_VERSION })
-);
+app.get("/health", async (req, res) => {
+  const redisHealth = await maybeLogRedisRecovery("health");
+  const payload = {
+    ok: true,
+    service: APP_NAME,
+    version: APP_VERSION,
+    redis: {
+      status: redisHealth.status,
+      degraded: redisHealth.degraded,
+      down: redisHealth.down,
+      summary: safeStr(redisHealth.snapshot?.summary),
+    },
+  };
+
+  if (redisHealth.down) {
+    return res.status(200).json({
+      ...payload,
+      ok: false,
+    });
+  }
+
+  return res.status(200).json(payload);
+});
 
 app.get("/health-redis", async (req, res) => {
+  const redisHealth = await maybeLogRedisRecovery("health_redis");
   try {
-    const r = await redisPing();
-    return res.json({ ok: true, redis: r });
+    const ping = await redisPing();
+    const payload = {
+      ok: redisHealth.status === "HEALTHY",
+      service: APP_NAME,
+      version: APP_VERSION,
+      redis: {
+        ping,
+        status: redisHealth.status,
+        degraded: redisHealth.degraded,
+        down: redisHealth.down,
+        snapshot: redisHealth.snapshot,
+      },
+    };
+
+    if (redisHealth.down || redisHealth.degraded) {
+      return res.status(200).json(payload);
+    }
+
+    return res.status(200).json(payload);
   } catch (e) {
+    lastRedisHealthStatus = safeStr(redisHealth.status || "DOWN") || "DOWN";
     void logServerEvent({
       level: "warn",
       event: "health_redis_failed",
       stage: "health_redis",
       fatal: false,
       error: e,
+      meta: {
+        redis: redisHealth.snapshot,
+      },
     });
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+    return res.status(200).json({
+      ok: false,
+      service: APP_NAME,
+      version: APP_VERSION,
+      redis: {
+        status: redisHealth.status || "DOWN",
+        degraded: Boolean(redisHealth.degraded),
+        down: true,
+        snapshot: redisHealth.snapshot,
+      },
+      error: e?.message || String(e),
+    });
   }
 });
 
@@ -349,6 +463,8 @@ function bootstrapLifecycleAutomation() {
 installGlobalProcessHandlers();
 
 const server = app.listen(PORT, () => {
+  const redisHealth = normalizeRedisServerHealth();
+  lastRedisHealthStatus = safeStr(redisHealth.status);
   void logServerEvent({
     level: "info",
     event: "http_server_listening",
@@ -356,6 +472,10 @@ const server = app.listen(PORT, () => {
     fatal: false,
     meta: {
       port: PORT,
+      redis: {
+        status: redisHealth.status,
+        summary: safeStr(redisHealth.snapshot?.summary),
+      },
     },
   });
 
