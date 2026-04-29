@@ -64,6 +64,21 @@ const RUNTIME_AUDIT_MAX_ITEMS = 3000;
 const RUNTIME_AUDIT_TTL_SECONDS = 30 * 24 * 60 * 60;
 const RUNTIME_LOG_LEVELS = Object.freeze(["debug", "info", "warn", "error", "fatal"]);
 
+const REDIS_RUNTIME_EVENTS = Object.freeze([
+  "REDIS_DEGRADED",
+  "REDIS_DOWN",
+  "REDIS_RECOVERED",
+  "REDIS_CRITICAL_WRITE_BLOCKED",
+  "REDIS_FALLBACK_READ_USED",
+  "REDIS_ALERT_DISPATCHED",
+  "REDIS_ALERT_RESOLVED",
+]);
+
+function normalizeRedisRuntimeEvent(value) {
+  const action = safeStr(value).toUpperCase();
+  return REDIS_RUNTIME_EVENTS.includes(action) ? action : "";
+}
+
 function normalizeCampaignCode(value) {
   const text = safeStr(value).toUpperCase();
   return text || "";
@@ -126,11 +141,12 @@ function normalizeRuntimeLevel(value) {
 
 function normalizeRuntimeEvent(input = {}) {
   const moduleName = safeStr(input.module || input.source || "runtime");
+  const normalizedRedisEvent = normalizeRedisRuntimeEvent(input.event || input.action);
   return {
     id: safeStr(input.id) || makeEventId(),
     ts: safeStr(input.ts) || new Date().toISOString(),
     module: moduleName,
-    event: safeStr(input.event || input.action || "runtime_event"),
+    event: safeStr(normalizedRedisEvent || input.event || input.action || "runtime_event"),
     level: normalizeRuntimeLevel(input.level || (input.errorCode ? "error" : "info")),
     userId: safeStr(input.userId || input.internalUserId),
     internalUserId: safeStr(input.internalUserId || input.userId),
