@@ -28,8 +28,12 @@ import {
   trackPlanActivated,
   trackPaymentError,
   trackWebhookError,
+  trackRedisDegraded,
+  trackRedisDown,
+  trackRedisCriticalWriteBlocked,
 } from "../metrics.js";
 import * as audit from "../audit.js";
+import { raiseSystemIncident } from "../alerts.js";
 import {
   confirmCouponReservation,
   releaseCouponReservation,
@@ -174,6 +178,87 @@ async function logWebhookOperational(level = "info", context = {}) {
 
   const method = payload.level === "error" ? console.error : payload.level === "warn" ? console.warn : console.log;
   method(JSON.stringify(payload));
+}
+
+async function reportWebhookRedisDegraded({
+  userId = "",
+  event = "",
+  payment = null,
+  subscription = null,
+  step = "",
+  errorCode = ASAAS_WEBHOOK_ERROR.STATE,
+  message = "",
+  impact = "",
+  severity = "HIGH",
+  criticalBlocked = false,
+  meta = {},
+} = {}) {
+  const redisStatus = "DEGRADED";
+
+  await logWebhookOperational(criticalBlocked ? "error" : "warn", buildWebhookOperationalContext({
+    userId,
+    event: safeStr(event) || "asaas_webhook_redis_degraded",
+    payment,
+    subscription,
+    step: safeStr(step),
+    errorCode: safeStr(errorCode),
+    message: safeStr(message),
+    meta: {
+      impact: safeStr(impact),
+      redisStatus,
+      criticalBlocked: Boolean(criticalBlocked),
+      classification: criticalBlocked ? "critical_blocked" : "degraded",
+      ...((meta && typeof meta === "object") ? meta : {}),
+    },
+  }));
+
+  try {
+    if (criticalBlocked && typeof trackRedisCriticalWriteBlocked === "function") {
+      await trackRedisCriticalWriteBlocked({
+        userId: safeStr(userId),
+        waId: safeStr(userId),
+        paymentId: safeStr(payment?.id),
+        subscriptionId: safeStr(subscription?.id),
+        source: "asaas_webhook",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    } else if (typeof trackRedisDegraded === "function") {
+      await trackRedisDegraded({
+        userId: safeStr(userId),
+        waId: safeStr(userId),
+        paymentId: safeStr(payment?.id),
+        subscriptionId: safeStr(subscription?.id),
+        source: "asaas_webhook",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    }
+  } catch {}
+
+  try {
+    await raiseSystemIncident({
+      type: "REDIS",
+      severity: safeStr(severity) || "HIGH",
+      module: "asaas_webhook",
+      step: safeStr(step),
+      errorCode: safeStr(errorCode),
+      message: safeStr(message),
+      impact: safeStr(impact),
+      dedupeKey: ["asaas_webhook", safeStr(step), safeStr(errorCode), safeStr(impact), safeStr(payment?.id), safeStr(subscription?.id)].filter(Boolean).join("|"),
+      meta: {
+        userId: safeStr(userId),
+        paymentId: safeStr(payment?.id),
+        subscriptionId: safeStr(subscription?.id),
+        criticalBlocked: Boolean(criticalBlocked),
+        ...((meta && typeof meta === "object") ? meta : {}),
+      },
+    });
+  } catch {}
 }
 
 function classifyWebhookRuntimeError(error, fallback = ASAAS_WEBHOOK_ERROR.RUNTIME) {
@@ -402,21 +487,26 @@ async function finalizeCheckoutCouponOnWebhook(
 
     return { ...(result || { ok: true, reservationId }), shouldResetCheckoutState: true };
   } catch (err) {
-    await logWebhookOperational("warn", buildWebhookOperationalContext({
+    const resolvedErrorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.COUPON);
+    await reportWebhookRedisDegraded({
       userId,
       event,
       payment,
       subscription,
       step: "finalize_checkout_coupon",
-      errorCode: classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.COUPON),
+      errorCode: resolvedErrorCode,
       message: err?.message || String(err),
+      impact: "coupon_finalize_post_payment_blocked",
+      severity: "HIGH",
+      criticalBlocked: true,
       meta: { mode: safeStr(mode) },
-    }));
+    });
     return {
       ok: false,
       error: err?.message || String(err),
-      errorCode: classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.COUPON),
+      errorCode: resolvedErrorCode,
       shouldResetCheckoutState: false,
+      degraded: true,
     };
   }
 }
@@ -450,7 +540,7 @@ async function resetCheckoutCouponStateSafe(userId, { event = "", payment = null
     return { ok: true };
   } catch (err) {
     const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
-    await logWebhookOperational("warn", buildWebhookOperationalContext({
+    await reportWebhookRedisDegraded({
       userId,
       event,
       payment,
@@ -458,7 +548,10 @@ async function resetCheckoutCouponStateSafe(userId, { event = "", payment = null
       step: safeStr(step || "reset_checkout_coupon_state"),
       errorCode,
       message: err?.message || String(err),
-    }));
+      impact: "checkout_coupon_state_reset_failed",
+      severity: "HIGH",
+      criticalBlocked: true,
+    });
     await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: safeStr(step || "reset_checkout_coupon_state"), errorCode });
     return { ok: false, error: err?.message || String(err), errorCode };
   }
@@ -709,7 +802,7 @@ export async function handleAsaasWebhookEvent(body) {
         await resetUserTrialUsed(userId);
       } catch (err) {
         const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
-        await logWebhookOperational("warn", buildWebhookOperationalContext({
+        await reportWebhookRedisDegraded({
           userId,
           event,
           payment,
@@ -717,7 +810,10 @@ export async function handleAsaasWebhookEvent(body) {
           step: "payment_confirmed_reset_usage",
           errorCode,
           message: err?.message || String(err),
-        }));
+          impact: "payment_confirmed_usage_reset_failed",
+          severity: "HIGH",
+          criticalBlocked: false,
+        });
         await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_confirmed_reset_usage", errorCode });
       }
 
@@ -754,7 +850,7 @@ export async function handleAsaasWebhookEvent(body) {
         ]);
       } catch (err) {
         const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
-        await logWebhookOperational("warn", buildWebhookOperationalContext({
+        await reportWebhookRedisDegraded({
           userId,
           event,
           payment,
@@ -762,7 +858,10 @@ export async function handleAsaasWebhookEvent(body) {
           step: "payment_confirmed_billing_lookup",
           errorCode,
           message: err?.message || String(err),
-        }));
+          impact: "billing_lookup_degraded",
+          severity: "MEDIUM",
+          criticalBlocked: false,
+        });
         await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_confirmed_billing_lookup", errorCode });
       }
 
@@ -846,7 +945,7 @@ export async function handleAsaasWebhookEvent(body) {
         await setUserStatus(userId, "ACTIVE");
       } catch (err) {
         const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
-        await logWebhookOperational("error", buildWebhookOperationalContext({
+        await reportWebhookRedisDegraded({
           userId,
           event,
           payment,
@@ -854,7 +953,10 @@ export async function handleAsaasWebhookEvent(body) {
           step: "payment_confirmed_set_active",
           errorCode,
           message: err?.message || String(err),
-        }));
+          impact: "post_payment_state_transition_blocked",
+          severity: "CRITICAL",
+          criticalBlocked: true,
+        });
         await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_confirmed_set_active", errorCode });
         return { ok: false, error: err?.message || String(err), errorCode };
       }
@@ -947,7 +1049,7 @@ export async function handleAsaasWebhookEvent(body) {
         await setUserStatus(userId, "WAIT_PAYMENT_RECOVERY");
       } catch (err) {
         const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
-        await logWebhookOperational("error", buildWebhookOperationalContext({
+        await reportWebhookRedisDegraded({
           userId,
           event,
           payment,
@@ -955,7 +1057,10 @@ export async function handleAsaasWebhookEvent(body) {
           step: "payment_failed_set_recovery",
           errorCode,
           message: err?.message || String(err),
-        }));
+          impact: "payment_failure_state_transition_blocked",
+          severity: "CRITICAL",
+          criticalBlocked: true,
+        });
         await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_failed_set_recovery", errorCode });
         return { ok: false, error: err?.message || String(err), errorCode };
       }
@@ -1045,7 +1150,7 @@ export async function handleAsaasWebhookEvent(body) {
         await setUserStatus(userId, "PAYMENT_PENDING");
       } catch (err) {
         const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
-        await logWebhookOperational("error", buildWebhookOperationalContext({
+        await reportWebhookRedisDegraded({
           userId,
           event,
           payment,
@@ -1053,7 +1158,10 @@ export async function handleAsaasWebhookEvent(body) {
           step: "payment_overdue_set_pending",
           errorCode,
           message: err?.message || String(err),
-        }));
+          impact: "payment_overdue_state_transition_blocked",
+          severity: "CRITICAL",
+          criticalBlocked: true,
+        });
         await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_overdue_set_pending", errorCode });
         return { ok: false, error: err?.message || String(err), errorCode };
       }
@@ -1124,7 +1232,7 @@ export async function handleAsaasWebhookEvent(body) {
         await setUserStatus(userId, "BLOCKED");
       } catch (err) {
         const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
-        await logWebhookOperational("error", buildWebhookOperationalContext({
+        await reportWebhookRedisDegraded({
           userId,
           event,
           payment,
@@ -1132,7 +1240,10 @@ export async function handleAsaasWebhookEvent(body) {
           step: "payment_deleted_set_blocked",
           errorCode,
           message: err?.message || String(err),
-        }));
+          impact: "payment_deleted_state_transition_blocked",
+          severity: "CRITICAL",
+          criticalBlocked: true,
+        });
         await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "payment_deleted_set_blocked", errorCode });
         return { ok: false, error: err?.message || String(err), errorCode };
       }
@@ -1227,7 +1338,7 @@ export async function handleAsaasWebhookEvent(body) {
         validUntil = await getCardValidUntil(userId);
       } catch (err) {
         const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
-        await logWebhookOperational("warn", buildWebhookOperationalContext({
+        await reportWebhookRedisDegraded({
           userId,
           event,
           payment,
@@ -1235,7 +1346,10 @@ export async function handleAsaasWebhookEvent(body) {
           step: "subscription_inactivated_get_valid_until",
           errorCode,
           message: err?.message || String(err),
-        }));
+          impact: "subscription_valid_until_lookup_degraded",
+          severity: "MEDIUM",
+          criticalBlocked: false,
+        });
         await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "subscription_inactivated_get_valid_until", errorCode });
       }
 
@@ -1259,7 +1373,7 @@ export async function handleAsaasWebhookEvent(body) {
         await setUserStatus(userId, "WAIT_PLAN");
       } catch (err) {
         const errorCode = classifyWebhookRuntimeError(err, ASAAS_WEBHOOK_ERROR.STATE);
-        await logWebhookOperational("error", buildWebhookOperationalContext({
+        await reportWebhookRedisDegraded({
           userId,
           event,
           payment,
@@ -1267,7 +1381,10 @@ export async function handleAsaasWebhookEvent(body) {
           step: "subscription_inactivated_set_wait_plan",
           errorCode,
           message: err?.message || String(err),
-        }));
+          impact: "subscription_inactivated_state_transition_blocked",
+          severity: "CRITICAL",
+          criticalBlocked: true,
+        });
         await emitWebhookFailureMetrics({ userId, payment, subscription, event, step: "subscription_inactivated_set_wait_plan", errorCode });
         return { ok: false, error: err?.message || String(err), errorCode };
       }
