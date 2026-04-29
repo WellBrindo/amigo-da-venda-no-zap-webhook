@@ -109,9 +109,89 @@ function makeEventId() {
   return `audit_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+const AUDIT_MAX_STRING_LENGTH = 1200;
+const AUDIT_MAX_ARRAY_ITEMS = 80;
+const AUDIT_MAX_OBJECT_KEYS = 120;
+const AUDIT_MAX_DEPTH = 6;
+const SENSITIVE_KEY_RE = /(?:authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|password|passwd|senha|pin|bearer|credential|private[_-]?key)/i;
+const DOCUMENT_KEY_RE = /(?:cpf|cnpj|document|documento|docDigits|docNumber|taxId)/i;
+
+function limitAuditString(value, max = AUDIT_MAX_STRING_LENGTH) {
+  const text = String(value ?? "");
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}…[truncated:${text.length - max}]`;
+}
+
+function sanitizeDocumentValue(value) {
+  const digits = String(value ?? "").replace(/\D+/g, "");
+  if (!digits) return "";
+  return `***${digits.slice(-4)}`;
+}
+
+function sanitizeAuditValue(value, { depth = 0, key = "" } = {}) {
+  const normalizedKey = safeStr(key);
+
+  if (SENSITIVE_KEY_RE.test(normalizedKey)) return "[redacted]";
+
+  if (DOCUMENT_KEY_RE.test(normalizedKey) && !/docType|docLast4/i.test(normalizedKey)) {
+    return sanitizeDocumentValue(value);
+  }
+
+  if (value === null || value === undefined) return value;
+
+  if (typeof value === "string") return limitAuditString(value);
+  if (typeof value === "number" || typeof value === "boolean") return value;
+
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : "";
+
+  if (Array.isArray(value)) {
+    if (depth >= AUDIT_MAX_DEPTH) return `[array:${value.length}]`;
+    return value.slice(0, AUDIT_MAX_ARRAY_ITEMS).map((item, index) => sanitizeAuditValue(item, { depth: depth + 1, key: `${normalizedKey}.${index}` }));
+  }
+
+  if (typeof value === "object") {
+    if (depth >= AUDIT_MAX_DEPTH) return "[object]";
+    const out = {};
+    const entries = Object.entries(value).slice(0, AUDIT_MAX_OBJECT_KEYS);
+    for (const [childKey, childValue] of entries) {
+      if (SENSITIVE_KEY_RE.test(childKey)) {
+        out[childKey] = "[redacted]";
+        continue;
+      }
+
+      if (childKey === "doc" && childValue && typeof childValue === "object" && !Array.isArray(childValue)) {
+        out.doc = {
+          docType: safeStr(childValue.docType).toUpperCase(),
+          docLast4: safeStr(childValue.docLast4).replace(/\D+/g, "").slice(-4),
+        };
+        continue;
+      }
+
+      if (DOCUMENT_KEY_RE.test(childKey) && !/docType|docLast4/i.test(childKey)) {
+        out[childKey] = sanitizeDocumentValue(childValue);
+        continue;
+      }
+
+      out[childKey] = sanitizeAuditValue(childValue, { depth: depth + 1, key: childKey });
+    }
+    if (Object.keys(value).length > AUDIT_MAX_OBJECT_KEYS) {
+      out.__truncatedKeys = Object.keys(value).length - AUDIT_MAX_OBJECT_KEYS;
+    }
+    return out;
+  }
+
+  return safeStr(value);
+}
+
 function normalizeObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value;
+  const sanitized = sanitizeAuditValue(value);
+  return sanitized && typeof sanitized === "object" && !Array.isArray(sanitized) ? sanitized : {};
+}
+
+function normalizeStringArray(value) {
+  const arr = Array.isArray(value) ? value : [];
+  return Array.from(new Set(arr.map((item) => safeStr(item)).filter(Boolean))).slice(0, 200);
 }
 
 function normalizeCouponCode(value) {
@@ -184,6 +264,8 @@ function normalizeEvent(input = {}) {
     meta: normalizeObject(input.meta),
     before: normalizeObject(input.before),
     after: normalizeObject(input.after),
+    changedFields: normalizeStringArray(input.changedFields || input.meta?.changedFields),
+    rejectedFields: normalizeStringArray(input.rejectedFields || input.meta?.rejectedFields),
   };
 }
 
@@ -292,6 +374,40 @@ export async function logIdentityConflictAudit(input = {}) {
 
 export async function logAdminAudit(input = {}) {
   const event = normalizeEvent(input);
+  return pushAuditEvent(ADMIN_AUDIT_KEY, event, {
+    maxItems: ADMIN_AUDIT_MAX_ITEMS,
+    ttlSeconds: ADMIN_AUDIT_TTL_SECONDS,
+  });
+}
+
+export async function logUserAdminEditAudit(input = {}) {
+  const before = normalizeObject(input.before);
+  const after = normalizeObject(input.after);
+  const changedFields = normalizeStringArray(input.changedFields);
+  const rejectedFields = normalizeStringArray(input.rejectedFields);
+
+  const event = normalizeEvent({
+    module: "crm_user_edit",
+    action: safeStr(input.action) || "update_user_admin_fields",
+    waId: safeStr(input.waId || before.waId || after.waId),
+    internalUserId: safeStr(input.internalUserId || input.userId || before.userId || after.userId),
+    targetId: safeStr(input.targetId || input.internalUserId || input.userId || before.userId || after.userId || input.waId),
+    targetLabel: safeStr(input.targetLabel || after.fullName || before.fullName || after.waId || before.waId || input.waId),
+    summary: safeStr(input.summary) || `Edição administrativa de usuário: ${changedFields.length} campo(s) alterado(s)`,
+    actor: normalizeObject(input.actor),
+    before,
+    after,
+    changedFields,
+    rejectedFields,
+    meta: {
+      ...normalizeObject(input.meta),
+      changedFields,
+      rejectedFields,
+      changedCount: changedFields.length,
+      rejectedCount: rejectedFields.length,
+    },
+  });
+
   return pushAuditEvent(ADMIN_AUDIT_KEY, event, {
     maxItems: ADMIN_AUDIT_MAX_ITEMS,
     ttlSeconds: ADMIN_AUDIT_TTL_SECONDS,
