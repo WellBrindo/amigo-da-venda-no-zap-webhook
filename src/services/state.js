@@ -2851,6 +2851,394 @@ export async function resetUserAsNew(waId) {
   return { ok: true, userId: id, waId: id, deletedKeys: keys.length };
 }
 
+// ===================== Admin user editing helpers =====================
+const ADMIN_ALLOWED_USER_STATUSES = new Set([
+  "TRIAL",
+  "ACTIVE",
+  "PAYMENT_PENDING",
+  "BLOCKED",
+  "WAIT_NAME",
+  "WAIT_PLAN",
+  "WAIT_PAYMENT_METHOD",
+  "WAIT_BILLING_CITY_STATE",
+  "WAIT_BILLING_ADDRESS",
+  "WAIT_TEMPLATE_MODE",
+  "WAIT_BIZ_PROFILE_CONFIRM",
+  "WAIT_BIZ_PROFILE_FIELD",
+  "WAIT_FEEDBACK_COMMENT",
+  "WAIT_TESTIMONIAL_TEXT",
+  "WAIT_TESTIMONIAL_CONSENT",
+  "WAIT_TESTIMONIAL_DISPLAY_MODE",
+]);
+
+const ADMIN_EDITABLE_FIELD_KEYS = Object.freeze([
+  "fullName",
+  "status",
+  "plan",
+  "quotaUsed",
+  "trialUsed",
+  "templateMode",
+  "paymentMethod",
+  "billingCityState",
+  "billingAddress",
+  "docType",
+  "docLast4",
+  "asaasCustomerId",
+  "asaasSubscriptionId",
+  "cardValidUntil",
+  "cardCanceledAt",
+  "bizProfile",
+  "pendingBizProfile",
+  "activityMeta",
+  "growthMeta",
+  "selectedPlanCode",
+  "selectedBillingCycle",
+  "selectedCouponCode",
+  "pricingQuote",
+  "couponReservationId",
+  "couponReservationCreatedAt",
+  "checkoutCouponStatus",
+  "checkoutDraft",
+  "currentAdSession",
+]);
+
+const ADMIN_EDITABLE_FIELD_SET = new Set(ADMIN_EDITABLE_FIELD_KEYS);
+
+function adminReject(field, code, message, value = undefined) {
+  return {
+    field: safeStr(field),
+    code: safeStr(code) || "INVALID_FIELD",
+    message: safeStr(message) || "Campo inválido para edição administrativa.",
+    ...(value !== undefined ? { value } : {}),
+  };
+}
+
+function adminHasOwn(obj, key) {
+  return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function adminJsonStable(value) {
+  try { return JSON.stringify(value ?? null); } catch (_) { return "null"; }
+}
+
+function adminValuesEqual(a, b) {
+  return adminJsonStable(a) === adminJsonStable(b);
+}
+
+function normalizeAdminNonNegativeInt(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.trunc(n);
+}
+
+function normalizeAdminStatus(value) {
+  const status = safeStr(normalizeMaybeJsonString(value)).toUpperCase();
+  if (!status) return null;
+  return ADMIN_ALLOWED_USER_STATUSES.has(status) ? status : null;
+}
+
+function normalizeAdminTemplateMode(value) {
+  const mode = safeStr(normalizeMaybeJsonString(value)).toUpperCase();
+  if (!mode) return null;
+  if (mode === "FIXED" || mode === "FREE") return mode;
+  return null;
+}
+
+function normalizeAdminPaymentMethod(value) {
+  const method = safeStr(normalizeMaybeJsonString(value)).toUpperCase();
+  if (!method) return "";
+  if (method === "PIX" || method === "CARD") return method;
+  return null;
+}
+
+function normalizeAdminDocType(value) {
+  const docType = safeStr(normalizeMaybeJsonString(value)).toUpperCase();
+  if (!docType) return "";
+  if (docType === "CPF" || docType === "CNPJ") return docType;
+  return null;
+}
+
+function normalizeAdminDocLast4(value) {
+  const raw = safeStr(normalizeMaybeJsonString(value));
+  if (!raw) return "";
+  const digits = raw.replace(/\D+/g, "");
+  return digits.length === 4 ? digits : null;
+}
+
+function normalizeAdminIsoDate(value) {
+  const raw = safeStr(normalizeMaybeJsonString(value));
+  if (!raw) return "";
+  return normalizeIsoDate(raw) || null;
+}
+
+function normalizeAdminIsoTimestamp(value) {
+  const raw = safeStr(normalizeMaybeJsonString(value));
+  if (!raw) return "";
+  return normalizeIsoTimestamp(raw) || null;
+}
+
+function parseAdminEditableObject(value, field, rejectedFields) {
+  if (value === undefined) return { provided: false, value: null };
+  if (value === null) return { provided: true, value: null };
+  if (typeof value === "string") {
+    const raw = safeStr(value);
+    if (!raw) return { provided: true, value: null };
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed === null) return { provided: true, value: null };
+      if (isPlainObject(parsed)) return { provided: true, value: parsed };
+      rejectedFields.push(adminReject(field, "INVALID_JSON_OBJECT", "O campo deve ser um objeto JSON ou vazio."));
+      return { provided: false, value: null };
+    } catch (_) {
+      rejectedFields.push(adminReject(field, "INVALID_JSON", "O campo contém JSON inválido."));
+      return { provided: false, value: null };
+    }
+  }
+  if (isPlainObject(value)) return { provided: true, value };
+  rejectedFields.push(adminReject(field, "INVALID_OBJECT", "O campo deve ser um objeto ou vazio."));
+  return { provided: false, value: null };
+}
+
+function normalizeAdminEditablePatch(rawPatch = {}) {
+  const patch = isPlainObject(rawPatch) ? rawPatch : {};
+  const normalized = {};
+  const rejectedFields = [];
+
+  for (const key of Object.keys(patch)) {
+    if (key === "doc") continue;
+    if (!ADMIN_EDITABLE_FIELD_SET.has(key)) {
+      rejectedFields.push(adminReject(key, "UNKNOWN_FIELD", "Campo não permitido para edição administrativa."));
+    }
+  }
+
+  if (adminHasOwn(patch, "fullName")) normalized.fullName = normalizePersonName(patch.fullName);
+  if (adminHasOwn(patch, "status")) {
+    const value = normalizeAdminStatus(patch.status);
+    if (value === null) rejectedFields.push(adminReject("status", "INVALID_STATUS", "Status não permitido para edição administrativa.", patch.status));
+    else normalized.status = value;
+  }
+  if (adminHasOwn(patch, "plan")) normalized.plan = normalizePlanCode(patch.plan);
+  if (adminHasOwn(patch, "quotaUsed")) {
+    const value = normalizeAdminNonNegativeInt(patch.quotaUsed);
+    if (value === null) rejectedFields.push(adminReject("quotaUsed", "INVALID_COUNTER", "quotaUsed deve ser inteiro maior ou igual a zero.", patch.quotaUsed));
+    else normalized.quotaUsed = value;
+  }
+  if (adminHasOwn(patch, "trialUsed")) {
+    const value = normalizeAdminNonNegativeInt(patch.trialUsed);
+    if (value === null) rejectedFields.push(adminReject("trialUsed", "INVALID_COUNTER", "trialUsed deve ser inteiro maior ou igual a zero.", patch.trialUsed));
+    else normalized.trialUsed = value;
+  }
+  if (adminHasOwn(patch, "templateMode")) {
+    const value = normalizeAdminTemplateMode(patch.templateMode);
+    if (value === null) rejectedFields.push(adminReject("templateMode", "INVALID_TEMPLATE_MODE", "templateMode deve ser FIXED ou FREE.", patch.templateMode));
+    else normalized.templateMode = value;
+  }
+  if (adminHasOwn(patch, "paymentMethod")) {
+    const value = normalizeAdminPaymentMethod(patch.paymentMethod);
+    if (value === null) rejectedFields.push(adminReject("paymentMethod", "INVALID_PAYMENT_METHOD", "paymentMethod deve ser PIX, CARD ou vazio.", patch.paymentMethod));
+    else normalized.paymentMethod = value;
+  }
+  if (adminHasOwn(patch, "billingCityState")) normalized.billingCityState = normalizeCityState(patch.billingCityState);
+  if (adminHasOwn(patch, "billingAddress")) {
+    const raw = compactInnerWhitespace(patch.billingAddress);
+    normalized.billingAddress = /^apenas\s+online$/i.test(raw) ? "APENAS ONLINE" : normalizeAddressText(raw);
+  }
+
+  const docPatch = isPlainObject(patch.doc) ? patch.doc : {};
+  if (adminHasOwn(patch, "doc") && !isPlainObject(patch.doc) && patch.doc !== null) {
+    rejectedFields.push(adminReject("doc", "INVALID_DOC_OBJECT", "doc deve conter apenas docType/docLast4."));
+  }
+  for (const key of Object.keys(docPatch)) {
+    if (key !== "docType" && key !== "docLast4") rejectedFields.push(adminReject(`doc.${key}`, "UNKNOWN_DOC_FIELD", "Documento completo não pode ser salvo; use apenas docType/docLast4."));
+  }
+  if (adminHasOwn(patch, "docType") || adminHasOwn(docPatch, "docType")) {
+    const raw = adminHasOwn(patch, "docType") ? patch.docType : docPatch.docType;
+    const value = normalizeAdminDocType(raw);
+    if (value === null) rejectedFields.push(adminReject("docType", "INVALID_DOC_TYPE", "docType deve ser CPF, CNPJ ou vazio.", raw));
+    else normalized.docType = value;
+  }
+  if (adminHasOwn(patch, "docLast4") || adminHasOwn(docPatch, "docLast4")) {
+    const raw = adminHasOwn(patch, "docLast4") ? patch.docLast4 : docPatch.docLast4;
+    const value = normalizeAdminDocLast4(raw);
+    if (value === null) rejectedFields.push(adminReject("docLast4", "INVALID_DOC_LAST4", "docLast4 deve conter exatamente 4 dígitos ou vazio.", raw));
+    else normalized.docLast4 = value;
+  }
+
+  if (adminHasOwn(patch, "asaasCustomerId")) normalized.asaasCustomerId = safeStr(patch.asaasCustomerId);
+  if (adminHasOwn(patch, "asaasSubscriptionId")) normalized.asaasSubscriptionId = safeStr(patch.asaasSubscriptionId);
+  if (adminHasOwn(patch, "cardValidUntil")) {
+    const value = normalizeAdminIsoDate(patch.cardValidUntil);
+    if (value === null) rejectedFields.push(adminReject("cardValidUntil", "INVALID_DATE", "cardValidUntil deve ser uma data ISO válida ou vazio.", patch.cardValidUntil));
+    else normalized.cardValidUntil = value;
+  }
+  if (adminHasOwn(patch, "cardCanceledAt")) {
+    const value = normalizeAdminIsoTimestamp(patch.cardCanceledAt);
+    if (value === null) rejectedFields.push(adminReject("cardCanceledAt", "INVALID_TIMESTAMP", "cardCanceledAt deve ser timestamp ISO válido ou vazio.", patch.cardCanceledAt));
+    else normalized.cardCanceledAt = value;
+  }
+
+  for (const field of ["bizProfile", "pendingBizProfile", "activityMeta", "growthMeta", "pricingQuote", "checkoutDraft", "currentAdSession"]) {
+    if (!adminHasOwn(patch, field)) continue;
+    const parsed = parseAdminEditableObject(patch[field], field, rejectedFields);
+    if (parsed.provided) normalized[field] = parsed.value;
+  }
+  if (adminHasOwn(patch, "selectedPlanCode")) normalized.selectedPlanCode = normalizePlanCode(patch.selectedPlanCode);
+  if (adminHasOwn(patch, "selectedBillingCycle")) {
+    const raw = safeStr(normalizeMaybeJsonString(patch.selectedBillingCycle));
+    const value = normalizeBillingCycle(raw);
+    if (raw && !value) rejectedFields.push(adminReject("selectedBillingCycle", "INVALID_BILLING_CYCLE", "selectedBillingCycle deve ser monthly, annual ou vazio.", patch.selectedBillingCycle));
+    else normalized.selectedBillingCycle = value;
+  }
+  if (adminHasOwn(patch, "selectedCouponCode")) normalized.selectedCouponCode = normalizeCouponCode(patch.selectedCouponCode);
+  if (adminHasOwn(patch, "couponReservationId")) normalized.couponReservationId = safeStr(patch.couponReservationId);
+  if (adminHasOwn(patch, "couponReservationCreatedAt")) {
+    const value = normalizeAdminIsoTimestamp(patch.couponReservationCreatedAt);
+    if (value === null) rejectedFields.push(adminReject("couponReservationCreatedAt", "INVALID_TIMESTAMP", "couponReservationCreatedAt deve ser timestamp ISO válido ou vazio.", patch.couponReservationCreatedAt));
+    else normalized.couponReservationCreatedAt = value;
+  }
+  if (adminHasOwn(patch, "checkoutCouponStatus")) normalized.checkoutCouponStatus = normalizeCheckoutCouponStatus(patch.checkoutCouponStatus);
+
+  return { normalized, rejectedFields };
+}
+
+function buildAdminEditableFieldsFromSnapshot(snapshot) {
+  const snap = snapshot && typeof snapshot === "object" ? snapshot : {};
+  return {
+    userId: safeStr(snap.userId || snap.waId),
+    waId: safeStr(snap.waId || snap.userId),
+    fullName: safeStr(snap.fullName),
+    status: safeStr(snap.status).toUpperCase() || "TRIAL",
+    plan: normalizePlanCode(snap.plan),
+    quotaUsed: Math.max(0, toInt(snap.quotaUsed, 0)),
+    trialUsed: Math.max(0, toInt(snap.trialUsed, 0)),
+    templateMode: safeStr(snap.templateMode).toUpperCase() === "FREE" ? "FREE" : "FIXED",
+    paymentMethod: normalizeAdminPaymentMethod(snap.paymentMethod) || "",
+    billingCityState: safeStr(snap.billingCityState),
+    billingAddress: safeStr(snap.billingAddress),
+    docType: safeStr(snap.doc?.docType).toUpperCase(),
+    docLast4: safeStr(snap.doc?.docLast4),
+    asaasCustomerId: safeStr(snap.asaasCustomerId),
+    asaasSubscriptionId: safeStr(snap.asaasSubscriptionId),
+    cardValidUntil: normalizeIsoDate(snap.cardValidUntil),
+    cardCanceledAt: normalizeIsoTimestamp(snap.cardCanceledAt),
+    bizProfile: isPlainObject(snap.bizProfile) ? snap.bizProfile : null,
+    pendingBizProfile: isPlainObject(snap.pendingBizProfile) ? snap.pendingBizProfile : null,
+    activityMeta: isPlainObject(snap.activityMeta) ? snap.activityMeta : {},
+    growthMeta: isPlainObject(snap.growthMeta) ? snap.growthMeta : {},
+    selectedPlanCode: normalizePlanCode(snap.selectedPlanCode),
+    selectedBillingCycle: normalizeBillingCycle(snap.selectedBillingCycle),
+    selectedCouponCode: normalizeCouponCode(snap.selectedCouponCode),
+    pricingQuote: normalizePricingQuote(snap.pricingQuote),
+    couponReservationId: safeStr(snap.couponReservationId),
+    couponReservationCreatedAt: normalizeIsoTimestamp(snap.couponReservationCreatedAt),
+    checkoutCouponStatus: normalizeCheckoutCouponStatus(snap.checkoutCouponStatus),
+    checkoutDraft: normalizeCheckoutDraft(snap.checkoutDraft),
+    currentAdSession: isPlainObject(snap.currentAdSession) ? snap.currentAdSession : null,
+  };
+}
+
+async function applyAdminFieldUpdate(userId, field, value) {
+  switch (field) {
+    case "fullName": return setUserFullName(userId, value);
+    case "status": return setUserStatus(userId, value);
+    case "plan": return setUserPlan(userId, value);
+    case "quotaUsed": return setUserQuotaUsed(userId, value);
+    case "trialUsed": return setUserTrialUsed(userId, value);
+    case "templateMode": return setTemplateMode(userId, value || "FIXED");
+    case "paymentMethod": return value ? setPaymentMethod(userId, value) : clearPaymentMethod(userId);
+    case "billingCityState": return value ? setBillingCityState(userId, value) : clearBillingCityState(userId);
+    case "billingAddress": return value ? setBillingAddress(userId, value) : clearBillingAddress(userId);
+    case "asaasCustomerId": return setAsaasCustomerId(userId, value);
+    case "asaasSubscriptionId": return setAsaasSubscriptionId(userId, value);
+    case "cardValidUntil": return setCardValidUntil(userId, value);
+    case "cardCanceledAt": return setCardCanceledAt(userId, value);
+    case "bizProfile": return value ? setBizProfile(userId, value) : clearBizProfile(userId);
+    case "pendingBizProfile": return value ? setPendingBizProfile(userId, value) : clearPendingBizProfile(userId);
+    case "activityMeta": return setActivityMeta(userId, value || {});
+    case "growthMeta": return setGrowthMeta(userId, value || {});
+    case "selectedPlanCode": return value ? setSelectedPlanCode(userId, value) : clearSelectedPlanCode(userId);
+    case "selectedBillingCycle": return value ? setSelectedBillingCycle(userId, value) : clearSelectedBillingCycle(userId);
+    case "selectedCouponCode": return value ? setSelectedCouponCode(userId, value) : clearSelectedCouponCode(userId);
+    case "pricingQuote": return value ? setPricingQuote(userId, value) : clearPricingQuote(userId);
+    case "couponReservationId": return value ? setCouponReservationId(userId, value) : clearCouponReservationId(userId);
+    case "couponReservationCreatedAt": return value ? setCouponReservationCreatedAt(userId, value) : clearCouponReservationCreatedAt(userId);
+    case "checkoutCouponStatus": return value ? setCheckoutCouponStatus(userId, value) : clearCheckoutCouponStatus(userId);
+    case "checkoutDraft": return value ? setCheckoutDraft(userId, value) : clearCheckoutDraft(userId);
+    case "currentAdSession": return value ? setCurrentAdSession(userId, value) : clearCurrentAdSession(userId);
+    default: return undefined;
+  }
+}
+
+export async function getUserAdminEditableFields(userRef) {
+  const userId = normalizeUserRef(userRef);
+  if (!userId) throw new Error("userRef required");
+  const snapshot = await getUserSnapshot(userId);
+  return buildAdminEditableFieldsFromSnapshot(snapshot);
+}
+
+export async function updateUserAdminFields(userRef, patch = {}, options = {}) {
+  const userId = normalizeUserRef(userRef);
+  if (!userId) throw new Error("userRef required");
+  const { normalized, rejectedFields } = normalizeAdminEditablePatch(patch);
+  const beforeSnapshot = await getUserSnapshot(userId);
+  const before = buildAdminEditableFieldsFromSnapshot(beforeSnapshot);
+  const fieldsToApply = [];
+
+  if (adminHasOwn(normalized, "docType") || adminHasOwn(normalized, "docLast4")) {
+    const docType = adminHasOwn(normalized, "docType") ? normalized.docType : before.docType;
+    const docLast4 = adminHasOwn(normalized, "docLast4") ? normalized.docLast4 : before.docLast4;
+    if ((docType && !docLast4) || (!docType && docLast4)) {
+      rejectedFields.push(adminReject("doc", "INCOMPLETE_DOC_MASK", "Documento mascarado exige docType e docLast4 juntos, ou ambos vazios."));
+    } else if (!adminValuesEqual({ docType: before.docType, docLast4: before.docLast4 }, { docType, docLast4 })) {
+      fieldsToApply.push({ field: "doc", value: { docType, docLast4 } });
+    }
+  }
+
+  for (const field of ADMIN_EDITABLE_FIELD_KEYS) {
+    if (field === "docType" || field === "docLast4") continue;
+    if (!adminHasOwn(normalized, field)) continue;
+    const nextValue = normalized[field];
+    if (!adminValuesEqual(before[field], nextValue)) fieldsToApply.push({ field, value: nextValue });
+  }
+
+  const changedFields = [];
+  const failedFields = [];
+  for (const item of fieldsToApply) {
+    try {
+      if (item.field === "doc") {
+        await setUserDocMasked(userId, item.value.docType, item.value.docLast4);
+        changedFields.push("doc");
+        continue;
+      }
+      await applyAdminFieldUpdate(userId, item.field, item.value);
+      changedFields.push(item.field);
+    } catch (error) {
+      failedFields.push(adminReject(item.field, "WRITE_FAILED", safeStr(error?.message || error) || "Falha ao gravar campo."));
+      await logStateOperationalError({
+        userId,
+        key: item.field,
+        step: "update_user_admin_fields",
+        errorCode: STATE_ERROR_CODE.WRITE,
+        error,
+        event: "admin_user_field_update_failed",
+      });
+    }
+  }
+
+  const afterSnapshot = await getUserSnapshot(userId);
+  const after = buildAdminEditableFieldsFromSnapshot(afterSnapshot);
+  return {
+    ok: failedFields.length === 0,
+    userId,
+    changedFields,
+    rejectedFields: [...rejectedFields, ...failedFields],
+    before,
+    after,
+    ...(options && options.includeSnapshot ? { snapshot: afterSnapshot } : {}),
+  };
+}
+
 // ===================== SNAPSHOT =====================
 export async function getUserSnapshot(waId) {
   await ensureUserExists(waId);
