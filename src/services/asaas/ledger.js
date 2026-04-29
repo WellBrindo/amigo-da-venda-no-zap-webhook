@@ -21,6 +21,7 @@ const LEDGER_EVENT_TYPE = Object.freeze({
   SUBSCRIPTION_ACTIVATED: "subscription_activated",
   SUBSCRIPTION_CANCELLED: "subscription_cancelled",
   COUPON_EVENT: "coupon_event",
+  ADMIN_REFERENCE: "admin_reference",
   INCONSISTENCY: "inconsistency",
   INCOMPLETE: "incomplete",
   GENERIC: "generic",
@@ -31,6 +32,7 @@ const LEDGER_CATEGORY = Object.freeze({
   PAYMENT: "payment",
   SUBSCRIPTION: "subscription",
   COUPON: "coupon",
+  ADMIN: "admin",
   INCONSISTENCY: "inconsistency",
   GENERAL: "general",
 });
@@ -40,6 +42,21 @@ const LEDGER_SEVERITY = Object.freeze({
   WARN: "warn",
   ERROR: "error",
 });
+
+export const ASAAS_LEDGER_ADMIN_EVENT = Object.freeze({
+  USER_FINANCIAL_FIELD_CHANGED: "ADMIN_USER_FINANCIAL_FIELD_CHANGED",
+});
+
+const ADMIN_FINANCIAL_FIELDS = Object.freeze([
+  "plan",
+  "paymentMethod",
+  "asaasCustomerId",
+  "asaasSubscriptionId",
+  "cardValidUntil",
+  "cardCanceledAt",
+]);
+
+const SENSITIVE_META_KEYS = /token|secret|authorization|api[_-]?key|password|cpf|cnpj|document|docdigits|docnumber/i;
 
 function safeStr(v) {
   return String(v || "").trim();
@@ -182,11 +199,63 @@ function normalizeMeta(meta) {
   return meta && typeof meta === "object" && !Array.isArray(meta) ? { ...meta } : {};
 }
 
+function sanitizeLedgerMetaValue(value, depth = 0) {
+  if (value === null || value === undefined) return value;
+  if (depth > 4) return "[TRUNCATED]";
+  if (typeof value === "string") {
+    const text = safeStr(value);
+    return text.length > 600 ? `${text.slice(0, 600)}…` : text;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.slice(0, 50).map((item) => sanitizeLedgerMetaValue(item, depth + 1));
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, item] of Object.entries(value).slice(0, 80)) {
+      if (SENSITIVE_META_KEYS.test(key)) {
+        if (key === "doc" && item && typeof item === "object") {
+          out.doc = {
+            docType: safeStr(item.docType).toUpperCase(),
+            docLast4: safeStr(item.docLast4).replace(/\D+/g, "").slice(-4),
+          };
+        } else if (key === "docType" || key === "docLast4") {
+          out[key] = key === "docLast4" ? safeStr(item).replace(/\D+/g, "").slice(-4) : safeStr(item).toUpperCase();
+        } else {
+          out[key] = "[REDACTED]";
+        }
+        continue;
+      }
+      out[key] = sanitizeLedgerMetaValue(item, depth + 1);
+    }
+    return out;
+  }
+  return safeStr(value);
+}
+
+function sanitizeLedgerMeta(meta) {
+  return sanitizeLedgerMetaValue(normalizeMeta(meta));
+}
+
+function normalizeChangedFinancialFields(fields = []) {
+  const list = Array.isArray(fields) ? fields : String(fields || "").split(",");
+  return Array.from(new Set(list.map((field) => safeStr(field)).filter((field) => ADMIN_FINANCIAL_FIELDS.includes(field))));
+}
+
 function inferEventClassification({ event = "", payment = null, subscription = null, couponLedger = null, meta = {} } = {}) {
   const ev = safeStr(event).toLowerCase();
   const paymentStatus = safeStr(payment?.status).toLowerCase();
   const subscriptionStatus = safeStr(subscription?.status).toLowerCase();
   const hasCoupon = !!(couponLedger && typeof couponLedger === "object" && (safeStr(couponLedger.couponCode) || safeStr(couponLedger.reservationId)));
+
+  if (ev === safeStr(ASAAS_LEDGER_ADMIN_EVENT.USER_FINANCIAL_FIELD_CHANGED).toLowerCase()) {
+    return {
+      eventType: LEDGER_EVENT_TYPE.ADMIN_REFERENCE,
+      category: LEDGER_CATEGORY.ADMIN,
+      status: "admin_reference",
+      severity: LEDGER_SEVERITY.INFO,
+      isFailure: false,
+      isInconsistency: false,
+    };
+  }
 
   if (ev.includes("inconsisten") || ev.includes("invalid") || ev.includes("missing") || ev.includes("diverg")) {
     return {
@@ -406,7 +475,7 @@ function buildLedgerEntry({
     subscription: subscriptionData,
     quote: quoteData,
     couponLedger: couponData,
-    meta: normalizeMeta(meta),
+    meta: sanitizeLedgerMeta(meta),
   };
 }
 
@@ -593,6 +662,65 @@ export async function recordAsaasInconsistency({
   entry.severity = LEDGER_SEVERITY.ERROR;
   entry.isFailure = true;
   entry.isInconsistency = true;
+
+  return appendLedgerEntry(entry);
+}
+
+ export async function recordAdminUserFinancialFieldChanged({
+  userId = "",
+  waId = "",
+  changedFields = [],
+  before = {},
+  after = {},
+  actor = {},
+  summary = "",
+  meta = {},
+} = {}) {
+  const userRef = normalizeLedgerUserRef({ userId, waId });
+  if (!userRef) return { ok: false, reason: "no_userId" };
+
+  const normalizedChangedFields = normalizeChangedFinancialFields(changedFields);
+  if (!normalizedChangedFields.length) {
+    return { ok: true, skipped: true, reason: "no_financial_fields_changed" };
+  }
+
+  const entry = buildLedgerEntry({
+    event: ASAAS_LEDGER_ADMIN_EVENT.USER_FINANCIAL_FIELD_CHANGED,
+    userId,
+    waId,
+    payment: null,
+    subscription: null,
+    source: "admin",
+    quote: null,
+    couponLedger: null,
+    summary: safeStr(summary) || "Alteração administrativa de campo financeiro do usuário registrada apenas para rastreabilidade.",
+    meta: {
+      ...normalizeMeta(meta),
+      administrativeReferenceOnly: true,
+      doesNotRepresentPayment: true,
+      doesNotRepresentCharge: true,
+      doesNotConfirmCoupon: true,
+      doesNotModifySubscription: true,
+      changedFields: normalizedChangedFields,
+      before: sanitizeLedgerMeta(before),
+      after: sanitizeLedgerMeta(after),
+      actor: sanitizeLedgerMeta(actor),
+    },
+  });
+
+  entry.eventType = LEDGER_EVENT_TYPE.ADMIN_REFERENCE;
+  entry.category = LEDGER_CATEGORY.ADMIN;
+  entry.status = "admin_reference";
+  entry.severity = LEDGER_SEVERITY.INFO;
+  entry.isFailure = false;
+  entry.isInconsistency = false;
+  entry.payment = null;
+  entry.subscription = null;
+  entry.paymentId = "";
+  entry.subscriptionId = "";
+  entry.couponLedger = null;
+  entry.couponCode = "";
+  entry.reservationId = "";
 
   return appendLedgerEntry(entry);
 }
