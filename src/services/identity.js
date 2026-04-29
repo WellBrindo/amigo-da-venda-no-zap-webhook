@@ -26,8 +26,12 @@ import {
   redisIdentityConflictWaIdIndexKey,
   redisIdentityConflictBsuidIndexKey,
   redisNextIdentityConflictSequence,
+  redisSafeGet,
+  redisSafeSMembers,
+  getRedisHealthSnapshot,
 } from "./redis.js";
 import * as audit from "./audit.js";
+import { raiseSystemIncident } from "./alerts.js";
 
 export const IDENTITY_CONFLICT_STATUS = Object.freeze({
   PENDING_REVIEW: "PENDING_REVIEW",
@@ -221,8 +225,194 @@ async function safeLogIdentityConflictAudit(input = {}) {
   }
 }
 
+function getIdentityRedisStatus() {
+  try {
+    return safeStr(getRedisHealthSnapshot?.()?.status) || "DEGRADED";
+  } catch {
+    return "DEGRADED";
+  }
+}
+
+async function reportIdentityRedisIncident({
+  step = "",
+  errorCode = "IDENTITY_REDIS_DEGRADED",
+  message = "",
+  internalUserId = "",
+  waId = "",
+  bsuid = "",
+  impact = "",
+  severity = "HIGH",
+  fallbackUsed = false,
+  criticalBlocked = false,
+  meta = {},
+} = {}) {
+  const redisStatus = getIdentityRedisStatus();
+
+  try {
+    if (typeof audit?.logOperationalEvent === "function") {
+      await audit.logOperationalEvent({
+        module: "identity",
+        event: criticalBlocked ? "identity_redis_critical_blocked" : "identity_redis_degraded",
+        level: criticalBlocked ? "error" : "warn",
+        userId: safeStr(internalUserId),
+        step: safeStr(step),
+        message: safeStr(message) || "Identity Redis degradation detected.",
+        errorCode: safeStr(errorCode),
+        status: criticalBlocked ? "blocked" : "degraded",
+        meta: {
+          waId: safeStr(waId),
+          bsuid: safeStr(bsuid),
+          impact: safeStr(impact),
+          redisStatus,
+          fallbackUsed: Boolean(fallbackUsed),
+          criticalBlocked: Boolean(criticalBlocked),
+          ...(meta && typeof meta === "object" ? meta : {}),
+        },
+      });
+    }
+  } catch {}
+
+  try {
+    await raiseSystemIncident({
+      type: "REDIS",
+      severity: safeStr(severity) || "HIGH",
+      module: "identity",
+      step: safeStr(step),
+      errorCode: safeStr(errorCode),
+      message: safeStr(message) || "Identity Redis degradation detected.",
+      impact: safeStr(impact),
+      dedupeKey: ["identity", safeStr(step), safeStr(errorCode), safeStr(impact), safeStr(internalUserId), safeStr(waId), safeStr(bsuid)].filter(Boolean).join("|"),
+      meta: {
+        internalUserId: safeStr(internalUserId),
+        waId: safeStr(waId),
+        bsuid: safeStr(bsuid),
+        redisStatus,
+        fallbackUsed: Boolean(fallbackUsed),
+        criticalBlocked: Boolean(criticalBlocked),
+        ...(meta && typeof meta === "object" ? meta : {}),
+      },
+    });
+  } catch {}
+}
+
+async function safeIdentityRead(action, fallback, context = {}) {
+  try {
+    const result = await action();
+
+    if (context.critical && (result === null || result === undefined || result === fallback)) {
+      await reportIdentityRedisIncident({
+        step: safeStr(context.step || "identity_read"),
+        errorCode: safeStr(context.errorCode || "IDENTITY_CRITICAL_READ_UNCERTAIN"),
+        message: "Critical identity read returned fallback/empty value.",
+        internalUserId: safeStr(context.internalUserId),
+        waId: safeStr(context.waId),
+        bsuid: safeStr(context.bsuid),
+        impact: safeStr(context.impact || "identity_critical_read_uncertain"),
+        severity: safeStr(context.severity || "CRITICAL"),
+        fallbackUsed: true,
+        criticalBlocked: true,
+        meta: context.meta && typeof context.meta === "object" ? context.meta : {},
+      });
+      throw new Error("Critical identity read could not be trusted.");
+    }
+
+    return result;
+  } catch (error) {
+    await reportIdentityRedisIncident({
+      step: safeStr(context.step || "identity_read"),
+      errorCode: safeStr(context.errorCode || (context.critical ? "IDENTITY_CRITICAL_READ_BLOCKED" : "IDENTITY_READ_FALLBACK")),
+      message: safeStr(error?.message || error),
+      internalUserId: safeStr(context.internalUserId),
+      waId: safeStr(context.waId),
+      bsuid: safeStr(context.bsuid),
+      impact: safeStr(context.impact || (context.critical ? "identity_critical_read_blocked" : "identity_read_fallback")),
+      severity: safeStr(context.severity || (context.critical ? "CRITICAL" : "MEDIUM")),
+      fallbackUsed: !context.critical,
+      criticalBlocked: Boolean(context.critical),
+      meta: context.meta && typeof context.meta === "object" ? context.meta : {},
+    });
+
+    if (context.critical) {
+      throw error;
+    }
+
+    return fallback;
+  }
+}
+
+async function criticalIdentityWrite(action, context = {}) {
+  try {
+    const result = await action();
+
+    if (result && typeof result === "object" && Object.prototype.hasOwnProperty.call(result, "ok") && result.ok === false) {
+      throw new Error(safeStr(result.message) || "Critical identity write returned ok=false.");
+    }
+
+    return result;
+  } catch (error) {
+    await reportIdentityRedisIncident({
+      step: safeStr(context.step || "identity_write"),
+      errorCode: safeStr(context.errorCode || "IDENTITY_CRITICAL_WRITE_BLOCKED"),
+      message: safeStr(error?.message || error),
+      internalUserId: safeStr(context.internalUserId),
+      waId: safeStr(context.waId),
+      bsuid: safeStr(context.bsuid),
+      impact: safeStr(context.impact || "identity_consistency_blocked"),
+      severity: safeStr(context.severity || "CRITICAL"),
+      criticalBlocked: true,
+      meta: context.meta && typeof context.meta === "object" ? context.meta : {},
+    });
+    throw error;
+  }
+}
+
+async function readIdentifiersRecordCritical(userId, context = {}) {
+  const record = await safeIdentityRead(
+    () => readIdentifiersRecord(userId),
+    null,
+    {
+      ...context,
+      critical: true,
+      step: safeStr(context.step || "read_identifiers_record_critical"),
+      internalUserId: safeStr(userId),
+      impact: safeStr(context.impact || "identity_identifiers_critical_read"),
+      severity: safeStr(context.severity || "CRITICAL"),
+    }
+  );
+
+  if (!record || safeStr(record.internalUserId) !== safeStr(userId)) {
+    await reportIdentityRedisIncident({
+      step: safeStr(context.step || "read_identifiers_record_critical"),
+      errorCode: "IDENTITY_CRITICAL_IDENTIFIERS_MISSING",
+      message: "Critical identifiers record missing or mismatched.",
+      internalUserId: safeStr(userId),
+      impact: safeStr(context.impact || "identity_identifiers_missing"),
+      severity: "CRITICAL",
+      criticalBlocked: true,
+    });
+    throw new Error("Critical identifiers record missing or mismatched.");
+  }
+
+  return record;
+}
+
 async function readIdentifiersRecord(userId) {
-  const raw = await redisGet(redisUserIdentifiersKey(userId));
+  const raw = await safeIdentityRead(
+    () => redisSafeGet(redisUserIdentifiersKey(userId), {
+      fallbackValue: "",
+      critical: false,
+      module: "identity",
+      step: "read_identifiers_record",
+      suppressThrow: true,
+    }).then((result) => (result?.ok ? result.value : result?.value)),
+    "",
+    {
+      step: "read_identifiers_record",
+      internalUserId: safeStr(userId),
+      impact: "identity_identifiers_read_fallback",
+      severity: "MEDIUM",
+    }
+  );
   if (!raw) return null;
 
   const parsed = tryJsonParse(raw, null);
@@ -245,24 +435,38 @@ async function writeIdentifiersRecord(userId, payload) {
     internalUserId: userId,
     ...(payload || {}),
   });
-  await redisSet(redisUserIdentifiersKey(userId), JSON.stringify(record));
+  await criticalIdentityWrite(() => redisSet(redisUserIdentifiersKey(userId), JSON.stringify(record)), { step: "write_identifiers_record", internalUserId: userId, waId: record.waId, bsuid: record.bsuid, impact: "identity_identifiers_write_blocked" });
   return record;
 }
 
 async function createInternalUserId() {
-  const seq = await redisNextUserSequence();
+  const seq = await criticalIdentityWrite(() => redisNextUserSequence(), { step: "create_internal_user_sequence", impact: "identity_sequence_blocked", severity: "CRITICAL" });
   return formatInternalUserId(seq);
 }
 
 async function createIdentityConflictId() {
-  const seq = await redisNextIdentityConflictSequence();
+  const seq = await criticalIdentityWrite(() => redisNextIdentityConflictSequence(), { step: "create_identity_conflict_sequence", impact: "identity_conflict_sequence_blocked", severity: "HIGH" });
   return formatIdentityConflictId(seq);
 }
 
 async function readIdentityConflictRecord(conflictId) {
   const id = safeStr(conflictId);
   if (!id) return null;
-  const raw = await redisGet(redisIdentityConflictKey(id));
+  const raw = await safeIdentityRead(
+    () => redisSafeGet(redisIdentityConflictKey(id), {
+      fallbackValue: "",
+      critical: false,
+      module: "identity",
+      step: "read_identity_conflict_record",
+      suppressThrow: true,
+    }).then((result) => (result?.ok ? result.value : result?.value)),
+    "",
+    {
+      step: "read_identity_conflict_record",
+      impact: "identity_conflict_read_fallback",
+      severity: "LOW",
+    }
+  );
   if (!raw) return null;
   const parsed = tryJsonParse(raw, null);
   if (!parsed || typeof parsed !== "object") return null;
@@ -271,66 +475,106 @@ async function readIdentityConflictRecord(conflictId) {
 
 async function writeIdentityConflictRecord(record) {
   const next = buildIdentityConflictRecord(record);
-  await redisSet(redisIdentityConflictKey(next.conflictId), JSON.stringify(next));
+  await criticalIdentityWrite(() => redisSet(redisIdentityConflictKey(next.conflictId), JSON.stringify(next)), { step: "write_identity_conflict_record", internalUserId: next.waUserId || next.bsuidUserId, waId: next.waId, bsuid: next.bsuid, impact: "identity_conflict_write_blocked", severity: "HIGH" });
   return next;
 }
 
 async function addConflictToIndexes(record) {
   const jobs = [
-    redisSAdd(redisIdentityConflictStatusIndexKey(record.status), record.conflictId),
-    redisSAdd(redisIdentityConflictUserIndexKey(record.waUserId), record.conflictId),
-    redisSAdd(redisIdentityConflictUserIndexKey(record.bsuidUserId), record.conflictId),
+    criticalIdentityWrite(() => redisSAdd(redisIdentityConflictStatusIndexKey(record.status), record.conflictId), { step: "add_conflict_status_index", internalUserId: record.waUserId || record.bsuidUserId, waId: record.waId, bsuid: record.bsuid, impact: "identity_conflict_index_blocked", severity: "HIGH" }),
+    criticalIdentityWrite(() => redisSAdd(redisIdentityConflictUserIndexKey(record.waUserId), record.conflictId), { step: "add_conflict_user_index_wa", internalUserId: record.waUserId, waId: record.waId, impact: "identity_conflict_index_blocked", severity: "HIGH" }),
+    criticalIdentityWrite(() => redisSAdd(redisIdentityConflictUserIndexKey(record.bsuidUserId), record.conflictId), { step: "add_conflict_user_index_bsuid", internalUserId: record.bsuidUserId, bsuid: record.bsuid, impact: "identity_conflict_index_blocked", severity: "HIGH" }),
   ];
 
-  if (record.waId) jobs.push(redisSAdd(redisIdentityConflictWaIdIndexKey(record.waId), record.conflictId));
-  if (record.bsuid) jobs.push(redisSAdd(redisIdentityConflictBsuidIndexKey(record.bsuid), record.conflictId));
+  if (record.waId) jobs.push(criticalIdentityWrite(() => redisSAdd(redisIdentityConflictWaIdIndexKey(record.waId), record.conflictId), { step: "add_conflict_wa_index", waId: record.waId, internalUserId: record.waUserId, impact: "identity_conflict_index_blocked", severity: "HIGH" }));
+  if (record.bsuid) jobs.push(criticalIdentityWrite(() => redisSAdd(redisIdentityConflictBsuidIndexKey(record.bsuid), record.conflictId), { step: "add_conflict_bsuid_index", bsuid: record.bsuid, internalUserId: record.bsuidUserId, impact: "identity_conflict_index_blocked", severity: "HIGH" }));
 
   if (record.status === IDENTITY_CONFLICT_STATUS.PENDING_REVIEW) {
-    jobs.push(redisSAdd(redisIdentityConflictPendingIndexKey(), record.conflictId));
-    jobs.push(redisSRem(redisIdentityConflictResolvedIndexKey(), record.conflictId));
+    jobs.push(criticalIdentityWrite(() => redisSAdd(redisIdentityConflictPendingIndexKey(), record.conflictId), { step: "add_conflict_pending_index", internalUserId: record.waUserId || record.bsuidUserId, impact: "identity_conflict_index_blocked", severity: "HIGH" }));
+    jobs.push(criticalIdentityWrite(() => redisSRem(redisIdentityConflictResolvedIndexKey(), record.conflictId), { step: "remove_conflict_resolved_index", internalUserId: record.waUserId || record.bsuidUserId, impact: "identity_conflict_index_blocked", severity: "HIGH" }));
   } else if (record.status === IDENTITY_CONFLICT_STATUS.RESOLVED) {
-    jobs.push(redisSAdd(redisIdentityConflictResolvedIndexKey(), record.conflictId));
-    jobs.push(redisSRem(redisIdentityConflictPendingIndexKey(), record.conflictId));
+    jobs.push(criticalIdentityWrite(() => redisSAdd(redisIdentityConflictResolvedIndexKey(), record.conflictId), { step: "add_conflict_resolved_index", internalUserId: record.waUserId || record.bsuidUserId, impact: "identity_conflict_index_blocked", severity: "HIGH" }));
+    jobs.push(criticalIdentityWrite(() => redisSRem(redisIdentityConflictPendingIndexKey(), record.conflictId), { step: "remove_conflict_pending_index", internalUserId: record.waUserId || record.bsuidUserId, impact: "identity_conflict_index_blocked", severity: "HIGH" }));
   } else {
-    jobs.push(redisSRem(redisIdentityConflictPendingIndexKey(), record.conflictId));
-    jobs.push(redisSRem(redisIdentityConflictResolvedIndexKey(), record.conflictId));
+    jobs.push(criticalIdentityWrite(() => redisSRem(redisIdentityConflictPendingIndexKey(), record.conflictId), { step: "remove_conflict_pending_index", internalUserId: record.waUserId || record.bsuidUserId, impact: "identity_conflict_index_blocked", severity: "HIGH" }));
+    jobs.push(criticalIdentityWrite(() => redisSRem(redisIdentityConflictResolvedIndexKey(), record.conflictId), { step: "remove_conflict_resolved_index", internalUserId: record.waUserId || record.bsuidUserId, impact: "identity_conflict_index_blocked", severity: "HIGH" }));
   }
 
-  await Promise.allSettled(jobs);
+  await Promise.all(jobs);
 }
 
 async function removeConflictFromStatusIndexes(conflictId, previousStatus) {
   const id = safeStr(conflictId);
   const prev = normalizeConflictStatus(previousStatus);
-  const jobs = [redisSRem(redisIdentityConflictStatusIndexKey(prev), id)];
+  const jobs = [criticalIdentityWrite(() => redisSRem(redisIdentityConflictStatusIndexKey(prev), id), { step: "remove_conflict_status_index", impact: "identity_conflict_index_blocked", severity: "HIGH" })];
 
   if (prev === IDENTITY_CONFLICT_STATUS.PENDING_REVIEW) {
-    jobs.push(redisSRem(redisIdentityConflictPendingIndexKey(), id));
+    jobs.push(criticalIdentityWrite(() => redisSRem(redisIdentityConflictPendingIndexKey(), id), { step: "remove_pending_index", impact: "identity_conflict_index_blocked", severity: "HIGH" }));
   }
   if (prev === IDENTITY_CONFLICT_STATUS.RESOLVED) {
-    jobs.push(redisSRem(redisIdentityConflictResolvedIndexKey(), id));
+    jobs.push(criticalIdentityWrite(() => redisSRem(redisIdentityConflictResolvedIndexKey(), id), { step: "remove_resolved_index", impact: "identity_conflict_index_blocked", severity: "HIGH" }));
   }
 
-  await Promise.allSettled(jobs);
+  await Promise.all(jobs);
 }
 
 async function resolveExistingConflictId({ waId = null, bsuid = null, waUserId = null, bsuidUserId = null } = {}) {
   const candidates = new Set();
 
   if (waId) {
-    const ids = await redisSMembers(redisIdentityConflictWaIdIndexKey(waId)).catch(() => []);
+    const ids = await safeIdentityRead(
+      () => redisSafeSMembers(redisIdentityConflictWaIdIndexKey(waId), {
+        fallbackValue: [],
+        critical: false,
+        module: "identity",
+        step: "resolve_existing_conflict:wa_index",
+        suppressThrow: true,
+      }).then((result) => (result?.ok ? result.value : result?.value)),
+      [],
+      { step: "resolve_existing_conflict:wa_index", waId, impact: "identity_conflict_index_fallback", severity: "LOW" }
+    );
     uniqueStrings(ids).forEach((id) => candidates.add(id));
   }
   if (bsuid) {
-    const ids = await redisSMembers(redisIdentityConflictBsuidIndexKey(bsuid)).catch(() => []);
+    const ids = await safeIdentityRead(
+      () => redisSafeSMembers(redisIdentityConflictBsuidIndexKey(bsuid), {
+        fallbackValue: [],
+        critical: false,
+        module: "identity",
+        step: "resolve_existing_conflict:bsuid_index",
+        suppressThrow: true,
+      }).then((result) => (result?.ok ? result.value : result?.value)),
+      [],
+      { step: "resolve_existing_conflict:bsuid_index", bsuid, impact: "identity_conflict_index_fallback", severity: "LOW" }
+    );
     uniqueStrings(ids).forEach((id) => candidates.add(id));
   }
   if (waUserId) {
-    const ids = await redisSMembers(redisIdentityConflictUserIndexKey(waUserId)).catch(() => []);
+    const ids = await safeIdentityRead(
+      () => redisSafeSMembers(redisIdentityConflictUserIndexKey(waUserId), {
+        fallbackValue: [],
+        critical: false,
+        module: "identity",
+        step: "resolve_existing_conflict:wa_user_index",
+        suppressThrow: true,
+      }).then((result) => (result?.ok ? result.value : result?.value)),
+      [],
+      { step: "resolve_existing_conflict:wa_user_index", internalUserId: waUserId, impact: "identity_conflict_index_fallback", severity: "LOW" }
+    );
     uniqueStrings(ids).forEach((id) => candidates.add(id));
   }
   if (bsuidUserId) {
-    const ids = await redisSMembers(redisIdentityConflictUserIndexKey(bsuidUserId)).catch(() => []);
+    const ids = await safeIdentityRead(
+      () => redisSafeSMembers(redisIdentityConflictUserIndexKey(bsuidUserId), {
+        fallbackValue: [],
+        critical: false,
+        module: "identity",
+        step: "resolve_existing_conflict:bsuid_user_index",
+        suppressThrow: true,
+      }).then((result) => (result?.ok ? result.value : result?.value)),
+      [],
+      { step: "resolve_existing_conflict:bsuid_user_index", internalUserId: bsuidUserId, impact: "identity_conflict_index_fallback", severity: "LOW" }
+    );
     uniqueStrings(ids).forEach((id) => candidates.add(id));
   }
 
@@ -408,16 +652,64 @@ export function extractInboundIdentifiers(payloadOrMessage = {}) {
   };
 }
 
-export async function getInternalUserIdByWaId(waId) {
+export async function getInternalUserIdByWaId(waId, options = {}) {
   const normalized = normalizeWaId(waId);
   if (!normalized) return null;
-  return toNullable(await redisGet(redisAliasWaIdKey(normalized)));
+  const critical = Boolean(options.critical);
+  const value = await safeIdentityRead(
+    async () => {
+      const result = await redisSafeGet(redisAliasWaIdKey(normalized), {
+        fallbackValue: "",
+        critical,
+        module: "identity",
+        step: "get_internal_user_by_waid",
+        suppressThrow: !critical,
+      });
+      if (!result?.ok && critical) {
+        throw new Error(safeStr(result?.message) || "Critical waId alias lookup failed.");
+      }
+      return result?.ok ? result.value : result?.value;
+    },
+    "",
+    {
+      step: "get_internal_user_by_waid",
+      waId: normalized,
+      impact: critical ? "identity_alias_lookup_critical_blocked" : "identity_alias_lookup_fallback",
+      severity: critical ? "CRITICAL" : "MEDIUM",
+      critical,
+    }
+  );
+  return toNullable(value);
 }
 
-export async function getInternalUserIdByBsuid(bsuid) {
+export async function getInternalUserIdByBsuid(bsuid, options = {}) {
   const normalized = normalizeBsuid(bsuid);
   if (!normalized) return null;
-  return toNullable(await redisGet(redisAliasBsuidKey(normalized)));
+  const critical = Boolean(options.critical);
+  const value = await safeIdentityRead(
+    async () => {
+      const result = await redisSafeGet(redisAliasBsuidKey(normalized), {
+        fallbackValue: "",
+        critical,
+        module: "identity",
+        step: "get_internal_user_by_bsuid",
+        suppressThrow: !critical,
+      });
+      if (!result?.ok && critical) {
+        throw new Error(safeStr(result?.message) || "Critical bsuid alias lookup failed.");
+      }
+      return result?.ok ? result.value : result?.value;
+    },
+    "",
+    {
+      step: "get_internal_user_by_bsuid",
+      bsuid: normalized,
+      impact: critical ? "identity_alias_lookup_critical_blocked" : "identity_alias_lookup_fallback",
+      severity: critical ? "CRITICAL" : "MEDIUM",
+      critical,
+    }
+  );
+  return toNullable(value);
 }
 
 export async function getUserIdentifiers(internalUserId) {
@@ -436,7 +728,17 @@ export async function listIdentityConflicts({ status = "", limit = 100 } = {}) {
     ? redisIdentityConflictStatusIndexKey(normalizedStatus)
     : redisIdentityConflictPendingIndexKey();
 
-  const ids = uniqueStrings(await redisSMembers(key).catch(() => []));
+  const ids = uniqueStrings(await safeIdentityRead(
+    () => redisSafeSMembers(key, {
+      fallbackValue: [],
+      critical: false,
+      module: "identity",
+      step: "list_identity_conflicts",
+      suppressThrow: true,
+    }).then((result) => (result?.ok ? result.value : result?.value)),
+    [],
+    { step: "list_identity_conflicts", impact: "identity_conflict_list_fallback", severity: "LOW" }
+  ));
   const lim = Math.max(1, Math.min(1000, Number(limit) || 100));
 
   const rows = [];
@@ -452,7 +754,17 @@ export async function listIdentityConflicts({ status = "", limit = 100 } = {}) {
 export async function hasPendingIdentityConflictForUser(internalUserId) {
   const userId = safeStr(internalUserId);
   if (!userId) return false;
-  const ids = uniqueStrings(await redisSMembers(redisIdentityConflictUserIndexKey(userId)).catch(() => []));
+  const ids = uniqueStrings(await safeIdentityRead(
+    () => redisSafeSMembers(redisIdentityConflictUserIndexKey(userId), {
+      fallbackValue: [],
+      critical: false,
+      module: "identity",
+      step: "has_pending_conflict_for_user",
+      suppressThrow: true,
+    }).then((result) => (result?.ok ? result.value : result?.value)),
+    [],
+    { step: "has_pending_conflict_for_user", internalUserId: userId, impact: "identity_user_conflict_index_fallback", severity: "LOW" }
+  ));
   for (const conflictId of ids) {
     const conflict = await readIdentityConflictRecord(conflictId);
     if (conflict?.status === IDENTITY_CONFLICT_STATUS.PENDING_REVIEW) return true;
@@ -463,7 +775,17 @@ export async function hasPendingIdentityConflictForUser(internalUserId) {
 export async function getPendingIdentityConflictForUser(internalUserId) {
   const userId = safeStr(internalUserId);
   if (!userId) return null;
-  const ids = uniqueStrings(await redisSMembers(redisIdentityConflictUserIndexKey(userId)).catch(() => []));
+  const ids = uniqueStrings(await safeIdentityRead(
+    () => redisSafeSMembers(redisIdentityConflictUserIndexKey(userId), {
+      fallbackValue: [],
+      critical: false,
+      module: "identity",
+      step: "get_pending_conflict_for_user",
+      suppressThrow: true,
+    }).then((result) => (result?.ok ? result.value : result?.value)),
+    [],
+    { step: "get_pending_conflict_for_user", internalUserId: userId, impact: "identity_user_conflict_index_fallback", severity: "LOW" }
+  ));
   for (const conflictId of ids) {
     const conflict = await readIdentityConflictRecord(conflictId);
     if (conflict?.status === IDENTITY_CONFLICT_STATUS.PENDING_REVIEW) return conflict;
@@ -555,7 +877,18 @@ function appendConflictNote(existingNotes, nextNote) {
 }
 
 async function requireIdentityConflict(conflictId) {
-  const conflict = await readIdentityConflictRecord(conflictId);
+  const id = safeStr(conflictId);
+  const conflict = await safeIdentityRead(
+    () => readIdentityConflictRecord(id),
+    null,
+    {
+      critical: true,
+      step: "require_identity_conflict",
+      impact: "identity_conflict_required_for_manual_decision",
+      severity: "CRITICAL",
+      meta: { conflictId: id },
+    }
+  );
   if (!conflict) {
     throw new Error("Identity conflict not found.");
   }
@@ -586,8 +919,10 @@ async function clearIdentifiersForUser(userId, { clearWaId = false, clearBsuid =
   const targetUserId = safeStr(userId);
   if (!targetUserId) return null;
 
-  const current = await readIdentifiersRecord(targetUserId);
-  if (!current) return null;
+  const current = await readIdentifiersRecordCritical(targetUserId, {
+    step: "clear_identifiers_for_user",
+    impact: "identity_clear_alias_requires_trusted_record",
+  });
 
   const next = {
     ...current,
@@ -617,6 +952,23 @@ async function relinkConflictAliasesToUser(conflict, targetUserId, options = {})
   const moveWaId = options.moveWaId !== false && Boolean(conflict?.waId);
   const moveBsuid = options.moveBsuid !== false && Boolean(conflict?.bsuid);
 
+  const winnerBefore = await readIdentifiersRecordCritical(winnerUserId, {
+    step: "relink_conflict_aliases:winner_precheck",
+    impact: "identity_relink_requires_trusted_winner",
+  });
+  const waBefore = waUserId
+    ? await readIdentifiersRecordCritical(waUserId, {
+        step: "relink_conflict_aliases:wa_precheck",
+        impact: "identity_relink_requires_trusted_wa_user",
+      })
+    : null;
+  const bsuidBefore = bsuidUserId
+    ? await readIdentifiersRecordCritical(bsuidUserId, {
+        step: "relink_conflict_aliases:bsuid_precheck",
+        impact: "identity_relink_requires_trusted_bsuid_user",
+      })
+    : null;
+
   if (moveWaId && conflict?.waId) {
     await linkWaIdToUser(winnerUserId, conflict.waId);
   }
@@ -631,9 +983,12 @@ async function relinkConflictAliasesToUser(conflict, targetUserId, options = {})
     await clearIdentifiersForUser(bsuidUserId, { clearWaId: false, clearBsuid: true });
   }
 
-  const winnerIdentifiers = await getUserIdentifiers(winnerUserId);
-  const waIdentifiers = waUserId ? await getUserIdentifiers(waUserId) : null;
-  const bsuidIdentifiers = bsuidUserId ? await getUserIdentifiers(bsuidUserId) : null;
+  const winnerIdentifiers = await readIdentifiersRecordCritical(winnerUserId, {
+    step: "relink_conflict_aliases:winner_after",
+    impact: "identity_relink_winner_after_read",
+  });
+  const waIdentifiers = waUserId ? await readIdentifiersRecord(waUserId) : null;
+  const bsuidIdentifiers = bsuidUserId ? await readIdentifiersRecord(bsuidUserId) : null;
 
   return {
     winnerIdentifiers,
@@ -641,6 +996,11 @@ async function relinkConflictAliasesToUser(conflict, targetUserId, options = {})
     bsuidUserIdentifiers: bsuidIdentifiers,
     moveWaId,
     moveBsuid,
+    before: {
+      winner: winnerBefore,
+      waUser: waBefore,
+      bsuidUser: bsuidBefore,
+    },
   };
 }
 
@@ -727,6 +1087,21 @@ export async function reassignIdentityConflictAliases(conflictId, options = {}) 
 
   if (moveWaIdToUserId) {
     ensureConflictTargetUser(current, moveWaIdToUserId);
+    await readIdentifiersRecordCritical(moveWaIdToUserId, {
+      step: "reassign_aliases:wa_target_precheck",
+      impact: "identity_reassign_requires_trusted_wa_target",
+    });
+  }
+
+  if (moveBsuidToUserId) {
+    ensureConflictTargetUser(current, moveBsuidToUserId);
+    await readIdentifiersRecordCritical(moveBsuidToUserId, {
+      step: "reassign_aliases:bsuid_target_precheck",
+      impact: "identity_reassign_requires_trusted_bsuid_target",
+    });
+  }
+
+  if (moveWaIdToUserId) {
     if (current.waId) {
       await linkWaIdToUser(moveWaIdToUserId, current.waId);
     }
@@ -737,7 +1112,6 @@ export async function reassignIdentityConflictAliases(conflictId, options = {}) 
   }
 
   if (moveBsuidToUserId) {
-    ensureConflictTargetUser(current, moveBsuidToUserId);
     if (current.bsuid) {
       await linkBsuidToUser(moveBsuidToUserId, current.bsuid);
     }
@@ -987,12 +1361,12 @@ export async function deleteIdentityForUser(internalUserId) {
   if (!userId) throw new Error("internalUserId required");
 
   const identifiers = await getUserIdentifiers(userId);
-  const jobs = [redisDel(redisUserIdentifiersKey(userId))];
+  const jobs = [criticalIdentityWrite(() => redisDel(redisUserIdentifiersKey(userId)), { step: "delete_identity_user_record", internalUserId: userId, impact: "identity_delete_blocked", severity: "CRITICAL" })];
 
-  if (identifiers?.waId) jobs.push(redisDel(redisAliasWaIdKey(identifiers.waId)));
-  if (identifiers?.bsuid) jobs.push(redisDel(redisAliasBsuidKey(identifiers.bsuid)));
+  if (identifiers?.waId) jobs.push(criticalIdentityWrite(() => redisDel(redisAliasWaIdKey(identifiers.waId)), { step: "delete_identity_wa_alias", internalUserId: userId, waId: identifiers.waId, impact: "identity_delete_blocked", severity: "CRITICAL" }));
+  if (identifiers?.bsuid) jobs.push(criticalIdentityWrite(() => redisDel(redisAliasBsuidKey(identifiers.bsuid)), { step: "delete_identity_bsuid_alias", internalUserId: userId, bsuid: identifiers.bsuid, impact: "identity_delete_blocked", severity: "CRITICAL" }));
 
-  await Promise.allSettled(jobs);
+  await Promise.all(jobs);
   return { ok: true, userId, waId: identifiers?.waId || null, bsuid: identifiers?.bsuid || null };
 }
 
@@ -1001,7 +1375,7 @@ export async function linkWaIdToUser(internalUserId, waId) {
   const normalizedWaId = normalizeWaId(waId);
   if (!userId || !normalizedWaId) return null;
 
-  await redisSet(redisAliasWaIdKey(normalizedWaId), userId);
+  await criticalIdentityWrite(() => redisSet(redisAliasWaIdKey(normalizedWaId), userId), { step: "link_waid_to_user", internalUserId: userId, waId: normalizedWaId, impact: "identity_alias_link_blocked", severity: "CRITICAL" });
 
   const current = (await readIdentifiersRecord(userId)) || buildIdentifiersRecord({ internalUserId: userId });
   const next = {
@@ -1023,7 +1397,7 @@ export async function linkBsuidToUser(internalUserId, bsuid) {
   const normalizedBsuid = normalizeBsuid(bsuid);
   if (!userId || !normalizedBsuid) return null;
 
-  await redisSet(redisAliasBsuidKey(normalizedBsuid), userId);
+  await criticalIdentityWrite(() => redisSet(redisAliasBsuidKey(normalizedBsuid), userId), { step: "link_bsuid_to_user", internalUserId: userId, bsuid: normalizedBsuid, impact: "identity_alias_link_blocked", severity: "CRITICAL" });
 
   const current = (await readIdentifiersRecord(userId)) || buildIdentifiersRecord({ internalUserId: userId });
   const next = {
@@ -1152,10 +1526,10 @@ async function createCanonicalUser({ waId = null, bsuid = null } = {}) {
   });
 
   if (normalizedWaId) {
-    await redisSet(redisAliasWaIdKey(normalizedWaId), internalUserId);
+    await criticalIdentityWrite(() => redisSet(redisAliasWaIdKey(normalizedWaId), internalUserId), { step: "create_canonical_user_wa_alias", internalUserId, waId: normalizedWaId, impact: "identity_create_alias_blocked", severity: "CRITICAL" });
   }
   if (normalizedBsuid) {
-    await redisSet(redisAliasBsuidKey(normalizedBsuid), internalUserId);
+    await criticalIdentityWrite(() => redisSet(redisAliasBsuidKey(normalizedBsuid), internalUserId), { step: "create_canonical_user_bsuid_alias", internalUserId, bsuid: normalizedBsuid, impact: "identity_create_alias_blocked", severity: "CRITICAL" });
   }
 
   return {
@@ -1173,8 +1547,13 @@ export async function resolveOrCreateUserByIdentifiers({ waId = null, bsuid = nu
   const normalizedWaId = normalizeWaId(waId);
   const normalizedBsuid = normalizeBsuid(bsuid);
 
-  const waUserId = normalizedWaId ? await getInternalUserIdByWaId(normalizedWaId) : null;
-  const bsuidUserId = normalizedBsuid ? await getInternalUserIdByBsuid(normalizedBsuid) : null;
+  const requiresCriticalAliasRead = Boolean(normalizedWaId && normalizedBsuid);
+  const waUserId = normalizedWaId
+    ? await getInternalUserIdByWaId(normalizedWaId, { critical: requiresCriticalAliasRead })
+    : null;
+  const bsuidUserId = normalizedBsuid
+    ? await getInternalUserIdByBsuid(normalizedBsuid, { critical: requiresCriticalAliasRead })
+    : null;
 
   if (waUserId && bsuidUserId && waUserId !== bsuidUserId) {
     const conflict = await upsertIdentityConflict({
