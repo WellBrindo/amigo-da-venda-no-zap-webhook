@@ -19,7 +19,11 @@ import {
 import { getCopyText } from "../copy.js";
 import { sendWhatsAppText } from "../meta/whatsapp.js";
 import { recordAsaasEvent } from "./ledger.js";
-import { getPreferredOutboundRecipient, getPendingIdentityConflictForUser } from "../identity.js";
+import {
+  getPreferredOutboundRecipient,
+  getPendingIdentityConflictForUser,
+  getInternalUserIdByWaId,
+} from "../identity.js";
 import {
   trackPaymentConfirmed,
   trackPaymentFailed,
@@ -60,6 +64,116 @@ const ASAAS_WEBHOOK_ERROR = Object.freeze({
 
 function safeStr(value) {
   return String(value ?? "").trim();
+}
+
+function normalizeAdminWebhookPlanCode(value) {
+  return safeStr(value).toUpperCase();
+}
+
+function normalizeAdminWebhookPaymentMethod(value) {
+  const method = safeStr(value).toUpperCase();
+  if (method === "PIX") return "PIX";
+  if (method === "CARD" || method === "CREDIT_CARD") return "CARD";
+  return method;
+}
+
+function normalizeWebhookExternalReference(value) {
+  const raw = safeStr(value);
+  if (!raw) return { raw: "", normalized: "", type: "empty", looksCanonical: false };
+
+  if (/^usr_\d+$/i.test(raw)) {
+    return {
+      raw,
+      normalized: raw,
+      type: "internalUserId",
+      looksCanonical: true,
+    };
+  }
+
+  const digits = raw.replace(/\D+/g, "");
+  if (digits && digits === raw.replace(/\D+/g, "") && digits.length >= 10 && digits.length <= 15) {
+    return {
+      raw,
+      normalized: digits,
+      type: "waId_legacy",
+      looksCanonical: false,
+    };
+  }
+
+  return {
+    raw,
+    normalized: raw,
+    type: "legacy_or_unknown",
+    looksCanonical: false,
+  };
+}
+
+function buildAdminWebhookFinancialPrecedencePolicy() {
+  return {
+    externalReference: "externalReference deve ser tratado preferencialmente como internalUserId canônico. waId só é aceito como compatibilidade legada e será tentado via alias de identidade.",
+    ledger: "Eventos financeiros do Asaas continuam sendo registrados em ledger antes de automações reversíveis sempre que possível.",
+    status: "Eventos financeiros confirmados, vencidos, falhos, deletados ou de assinatura inativada prevalecem sobre alterações manuais de status quando o webhook for recebido depois da edição administrativa.",
+    plan: "O webhook não altera diretamente o plano do usuário; ele usa o plano/quote persistido para rastreabilidade e ativa/bloqueia estados conforme o evento financeiro.",
+    manualOverride: "Alterações administrativas de plano, método de pagamento ou IDs Asaas podem exigir ação manual no Asaas; este webhook não finge sincronização de assinatura.",
+  };
+}
+
+export function getAsaasWebhookAdminCoherenceWarnings(userSnapshot = {}, desiredPatch = {}) {
+  const current = userSnapshot && typeof userSnapshot === "object" ? userSnapshot : {};
+  const patch = desiredPatch && typeof desiredPatch === "object" ? desiredPatch : {};
+  const warnings = [];
+  const financialFields = [];
+
+  const currentPlan = normalizeAdminWebhookPlanCode(current.plan);
+  const nextPlan = Object.prototype.hasOwnProperty.call(patch, "plan")
+    ? normalizeAdminWebhookPlanCode(patch.plan)
+    : currentPlan;
+
+  const currentPaymentMethod = normalizeAdminWebhookPaymentMethod(current.paymentMethod);
+  const nextPaymentMethod = Object.prototype.hasOwnProperty.call(patch, "paymentMethod")
+    ? normalizeAdminWebhookPaymentMethod(patch.paymentMethod)
+    : currentPaymentMethod;
+
+  const currentAsaasCustomerId = safeStr(current.asaasCustomerId);
+  const nextAsaasCustomerId = Object.prototype.hasOwnProperty.call(patch, "asaasCustomerId")
+    ? safeStr(patch.asaasCustomerId)
+    : currentAsaasCustomerId;
+
+  const currentAsaasSubscriptionId = safeStr(current.asaasSubscriptionId);
+  const nextAsaasSubscriptionId = Object.prototype.hasOwnProperty.call(patch, "asaasSubscriptionId")
+    ? safeStr(patch.asaasSubscriptionId)
+    : currentAsaasSubscriptionId;
+
+  if (currentPlan !== nextPlan) financialFields.push("plan");
+  if (currentPaymentMethod !== nextPaymentMethod) financialFields.push("paymentMethod");
+  if (currentAsaasCustomerId !== nextAsaasCustomerId) financialFields.push("asaasCustomerId");
+  if (currentAsaasSubscriptionId !== nextAsaasSubscriptionId) financialFields.push("asaasSubscriptionId");
+
+  const hasSubscription = Boolean(nextAsaasSubscriptionId || currentAsaasSubscriptionId);
+  if (financialFields.includes("plan") && hasSubscription) {
+    warnings.push("Alteração administrativa de plano não altera automaticamente a assinatura existente no Asaas; o próximo webhook financeiro pode manter status operacional conforme o evento recebido.");
+  }
+  if (financialFields.includes("paymentMethod") && hasSubscription) {
+    warnings.push("Alteração administrativa de método de pagamento é apenas interna se não houver alteração correspondente na cobrança/assinatura Asaas.");
+  }
+  if (financialFields.includes("asaasCustomerId") || financialFields.includes("asaasSubscriptionId")) {
+    warnings.push("Alteração manual de IDs Asaas afeta reconciliação; confirmar no Asaas antes de salvar em produção.");
+  }
+
+  if (!hasSubscription && nextPlan) {
+    warnings.push("Usuário pode ter plano interno sem assinatura Asaas vinculada; webhook não criará assinatura automaticamente.");
+  }
+
+  return {
+    ok: true,
+    source: "asaas_webhook_admin_coherence",
+    hasAsaasSubscription: hasSubscription,
+    changedFinancialFields: financialFields,
+    requiresManualFinancialAction: financialFields.length > 0,
+    webhookMayOverrideStatus: true,
+    policy: buildAdminWebhookFinancialPrecedencePolicy(),
+    warnings,
+  };
 }
 
 function normalizeCents(value) {
@@ -584,15 +698,65 @@ async function recordWebhookLedgerSafe(args = {}) {
   }
 }
 
-async function resolveUserForWebhook(userId) {
-  const normalizedUserId = safeStr(userId);
+async function resolveUserForWebhook(userId, context = {}) {
+  const externalReference = normalizeWebhookExternalReference(userId);
+  const normalizedUserId = safeStr(externalReference.normalized);
   if (!normalizedUserId) {
     const err = new Error("Webhook event missing externalReference/internal user id");
     err.code = ASAAS_WEBHOOK_ERROR.USER_RESOLUTION;
     throw err;
   }
-  await ensureUserExists(normalizedUserId);
-  return normalizedUserId;
+
+  let resolvedUserId = normalizedUserId;
+  let resolutionSource = externalReference.type;
+
+  if (!externalReference.looksCanonical && externalReference.type === "waId_legacy") {
+    try {
+      const mapped = await getInternalUserIdByWaId(normalizedUserId, { critical: false });
+      if (mapped) {
+        resolvedUserId = safeStr(mapped);
+        resolutionSource = "waId_alias_to_internalUserId";
+      } else {
+        resolutionSource = "waId_legacy_unmapped_fallback";
+      }
+    } catch (err) {
+      resolutionSource = "waId_alias_lookup_failed_fallback";
+      await logWebhookOperational("warn", buildWebhookOperationalContext({
+        userId: normalizedUserId,
+        event: context?.event,
+        payment: context?.payment,
+        subscription: context?.subscription,
+        step: "resolve_user_external_reference_alias",
+        errorCode: ASAAS_WEBHOOK_ERROR.USER_RESOLUTION,
+        message: err?.message || String(err),
+        meta: {
+          externalReferenceType: externalReference.type,
+          fallbackToRawExternalReference: true,
+        },
+      }));
+    }
+  }
+
+  if (!/^usr_\d+$/i.test(resolvedUserId)) {
+    await logWebhookOperational("warn", buildWebhookOperationalContext({
+      userId: resolvedUserId,
+      event: context?.event,
+      payment: context?.payment,
+      subscription: context?.subscription,
+      step: "resolve_user_external_reference_policy",
+      errorCode: ASAAS_WEBHOOK_ERROR.USER_RESOLUTION,
+      message: "externalReference não está no formato canônico internalUserId; compatibilidade legada aplicada sem depender de telefone como fonte preferencial.",
+      meta: {
+        externalReferenceRaw: externalReference.raw,
+        externalReferenceType: externalReference.type,
+        resolutionSource,
+        canonicalExpected: "usr_000000",
+      },
+    }));
+  }
+
+  await ensureUserExists(resolvedUserId);
+  return resolvedUserId;
 }
 
 async function getPendingIdentityConflictSafe(userId) {
@@ -727,7 +891,12 @@ export async function handleAsaasWebhookEvent(body) {
       return { ok: false, reason: "no_external_reference" };
     }
 
-    const userId = await resolveUserForWebhook(inferredUserId);
+    const userId = await resolveUserForWebhook(inferredUserId, { event, payment, subscription });
+
+    // Regra de precedência financeira:
+    // - O externalReference recebido do Asaas representa o vínculo financeiro do evento.
+    // - Eventos financeiros confirmados/vencidos/falhos/deletados/inativados prevalecem sobre edição manual prévia de status.
+    // - O plano não é sobrescrito aqui; alterações administrativas de plano exigem coerência externa com Asaas/ledger.
 
     // ==============================
     // PAGAMENTO CONFIRMADO
