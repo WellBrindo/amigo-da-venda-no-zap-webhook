@@ -256,6 +256,90 @@ async function reportMetaWhatsAppFailure(error, payload = {}) {
 }
 
 
+
+function normalizeAlertLines(lines) {
+  if (!Array.isArray(lines)) return [];
+  return lines
+    .map((line) => safeStr(line))
+    .filter(Boolean);
+}
+
+function buildOperationalAlertMessage({
+  title = "",
+  lines = [],
+  severity = "",
+  incidentId = "",
+  status = "",
+} = {}) {
+  const normalizedSeverity = safeStr(severity).toUpperCase() || "MEDIUM";
+  const normalizedStatus = safeStr(status).toUpperCase() || "OPEN";
+  const safeLines = normalizeAlertLines(lines);
+
+  const header = `🚨 ${safeStr(title) || "Alerta operacional"}`;
+  const meta = [
+    `Severidade: ${normalizedSeverity}`,
+    `Incidente: ${safeStr(incidentId) || "N/D"}`,
+    `Status: ${normalizedStatus}`,
+  ];
+
+  return [header, ...meta, ...safeLines].filter(Boolean).join("\n");
+}
+
+export async function sendOperationalAlertWhatsApp({
+  to = "",
+  title = "",
+  lines = [],
+  severity = "",
+  incidentId = "",
+  status = "OPEN",
+} = {}) {
+  const finalTo = normalizeRecipientInput(to);
+  const text = buildOperationalAlertMessage({
+    title,
+    lines,
+    severity,
+    incidentId,
+    status,
+  });
+
+  try {
+    return await sendWhatsAppText({
+      to: finalTo,
+      text,
+      userId: "",
+      waId: finalTo,
+      step: "sendOperationalAlertWhatsApp",
+    });
+  } catch (error) {
+    const normalizedError =
+      error && typeof error === "object"
+        ? error
+        : buildMetaWhatsAppError({
+            errorCode: META_WHATSAPP_ERROR.UNKNOWN,
+            message: safeStr(error) || "Operational WhatsApp alert failed",
+            retryable: false,
+            details: {
+              recipient: finalTo,
+              incidentId: safeStr(incidentId),
+              severity: safeStr(severity).toUpperCase(),
+            },
+          });
+
+    return {
+      ok: false,
+      provider: "meta_whatsapp",
+      operationalAlert: true,
+      errorCode: safeStr(normalizedError?.errorCode) || META_WHATSAPP_ERROR.UNKNOWN,
+      message: safeStr(normalizedError?.message) || "Operational WhatsApp alert failed",
+      retryable: Boolean(normalizedError?.retryable),
+      status: Number(normalizedError?.status) || 0,
+      incidentId: safeStr(incidentId),
+      severity: safeStr(severity).toUpperCase(),
+      recipient: finalTo,
+    };
+  }
+}
+
 export async function sendWhatsAppText({ to, recipient, text, userId = "", waId = "", step = "sendWhatsAppText" } = {}) {
   try {
     assertMetaEnv();
