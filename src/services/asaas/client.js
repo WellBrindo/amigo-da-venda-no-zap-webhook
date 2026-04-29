@@ -1233,4 +1233,205 @@ export async function listSubscriptionsByExternalReference(externalReference, { 
   return listSubscriptions({ externalReference, limit, offset });
 }
 
+
+// -------------------- Admin helpers (read-only impact analysis) --------------------
+function normalizeAdminSnapshotObject(value = {}) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function normalizeAdminPatchObject(value = {}) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function adminValueProvided(patch, key) {
+  return Object.prototype.hasOwnProperty.call(normalizeAdminPatchObject(patch), key);
+}
+
+function normalizeAdminPlanCode(value) {
+  return safeUpper(value);
+}
+
+function normalizeAdminPaymentMethod(value) {
+  const method = safeUpper(value);
+  if (method === "CARD" || method === "CREDIT_CARD") return "CARD";
+  if (method === "PIX") return "PIX";
+  return method || "";
+}
+
+function normalizeAdminStatus(value) {
+  return safeUpper(value);
+}
+
+function normalizeAdminAsaasId(value) {
+  return safeStr(value);
+}
+
+function normalizeAdminDateText(value) {
+  return safeStr(value);
+}
+
+function resolveDesiredAdminValue(snapshot, patch, key, normalizer = (v) => v) {
+  const source = adminValueProvided(patch, key) ? patch[key] : snapshot[key];
+  return normalizer(source);
+}
+
+function buildAdminImpactChange(field, beforeValue, afterValue, impact = "internal") {
+  const before = beforeValue == null ? "" : beforeValue;
+  const after = afterValue == null ? "" : afterValue;
+  return {
+    field,
+    before,
+    after,
+    changed: String(before) !== String(after),
+    impact,
+  };
+}
+
+export function getAdminSubscriptionImpact(userSnapshot = {}, desiredPatch = {}) {
+  const snapshot = normalizeAdminSnapshotObject(userSnapshot);
+  const patch = normalizeAdminPatchObject(desiredPatch);
+
+  const current = {
+    userId: safeStr(snapshot.userId || snapshot.internalUserId || snapshot.waId),
+    waId: safeStr(snapshot.waId),
+    status: normalizeAdminStatus(snapshot.status),
+    plan: normalizeAdminPlanCode(snapshot.plan),
+    paymentMethod: normalizeAdminPaymentMethod(snapshot.paymentMethod),
+    asaasCustomerId: normalizeAdminAsaasId(snapshot.asaasCustomerId),
+    asaasSubscriptionId: normalizeAdminAsaasId(snapshot.asaasSubscriptionId),
+    cardValidUntil: normalizeAdminDateText(snapshot.cardValidUntil),
+    cardCanceledAt: normalizeAdminDateText(snapshot.cardCanceledAt),
+  };
+
+  const desired = {
+    userId: current.userId,
+    waId: current.waId,
+    status: resolveDesiredAdminValue(current, patch, "status", normalizeAdminStatus),
+    plan: resolveDesiredAdminValue(current, patch, "plan", normalizeAdminPlanCode),
+    paymentMethod: resolveDesiredAdminValue(current, patch, "paymentMethod", normalizeAdminPaymentMethod),
+    asaasCustomerId: resolveDesiredAdminValue(current, patch, "asaasCustomerId", normalizeAdminAsaasId),
+    asaasSubscriptionId: resolveDesiredAdminValue(current, patch, "asaasSubscriptionId", normalizeAdminAsaasId),
+    cardValidUntil: resolveDesiredAdminValue(current, patch, "cardValidUntil", normalizeAdminDateText),
+    cardCanceledAt: resolveDesiredAdminValue(current, patch, "cardCanceledAt", normalizeAdminDateText),
+  };
+
+  const hasAsaasCustomer = Boolean(current.asaasCustomerId || desired.asaasCustomerId);
+  const hasAsaasSubscription = Boolean(current.asaasSubscriptionId || desired.asaasSubscriptionId);
+
+  const changes = [
+    buildAdminImpactChange("status", current.status, desired.status, "account_state"),
+    buildAdminImpactChange("plan", current.plan, desired.plan, "financial_reference"),
+    buildAdminImpactChange("paymentMethod", current.paymentMethod, desired.paymentMethod, "billing_reference"),
+    buildAdminImpactChange("asaasCustomerId", current.asaasCustomerId, desired.asaasCustomerId, "provider_reference"),
+    buildAdminImpactChange("asaasSubscriptionId", current.asaasSubscriptionId, desired.asaasSubscriptionId, "provider_reference"),
+    buildAdminImpactChange("cardValidUntil", current.cardValidUntil, desired.cardValidUntil, "access_window"),
+    buildAdminImpactChange("cardCanceledAt", current.cardCanceledAt, desired.cardCanceledAt, "cancellation_marker"),
+  ];
+
+  const changed = changes.filter((item) => item.changed);
+  const changedFields = changed.map((item) => item.field);
+
+  const planChanged = changedFields.includes("plan");
+  const statusChanged = changedFields.includes("status");
+  const paymentMethodChanged = changedFields.includes("paymentMethod");
+  const customerChanged = changedFields.includes("asaasCustomerId");
+  const subscriptionChanged = changedFields.includes("asaasSubscriptionId");
+  const cardAccessChanged = changedFields.includes("cardValidUntil") || changedFields.includes("cardCanceledAt");
+
+  const warnings = [];
+  const blockers = [];
+  const impacts = [];
+
+  if (hasAsaasSubscription) {
+    impacts.push("Usuário possui referência de assinatura Asaas; alterações de plano, método de pagamento, status ou marcadores de cartão podem exigir conferência financeira manual.");
+  }
+
+  if (planChanged && hasAsaasSubscription) {
+    warnings.push("Plano alterado internamente, mas este helper não altera valor, ciclo ou assinatura recorrente no Asaas.");
+  }
+
+  if (paymentMethodChanged && hasAsaasSubscription) {
+    warnings.push("Método de pagamento alterado internamente; assinatura/cobrança existente no Asaas não é sincronizada por este helper.");
+  }
+
+  if (statusChanged && ["ACTIVE", "BLOCKED", "PAYMENT_PENDING", "TRIAL"].includes(desired.status) && hasAsaasSubscription) {
+    warnings.push("Status do usuário foi alterado, mas nenhuma assinatura Asaas é cancelada, criada ou atualizada automaticamente.");
+  }
+
+  if (customerChanged) {
+    warnings.push("Asaas Customer foi alterado como referência administrativa; nenhuma validação remota ou migração de cliente é executada por este helper.");
+  }
+
+  if (subscriptionChanged) {
+    warnings.push("Asaas Subscription foi alterada como referência administrativa; nenhuma assinatura é consultada, criada, cancelada ou alterada por este helper.");
+  }
+
+  if (cardAccessChanged) {
+    warnings.push("Campos de cancelamento/validade de cartão afetam controle interno de acesso, mas não executam ação real no Asaas.");
+  }
+
+  if (desired.status === "ACTIVE" && desired.paymentMethod && !desired.asaasCustomerId) {
+    warnings.push("Usuário ativo com método de pagamento definido, mas sem Asaas Customer informado.");
+  }
+
+  if (desired.status === "ACTIVE" && desired.paymentMethod === "CARD" && !desired.asaasSubscriptionId) {
+    warnings.push("Usuário ativo com pagamento por cartão, mas sem Asaas Subscription informada.");
+  }
+
+  if (desired.asaasSubscriptionId && !desired.asaasCustomerId) {
+    warnings.push("Existe Asaas Subscription desejada sem Asaas Customer correspondente.");
+  }
+
+  if (planChanged || paymentMethodChanged || customerChanged || subscriptionChanged || cardAccessChanged) {
+    impacts.push("Alteração classificada como sensível financeiramente para auditoria e revisão operacional.");
+  }
+
+  const financialFieldsChanged = planChanged || paymentMethodChanged || customerChanged || subscriptionChanged || cardAccessChanged;
+  const requiresManualFinancialAction = Boolean(
+    financialFieldsChanged && (
+      hasAsaasSubscription ||
+      customerChanged ||
+      subscriptionChanged ||
+      desired.paymentMethod === "CARD" ||
+      current.paymentMethod === "CARD"
+    )
+  );
+
+  return {
+    ok: true,
+    readOnly: true,
+    provider: "asaas",
+    userId: current.userId,
+    waId: current.waId,
+    hasAsaasCustomer,
+    hasAsaasSubscription,
+    current,
+    desired,
+    changedFields,
+    changes,
+    impact: {
+      planChanged,
+      statusChanged,
+      paymentMethodChanged,
+      customerChanged,
+      subscriptionChanged,
+      cardAccessChanged,
+      financialFieldsChanged,
+      internalOnly: changed.length > 0 && !requiresManualFinancialAction,
+      requiresManualFinancialAction,
+      requiresAsaasReview: requiresManualFinancialAction,
+      remoteActionExecuted: false,
+    },
+    warnings,
+    blockers,
+    messages: [
+      "Análise administrativa somente de leitura: nenhuma cobrança, assinatura, cliente ou valor foi criado, cancelado ou alterado no Asaas.",
+      requiresManualFinancialAction
+        ? "Há impacto financeiro potencial; revise a assinatura/cobrança correspondente antes de considerar a alteração totalmente conciliada."
+        : "Alteração aparenta ser apenas interna nesta análise local, sem execução remota no Asaas.",
+      ...impacts,
+    ].filter(Boolean),
+  };
+}
+
 export const ASAAS_CLIENT_TRACKING_MODE_VALUES = ASAAS_CLIENT_TRACKING_MODE;
