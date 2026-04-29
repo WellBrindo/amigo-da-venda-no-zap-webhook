@@ -1092,6 +1092,13 @@ const CONVERSION_EVENTS = Object.freeze([
   "webhook_error",
   "state_error",
   "coupon_error",
+  "redis_degraded",
+  "redis_down",
+  "redis_recovered",
+  "redis_fallback_read",
+  "redis_noncritical_write_skipped",
+  "redis_critical_write_blocked",
+  "redis_incident_alerted",
 ]);
 
 export const CONVERSION_EVENT_CATALOG = Object.freeze({
@@ -1133,6 +1140,13 @@ export const CONVERSION_EVENT_CATALOG = Object.freeze({
   WEBHOOK_ERROR: "webhook_error",
   STATE_ERROR: "state_error",
   COUPON_ERROR: "coupon_error",
+  REDIS_DEGRADED: "redis_degraded",
+  REDIS_DOWN: "redis_down",
+  REDIS_RECOVERED: "redis_recovered",
+  REDIS_FALLBACK_READ: "redis_fallback_read",
+  REDIS_NONCRITICAL_WRITE_SKIPPED: "redis_noncritical_write_skipped",
+  REDIS_CRITICAL_WRITE_BLOCKED: "redis_critical_write_blocked",
+  REDIS_INCIDENT_ALERTED: "redis_incident_alerted",
 });
 
 const CONVERSION_EVENT_SET = new Set(CONVERSION_EVENTS);
@@ -1420,6 +1434,13 @@ export const trackWhatsappSendError = makeTrackConversionHelper(CONVERSION_EVENT
 export const trackWebhookError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.WEBHOOK_ERROR);
 export const trackStateError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.STATE_ERROR);
 export const trackCouponError = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.COUPON_ERROR);
+export const trackRedisDegraded = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.REDIS_DEGRADED);
+export const trackRedisDown = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.REDIS_DOWN);
+export const trackRedisRecovered = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.REDIS_RECOVERED);
+export const trackRedisFallbackRead = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.REDIS_FALLBACK_READ);
+export const trackRedisNoncriticalWriteSkipped = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.REDIS_NONCRITICAL_WRITE_SKIPPED);
+export const trackRedisCriticalWriteBlocked = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.REDIS_CRITICAL_WRITE_BLOCKED);
+export const trackRedisIncidentAlerted = makeTrackConversionHelper(CONVERSION_EVENT_CATALOG.REDIS_INCIDENT_ALERTED);
 
 // Alias com capitalização mais natural, preservando compatibilidade retroativa
 export const trackWhatsAppSendError = trackWhatsappSendError;
@@ -1448,6 +1469,9 @@ const ERROR_EVENTS = Object.freeze([
   CONVERSION_EVENT_CATALOG.STATE_ERROR,
   CONVERSION_EVENT_CATALOG.PRICING_ERROR,
   CONVERSION_EVENT_CATALOG.COUPON_ERROR,
+  CONVERSION_EVENT_CATALOG.REDIS_DEGRADED,
+  CONVERSION_EVENT_CATALOG.REDIS_DOWN,
+  CONVERSION_EVENT_CATALOG.REDIS_CRITICAL_WRITE_BLOCKED,
 ]);
 
 export const ERROR_EVENT_CATALOG = Object.freeze({
@@ -1459,6 +1483,9 @@ export const ERROR_EVENT_CATALOG = Object.freeze({
   STATE_ERROR: CONVERSION_EVENT_CATALOG.STATE_ERROR,
   PRICING_ERROR: CONVERSION_EVENT_CATALOG.PRICING_ERROR,
   COUPON_ERROR: CONVERSION_EVENT_CATALOG.COUPON_ERROR,
+  REDIS_DEGRADED: CONVERSION_EVENT_CATALOG.REDIS_DEGRADED,
+  REDIS_DOWN: CONVERSION_EVENT_CATALOG.REDIS_DOWN,
+  REDIS_CRITICAL_WRITE_BLOCKED: CONVERSION_EVENT_CATALOG.REDIS_CRITICAL_WRITE_BLOCKED,
 });
 
 export async function getErrorMetricsOverview(date = new Date()) {
