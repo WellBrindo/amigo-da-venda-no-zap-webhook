@@ -10,9 +10,154 @@
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
+const REDIS_OPERATIONAL_STATUS = Object.freeze({
+  HEALTHY: "HEALTHY",
+  DEGRADED: "DEGRADED",
+  DOWN: "DOWN",
+});
+
+const REDIS_ERROR_CODE = Object.freeze({
+  ENV: "REDIS_ENV_ERROR",
+  NETWORK: "REDIS_NETWORK_ERROR",
+  HTTP: "REDIS_HTTP_ERROR",
+  PARSE: "REDIS_PARSE_ERROR",
+  UNKNOWN: "REDIS_UNKNOWN_ERROR",
+});
+
+const REDIS_DEGRADED_FAILURE_THRESHOLD = 1;
+const REDIS_DOWN_FAILURE_THRESHOLD = 3;
+const REDIS_RECOVERY_SUCCESS_THRESHOLD = 2;
+
+const redisHealthState = {
+  status: REDIS_OPERATIONAL_STATUS.HEALTHY,
+  lastErrorAt: 0,
+  lastSuccessAt: 0,
+  consecutiveFailures: 0,
+  consecutiveSuccesses: 0,
+  lastErrorCode: "",
+  lastErrorMessage: "",
+  lastFailingCommand: "",
+  lastRecoveredAt: 0,
+};
+
+function nowMs() {
+  return Date.now();
+}
+
+function safeStr(value) {
+  return String(value ?? "").trim();
+}
+
+function buildRedisErrorMessage(prefix, detail, { path = "", bodyLen = 0 } = {}) {
+  const parts = [safeStr(prefix), safeStr(detail)].filter(Boolean);
+  const base = parts.join(": ") || "Redis error";
+  return `${base} cmdPath=${path} bodyLen=${Number(bodyLen) || 0}`;
+}
+
+function buildRedisOperationalError({
+  errorCode = REDIS_ERROR_CODE.UNKNOWN,
+  message = "Redis operation failed",
+  path = "",
+  bodyLen = 0,
+  cause = null,
+} = {}) {
+  const err = new Error(buildRedisErrorMessage("Upstash", message, { path, bodyLen }));
+  err.name = "RedisOperationalError";
+  err.errorCode = safeStr(errorCode) || REDIS_ERROR_CODE.UNKNOWN;
+  err.cmdPath = safeStr(path);
+  err.bodyLen = Number(bodyLen) || 0;
+  if (cause) err.cause = cause;
+  return err;
+}
+
+function classifyRedisError(err) {
+  const message = safeStr(err?.message || err);
+  if (message.includes("UPSTASH_REDIS_REST_URL") || message.includes("UPSTASH_REDIS_REST_TOKEN") || message.includes("Missing UPSTASH")) {
+    return REDIS_ERROR_CODE.ENV;
+  }
+  if (message.includes("NETWORK_ERROR")) {
+    return REDIS_ERROR_CODE.NETWORK;
+  }
+  if (message.includes("HTTP")) {
+    return REDIS_ERROR_CODE.HTTP;
+  }
+  if (message.includes("PARSE_ERROR")) {
+    return REDIS_ERROR_CODE.PARSE;
+  }
+  return REDIS_ERROR_CODE.UNKNOWN;
+}
+
+function markRedisSuccess() {
+  const previousStatus = redisHealthState.status;
+  redisHealthState.lastSuccessAt = nowMs();
+  redisHealthState.consecutiveSuccesses += 1;
+  redisHealthState.consecutiveFailures = 0;
+
+  if (
+    previousStatus !== REDIS_OPERATIONAL_STATUS.HEALTHY &&
+    redisHealthState.consecutiveSuccesses >= REDIS_RECOVERY_SUCCESS_THRESHOLD
+  ) {
+    redisHealthState.status = REDIS_OPERATIONAL_STATUS.HEALTHY;
+    redisHealthState.lastRecoveredAt = redisHealthState.lastSuccessAt;
+  }
+}
+
+function markRedisFailure({ errorCode = "", message = "", command = "" } = {}) {
+  redisHealthState.lastErrorAt = nowMs();
+  redisHealthState.consecutiveFailures += 1;
+  redisHealthState.consecutiveSuccesses = 0;
+  redisHealthState.lastErrorCode = safeStr(errorCode);
+  redisHealthState.lastErrorMessage = safeStr(message);
+  redisHealthState.lastFailingCommand = safeStr(command);
+
+  if (redisHealthState.consecutiveFailures >= REDIS_DOWN_FAILURE_THRESHOLD) {
+    redisHealthState.status = REDIS_OPERATIONAL_STATUS.DOWN;
+    return;
+  }
+
+  if (redisHealthState.consecutiveFailures >= REDIS_DEGRADED_FAILURE_THRESHOLD) {
+    redisHealthState.status = REDIS_OPERATIONAL_STATUS.DEGRADED;
+  }
+}
+
+function summarizeRedisHealth(state = redisHealthState) {
+  const status = safeStr(state?.status) || REDIS_OPERATIONAL_STATUS.HEALTHY;
+  if (status === REDIS_OPERATIONAL_STATUS.HEALTHY) {
+    return "Redis healthy.";
+  }
+  if (status === REDIS_OPERATIONAL_STATUS.DOWN) {
+    return `Redis down. Last error: ${safeStr(state?.lastErrorCode)} ${safeStr(state?.lastErrorMessage)}`.trim();
+  }
+  return `Redis degraded. Last error: ${safeStr(state?.lastErrorCode)} ${safeStr(state?.lastErrorMessage)}`.trim();
+}
+
+export function getRedisHealthSnapshot() {
+  return {
+    status: redisHealthState.status,
+    lastErrorAt: redisHealthState.lastErrorAt || 0,
+    lastSuccessAt: redisHealthState.lastSuccessAt || 0,
+    consecutiveFailures: redisHealthState.consecutiveFailures || 0,
+    consecutiveSuccesses: redisHealthState.consecutiveSuccesses || 0,
+    lastErrorCode: safeStr(redisHealthState.lastErrorCode),
+    lastErrorMessage: safeStr(redisHealthState.lastErrorMessage),
+    lastFailingCommand: safeStr(redisHealthState.lastFailingCommand),
+    lastRecoveredAt: redisHealthState.lastRecoveredAt || 0,
+    summary: summarizeRedisHealth(redisHealthState),
+  };
+}
+
+export function isRedisOperationallyDegraded() {
+  return getRedisHealthSnapshot().status !== REDIS_OPERATIONAL_STATUS.HEALTHY;
+}
+
 function assertRedisEnv() {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) {
-    throw new Error("Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN");
+    throw buildRedisOperationalError({
+      errorCode: REDIS_ERROR_CODE.ENV,
+      message: "Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN",
+      path: "env",
+      bodyLen: 0,
+    });
   }
 }
 
@@ -26,8 +171,6 @@ async function upstash(path, bodyValue) {
 
   const url = `${UPSTASH_REDIS_REST_URL}${path}`;
   const hasBody = bodyValue !== undefined;
-
-  // body SEMPRE em texto puro quando enviado.
   const bodyText = hasBody ? String(bodyValue) : undefined;
 
   let res;
@@ -42,25 +185,74 @@ async function upstash(path, bodyValue) {
       },
       body: bodyText,
     });
-
-    data = await res.json().catch(() => ({}));
   } catch (err) {
-    throw new Error(
-      `Upstash: NETWORK_ERROR cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0} msg=${String(
-        err?.message || err
-      )}`
-    );
+    const errorCode = REDIS_ERROR_CODE.NETWORK;
+    const wrapped = buildRedisOperationalError({
+      errorCode,
+      message: `NETWORK_ERROR msg=${String(err?.message || err)}`,
+      path,
+      bodyLen: hasBody ? bodyText.length : 0,
+      cause: err,
+    });
+    markRedisFailure({
+      errorCode,
+      message: safeStr(wrapped.message),
+      command: safeStr(path),
+    });
+    throw wrapped;
+  }
+
+  try {
+    data = await res.json().catch(() => {
+      throw buildRedisOperationalError({
+        errorCode: REDIS_ERROR_CODE.PARSE,
+        message: "PARSE_ERROR invalid JSON response",
+        path,
+        bodyLen: hasBody ? bodyText.length : 0,
+      });
+    });
+  } catch (err) {
+    const errorCode = safeStr(err?.errorCode) || classifyRedisError(err);
+    markRedisFailure({
+      errorCode,
+      message: safeStr(err?.message || err),
+      command: safeStr(path),
+    });
+    throw err;
   }
 
   if (!res.ok) {
-    const base = data?.error ? `Upstash: ${data.error}` : `Upstash: HTTP ${res.status}`;
-    throw new Error(`${base} cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0}`);
+    const base = data?.error ? `${data.error}` : `HTTP ${res.status}`;
+    const wrapped = buildRedisOperationalError({
+      errorCode: REDIS_ERROR_CODE.HTTP,
+      message: base,
+      path,
+      bodyLen: hasBody ? bodyText.length : 0,
+    });
+    markRedisFailure({
+      errorCode: REDIS_ERROR_CODE.HTTP,
+      message: safeStr(wrapped.message),
+      command: safeStr(path),
+    });
+    throw wrapped;
   }
 
   if (data?.error) {
-    throw new Error(`Upstash: ${data.error} cmdPath=${path} bodyLen=${hasBody ? bodyText.length : 0}`);
+    const wrapped = buildRedisOperationalError({
+      errorCode: REDIS_ERROR_CODE.HTTP,
+      message: `${data.error}`,
+      path,
+      bodyLen: hasBody ? bodyText.length : 0,
+    });
+    markRedisFailure({
+      errorCode: REDIS_ERROR_CODE.HTTP,
+      message: safeStr(wrapped.message),
+      command: safeStr(path),
+    });
+    throw wrapped;
   }
 
+  markRedisSuccess();
   return data?.result;
 }
 
@@ -107,6 +299,114 @@ export async function redisExpire(key, seconds) {
   const s = Number(seconds);
   if (!Number.isFinite(s) || s <= 0) throw new Error("redisExpire: seconds must be > 0");
   return upstash(`/EXPIRE/${encodeURIComponent(key)}/${encodeURIComponent(String(Math.trunc(s)))}`);
+}
+
+function buildRedisSafeResult({
+  ok = false,
+  degraded = false,
+  value = null,
+  errorCode = "",
+  message = "",
+  status = "",
+} = {}) {
+  return {
+    ok: Boolean(ok),
+    degraded: Boolean(degraded),
+    value,
+    errorCode: safeStr(errorCode),
+    message: safeStr(message),
+    status: safeStr(status) || getRedisHealthSnapshot().status,
+  };
+}
+
+async function executeRedisSafe(op, options = {}) {
+  const {
+    fallbackValue = null,
+    critical = false,
+    suppressThrow = false,
+    module = "",
+    step = "",
+  } = options || {};
+
+  try {
+    const value = await op();
+    return buildRedisSafeResult({
+      ok: true,
+      degraded: false,
+      value,
+      status: getRedisHealthSnapshot().status,
+    });
+  } catch (error) {
+    const errorCode = safeStr(error?.errorCode) || classifyRedisError(error);
+    const message = safeStr(error?.message || error);
+    const status = getRedisHealthSnapshot().status;
+
+    const shouldThrow = Boolean(critical) && !Boolean(suppressThrow);
+    if (shouldThrow) {
+      throw error;
+    }
+
+    try {
+      console.warn(JSON.stringify({
+        level: "warn",
+        tag: "redis_safe_degraded",
+        module: safeStr(module),
+        step: safeStr(step),
+        errorCode,
+        status,
+        message,
+      }));
+    } catch {}
+
+    return buildRedisSafeResult({
+      ok: false,
+      degraded: true,
+      value: fallbackValue,
+      errorCode,
+      message,
+      status,
+    });
+  }
+}
+
+export async function redisSafeGet(key, options = {}) {
+  return executeRedisSafe(() => redisGet(key), options);
+}
+
+export async function redisSafeSet(key, value, options = {}) {
+  return executeRedisSafe(() => redisSet(key, value), options);
+}
+
+export async function redisSafeDel(key, options = {}) {
+  return executeRedisSafe(() => redisDel(key), options);
+}
+
+export async function redisSafeIncrBy(key, delta = 1, options = {}) {
+  return executeRedisSafe(() => redisIncrBy(key, delta), options);
+}
+
+export async function redisSafeType(key, options = {}) {
+  return executeRedisSafe(() => redisType(key), options);
+}
+
+export async function redisSafeExpire(key, seconds, options = {}) {
+  return executeRedisSafe(() => redisExpire(key, seconds), options);
+}
+
+export async function redisSafeLPush(key, value, options = {}) {
+  return executeRedisSafe(() => redisLPush(key, value), options);
+}
+
+export async function redisSafeLRange(key, start = 0, stop = 49, options = {}) {
+  return executeRedisSafe(() => redisLRange(key, start, stop), options);
+}
+
+export async function redisSafeLTrim(key, start = 0, stop = 99, options = {}) {
+  return executeRedisSafe(() => redisLTrim(key, start, stop), options);
+}
+
+export async function redisSafeLLen(key, options = {}) {
+  return executeRedisSafe(() => redisLLen(key), options);
 }
 
 // -----------------
@@ -172,6 +472,28 @@ export async function redisSMembers(key) {
   return upstash(`/SMEMBERS/${encodeURIComponent(key)}`);
 }
 
+export async function redisSafeSAdd(key, members, options = {}) {
+  const list = Array.isArray(members) ? members : [members];
+  return executeRedisSafe(() => redisSAdd(key, list), options);
+}
+
+export async function redisSafeSRem(key, members, options = {}) {
+  const list = Array.isArray(members) ? members : [members];
+  return executeRedisSafe(() => redisSRem(key, list), options);
+}
+
+export async function redisSafeSMembers(key, options = {}) {
+  return executeRedisSafe(() => redisSMembers(key), options);
+}
+
+export async function redisSafeSIsMember(key, member, options = {}) {
+  return executeRedisSafe(() => redisSIsMember(key, member), options);
+}
+
+export async function redisSafeSCard(key, options = {}) {
+  return executeRedisSafe(() => redisSCard(key), options);
+}
+
 // -----------------
 // Sorted Sets
 // -----------------
@@ -202,6 +524,26 @@ export async function redisZRangeByScore(key, min, max, limit = 1000) {
       String(max)
     )}/LIMIT/0/${encodeURIComponent(String(limit))}`
   );
+}
+
+export async function redisSafeZAdd(key, score, member, options = {}) {
+  return executeRedisSafe(() => redisZAdd(key, score, member), options);
+}
+
+export async function redisSafeZRem(key, member, options = {}) {
+  return executeRedisSafe(() => redisZRem(key, member), options);
+}
+
+export async function redisSafeZScore(key, member, options = {}) {
+  return executeRedisSafe(() => redisZScore(key, member), options);
+}
+
+export async function redisSafeZCount(key, min, max, options = {}) {
+  return executeRedisSafe(() => redisZCount(key, min, max), options);
+}
+
+export async function redisSafeZRangeByScore(key, min, max, limit = 1000, options = {}) {
+  return executeRedisSafe(() => redisZRangeByScore(key, min, max, limit), options);
 }
 
 // -----------------
