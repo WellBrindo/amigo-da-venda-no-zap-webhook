@@ -24,6 +24,7 @@ import {
   redisZAdd,
   redisZRem,
   redisZRangeByScore,
+  getRedisHealthSnapshot,
   redisCouponIndexKey,
   redisCouponCodeKey,
   redisCouponStatusIndexKey,
@@ -41,10 +42,15 @@ import {
 import { getPlan, getPlanBillingOption } from "./plans.js";
 import { getUserPlan, getUserStatus } from "./state.js";
 import { logCouponAudit } from "./audit.js";
+import { raiseSystemIncident } from "./alerts.js";
 import {
   recordCouponMetrics,
   trackCouponApplied,
   trackCouponRejected,
+  trackRedisDegraded,
+  trackRedisDown,
+  trackRedisFallbackRead,
+  trackRedisCriticalWriteBlocked,
 } from "./metrics.js";
 
 const COUPON_STATUS = Object.freeze({
@@ -103,6 +109,163 @@ const COUPON_ROLLBACK_POLICY = Object.freeze({
 
 let couponMetricsModulePromise = null;
 let couponAuditModulePromise = null;
+
+function getRedisStatusForCoupons() {
+  try {
+    return safeStr(getRedisHealthSnapshot?.()?.status) || "DEGRADED";
+  } catch {
+    return "DEGRADED";
+  }
+}
+
+function isCouponCriticalStep(step = "") {
+  const s = safeStr(step).toLowerCase();
+  return [
+    "create_reservation_sequence",
+    "create_reservation_persist",
+    "persist_reservation",
+    "transition_persist",
+    "transition_read_previous",
+    "rollback_read",
+  ].includes(s);
+}
+
+async function reportCouponRedisIncident({
+  severity = "HIGH",
+  step = "",
+  errorCode = COUPON_ERROR_CODE.PERSISTENCE,
+  message = "",
+  reservationId = "",
+  couponCode = "",
+  internalUserId = "",
+  planCode = "",
+  billingCycle = "",
+  impact = "",
+  fallbackUsed = false,
+  criticalBlocked = false,
+  meta = {},
+} = {}) {
+  const redisStatus = getRedisStatusForCoupons();
+
+  try {
+    if (criticalBlocked && typeof trackRedisCriticalWriteBlocked === "function") {
+      await trackRedisCriticalWriteBlocked({
+        userId: safeStr(internalUserId),
+        waId: safeStr(internalUserId),
+        couponCode: normalizeCouponCode(couponCode),
+        planCode: normalizePlanCode(planCode),
+        billingCycle: normalizeBillingCycle(billingCycle),
+        source: "coupons",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    } else if (fallbackUsed && typeof trackRedisFallbackRead === "function") {
+      await trackRedisFallbackRead({
+        userId: safeStr(internalUserId),
+        waId: safeStr(internalUserId),
+        couponCode: normalizeCouponCode(couponCode),
+        planCode: normalizePlanCode(planCode),
+        billingCycle: normalizeBillingCycle(billingCycle),
+        source: "coupons",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    } else if (redisStatus === "DOWN" && typeof trackRedisDown === "function") {
+      await trackRedisDown({
+        userId: safeStr(internalUserId),
+        waId: safeStr(internalUserId),
+        couponCode: normalizeCouponCode(couponCode),
+        planCode: normalizePlanCode(planCode),
+        billingCycle: normalizeBillingCycle(billingCycle),
+        source: "coupons",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    } else if (typeof trackRedisDegraded === "function") {
+      await trackRedisDegraded({
+        userId: safeStr(internalUserId),
+        waId: safeStr(internalUserId),
+        couponCode: normalizeCouponCode(couponCode),
+        planCode: normalizePlanCode(planCode),
+        billingCycle: normalizeBillingCycle(billingCycle),
+        source: "coupons",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    }
+  } catch {}
+
+  try {
+    await raiseSystemIncident({
+      type: "REDIS",
+      severity: safeStr(severity) || "HIGH",
+      module: "coupons",
+      step: safeStr(step),
+      errorCode: safeStr(errorCode),
+      message: safeStr(message) || "Coupon Redis degradation detected.",
+      impact: safeStr(impact),
+      dedupeKey: ["coupons", safeStr(step), safeStr(errorCode), safeStr(impact), safeStr(couponCode), safeStr(reservationId)].filter(Boolean).join("|"),
+      meta: {
+        reservationId: safeStr(reservationId),
+        couponCode: normalizeCouponCode(couponCode),
+        internalUserId: safeStr(internalUserId),
+        planCode: normalizePlanCode(planCode),
+        billingCycle: normalizeBillingCycle(billingCycle),
+        redisStatus,
+        fallbackUsed: Boolean(fallbackUsed),
+        criticalBlocked: Boolean(criticalBlocked),
+        ...(meta && typeof meta === "object" ? meta : {}),
+      },
+    });
+  } catch {}
+}
+
+async function safeCouponRedisRead(action, fallback, context = {}) {
+  try {
+    return await action();
+  } catch (error) {
+    await emitCouponOperationalLog({
+      level: "warn",
+      event: "coupon_redis_read_degraded",
+      errorCode: safeStr(context.errorCode || COUPON_ERROR_CODE.PERSISTENCE),
+      message: safeStr(error?.message || error) || "Coupon Redis read degraded",
+      source: safeStr(context.source || "coupons"),
+      reservationId: safeStr(context.reservationId),
+      couponCode: normalizeCouponCode(context.couponCode),
+      internalUserId: safeStr(context.internalUserId),
+      planCode: normalizePlanCode(context.planCode),
+      billingCycle: normalizeBillingCycle(context.billingCycle),
+      step: safeStr(context.step),
+      meta: {
+        fallbackUsed: true,
+        impact: safeStr(context.impact),
+      },
+    });
+    await reportCouponRedisIncident({
+      severity: safeStr(context.severity || "MEDIUM"),
+      step: safeStr(context.step),
+      errorCode: safeStr(context.errorCode || COUPON_ERROR_CODE.PERSISTENCE),
+      message: safeStr(error?.message || error),
+      reservationId: safeStr(context.reservationId),
+      couponCode: normalizeCouponCode(context.couponCode),
+      internalUserId: safeStr(context.internalUserId),
+      planCode: normalizePlanCode(context.planCode),
+      billingCycle: normalizeBillingCycle(context.billingCycle),
+      impact: safeStr(context.impact || "coupon_read_fallback"),
+      fallbackUsed: true,
+      meta: normalizeMeta(context.meta),
+    });
+    return fallback;
+  }
+}
 
 function createCouponError(errorCode, message, extra = {}) {
   const err = new Error(safeStr(message) || safeStr(errorCode) || "Coupon runtime error");
@@ -334,6 +497,30 @@ async function handleCouponRuntimeFailure({
     step: err.step,
     meta: err.meta,
   });
+
+  const criticalRedisStep = isCouponCriticalStep(err.step) || !!err.checkoutImpact;
+  if (
+    err.errorCode === COUPON_ERROR_CODE.PERSISTENCE ||
+    err.errorCode === COUPON_ERROR_CODE.RESERVATION ||
+    err.errorCode === COUPON_ERROR_CODE.CONFIRM ||
+    err.errorCode === COUPON_ERROR_CODE.RELEASE ||
+    err.errorCode === COUPON_ERROR_CODE.EXPIRATION
+  ) {
+    await reportCouponRedisIncident({
+      severity: criticalRedisStep ? "HIGH" : "MEDIUM",
+      step: err.step,
+      errorCode: err.errorCode,
+      message: err.message,
+      reservationId: err.reservationId,
+      couponCode: err.couponCode,
+      internalUserId: err.internalUserId,
+      planCode: err.planCode,
+      billingCycle: err.billingCycle,
+      impact: criticalRedisStep ? "coupon_critical_persistence_blocked" : "coupon_persistence_degraded",
+      criticalBlocked: criticalRedisStep,
+      meta: normalizeMeta(err.meta),
+    });
+  }
 
   if (shouldThrow) throw err
   return err;
@@ -853,7 +1040,17 @@ function buildReportRow(input = {}) {
 async function readCoupon(couponCode) {
   const code = normalizeCouponCode(couponCode);
   if (!code) return null;
-  const raw = await redisGet(couponKey(code));
+  const raw = await safeCouponRedisRead(
+    () => redisGet(couponKey(code)),
+    "",
+    {
+      step: "read_coupon",
+      couponCode: code,
+      errorCode: COUPON_ERROR_CODE.PERSISTENCE,
+      impact: "coupon_read_fallback",
+      severity: "LOW",
+    }
+  );
   if (!raw) return null;
   const parsed = parseJson(raw, null);
   if (!isPlainObject(parsed)) return null;
@@ -890,7 +1087,17 @@ async function syncCouponIndexes(previousCoupon, nextCoupon) {
 async function readReservation(reservationId) {
   const id = safeStr(reservationId);
   if (!id) return null;
-  const raw = await redisGet(redisCouponReservationKey(id));
+  const raw = await safeCouponRedisRead(
+    () => redisGet(redisCouponReservationKey(id)),
+    "",
+    {
+      step: "read_reservation",
+      reservationId: id,
+      errorCode: COUPON_ERROR_CODE.PERSISTENCE,
+      impact: "reservation_read_fallback",
+      severity: "MEDIUM",
+    }
+  );
   if (!raw) return null;
   const parsed = parseJson(raw, null);
   if (!isPlainObject(parsed)) return null;
@@ -973,7 +1180,16 @@ async function writeReportRow(row) {
 async function readReportRow(reportId) {
   const id = safeStr(reportId);
   if (!id) return null;
-  const raw = await redisGet(redisCouponReportKey(id));
+  const raw = await safeCouponRedisRead(
+    () => redisGet(redisCouponReportKey(id)),
+    "",
+    {
+      step: "read_report_row",
+      errorCode: COUPON_ERROR_CODE.PERSISTENCE,
+      impact: "coupon_report_read_fallback",
+      severity: "LOW",
+    }
+  );
   if (!raw) return null;
   const parsed = parseJson(raw, null);
   if (!isPlainObject(parsed)) return null;
@@ -989,14 +1205,14 @@ async function appendReportRow(payload = {}) {
 async function getCouponRedemptionReservations(couponCode) {
   const code = normalizeCouponCode(couponCode);
   if (!code) return [];
-  const ids = await redisSMembers(redisCouponRedemptionCouponIndexKey(code));
+  const ids = await safeCouponRedisRead(() => redisSMembers(redisCouponRedemptionCouponIndexKey(code)), [], { step: "get_coupon_redemption_reservations", couponCode: code, errorCode: COUPON_ERROR_CODE.PERSISTENCE, impact: "coupon_redemption_list_fallback", severity: "LOW" });
   return hydrateReservations(ids);
 }
 
 async function getUserRedemptionReservations(internalUserId) {
   const userId = safeStr(internalUserId);
   if (!userId) return [];
-  const ids = await redisSMembers(redisCouponRedemptionUserIndexKey(userId));
+  const ids = await safeCouponRedisRead(() => redisSMembers(redisCouponRedemptionUserIndexKey(userId)), [], { step: "get_user_redemption_reservations", internalUserId: userId, errorCode: COUPON_ERROR_CODE.PERSISTENCE, impact: "user_redemption_list_fallback", severity: "LOW" });
   return hydrateReservations(ids);
 }
 
@@ -1041,7 +1257,7 @@ function buildEligibilityFailure(code, message, extra = {}) {
 async function getCouponRedemptionCount(couponCode) {
   const code = normalizeCouponCode(couponCode);
   if (!code) return 0;
-  const count = await redisSCard(redisCouponRedemptionCouponIndexKey(code));
+  const count = await safeCouponRedisRead(() => redisSCard(redisCouponRedemptionCouponIndexKey(code)), 0, { step: "get_coupon_redemption_count", couponCode: code, errorCode: COUPON_ERROR_CODE.PERSISTENCE, impact: "coupon_redemption_count_fallback", severity: "LOW" });
   return toNonNegativeInt(count, 0);
 }
 
@@ -1063,7 +1279,7 @@ async function findDuplicateOpenReservation(internalUserId, couponCode) {
   const code = normalizeCouponCode(couponCode);
   if (!userId || !code) return null;
 
-  const ids = await redisSMembers(redisCouponReservationUserIndexKey(userId));
+  const ids = await safeCouponRedisRead(() => redisSMembers(redisCouponReservationUserIndexKey(userId)), [], { step: "find_duplicate_open_reservation", internalUserId: userId, couponCode: code, errorCode: COUPON_ERROR_CODE.PERSISTENCE, impact: "reservation_user_index_fallback", severity: "MEDIUM" });
   const reservations = await hydrateReservations(ids);
   const now = nowMs();
 
@@ -1299,7 +1515,7 @@ export async function getCoupon(couponCode) {
 }
 
 export async function listCoupons({ includeInactive = true, includeDeleted = false } = {}) {
-  const ids = await redisSMembers(redisCouponIndexKey());
+  const ids = await safeCouponRedisRead(() => redisSMembers(redisCouponIndexKey()), [], { step: "list_coupons_index", errorCode: COUPON_ERROR_CODE.PERSISTENCE, impact: "coupon_index_list_fallback", severity: "LOW" });
   const rows = await Promise.all(uniqueStrings(ids, { upper: true }).map((code) => readCoupon(code)));
   return rows
     .filter(Boolean)
@@ -1937,17 +2153,17 @@ export async function listCouponReservations({
 
   let ids = [];
   if (safeStr(internalUserId)) {
-    ids = await redisSMembers(redisCouponReservationUserIndexKey(internalUserId));
+    ids = await safeCouponRedisRead(() => redisSMembers(redisCouponReservationUserIndexKey(internalUserId)), [], { step: "list_reservations_by_user", internalUserId, errorCode: COUPON_ERROR_CODE.PERSISTENCE, impact: "reservation_list_fallback", severity: "LOW" });
   } else if (normalizeCouponCode(couponCode)) {
-    ids = await redisSMembers(redisCouponReservationCouponIndexKey(couponCode));
+    ids = await safeCouponRedisRead(() => redisSMembers(redisCouponReservationCouponIndexKey(couponCode)), [], { step: "list_reservations_by_coupon", couponCode, errorCode: COUPON_ERROR_CODE.PERSISTENCE, impact: "reservation_list_fallback", severity: "LOW" });
   } else if (normalizedStatusList.length === 1) {
-    ids = await redisSMembers(redisCouponReservationStatusIndexKey(normalizedStatusList[0]));
+    ids = await safeCouponRedisRead(() => redisSMembers(redisCouponReservationStatusIndexKey(normalizedStatusList[0])), [], { step: "list_reservations_by_status", errorCode: COUPON_ERROR_CODE.PERSISTENCE, impact: "reservation_status_list_fallback", severity: "LOW" });
   } else {
     const sourceStatuses = normalizedStatusList.length
       ? normalizedStatusList
       : Object.values(RESERVATION_STATUS);
     const parts = await Promise.all(
-      sourceStatuses.map((item) => redisSMembers(redisCouponReservationStatusIndexKey(item)))
+      sourceStatuses.map((item) => safeCouponRedisRead(() => redisSMembers(redisCouponReservationStatusIndexKey(item)), [], { step: "list_reservations_multi_status", errorCode: COUPON_ERROR_CODE.PERSISTENCE, impact: "reservation_status_list_fallback", severity: "LOW", meta: { status: item } }))
     );
     ids = parts.flat();
   }
@@ -1967,11 +2183,20 @@ export async function listExpiredPendingCouponReservations({
 } = {}) {
   const nowValue = now instanceof Date ? now.getTime() : Number(now);
   const normalizedNow = Number.isFinite(nowValue) ? nowValue : Date.now();
-  const ids = await redisZRangeByScore(
-    redisCouponReservationPendingIndexKey(),
-    0,
-    normalizedNow,
-    normalizeListLimit(limit)
+  const ids = await safeCouponRedisRead(
+    () => redisZRangeByScore(
+      redisCouponReservationPendingIndexKey(),
+      0,
+      normalizedNow,
+      normalizeListLimit(limit)
+    ),
+    [],
+    {
+      step: "list_expired_pending_reservations",
+      errorCode: COUPON_ERROR_CODE.PERSISTENCE,
+      impact: "expired_pending_reservations_fallback",
+      severity: "MEDIUM",
+    }
   );
   const rows = await hydrateReservations(ids);
   return rows.filter((row) => row.status === RESERVATION_STATUS.RESERVED && isoToMs(row.expiresAt) <= normalizedNow);
