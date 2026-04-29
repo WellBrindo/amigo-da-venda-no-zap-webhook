@@ -1610,6 +1610,109 @@ export async function resolveOrCreateUserFromInbound(payloadOrMessage = {}) {
   };
 }
 
+
+export async function resolveAdminEditableUserRef(input = {}) {
+  const sourceInput = input && typeof input === "object"
+    ? input
+    : { userId: input };
+
+  const rawUserId = safeStr(
+    sourceInput.internalUserId ||
+      sourceInput.userId ||
+      sourceInput.id ||
+      ""
+  );
+  const rawWaId = normalizeWaId(
+    sourceInput.waId ||
+      sourceInput.wa_id ||
+      sourceInput.phone ||
+      sourceInput.phoneNumber ||
+      ""
+  );
+
+  let internalUserId = "";
+  let source = "";
+  let identifiers = null;
+  let waId = rawWaId || null;
+
+  if (rawUserId && /^usr_\d+$/i.test(rawUserId)) {
+    internalUserId = safeStr(rawUserId);
+    source = "internalUserId";
+    identifiers = await getUserIdentifiers(internalUserId);
+    waId = normalizeWaId(identifiers?.waId) || rawWaId || null;
+  } else if (rawWaId) {
+    const mapped = await getInternalUserIdByWaId(rawWaId, { critical: true });
+    if (!mapped) {
+      return {
+        ok: false,
+        internalUserId: "",
+        waId: rawWaId,
+        identifiers: null,
+        source: "waId",
+        errorCode: "ADMIN_USER_WAID_NOT_FOUND",
+        message: "Nenhum usuário canônico foi encontrado para o waId informado.",
+        blockSensitiveOps: true,
+        allowProfileEdit: false,
+      };
+    }
+    internalUserId = safeStr(mapped);
+    source = "waId";
+    identifiers = await getUserIdentifiers(internalUserId);
+    waId = rawWaId;
+  } else if (rawUserId) {
+    const normalizedAsWaId = normalizeWaId(rawUserId);
+    if (normalizedAsWaId) {
+      const mapped = await getInternalUserIdByWaId(normalizedAsWaId, { critical: true });
+      if (mapped) {
+        internalUserId = safeStr(mapped);
+        source = "waId_like_userId";
+        identifiers = await getUserIdentifiers(internalUserId);
+        waId = normalizedAsWaId;
+      }
+    }
+  }
+
+  if (!internalUserId) {
+    return {
+      ok: false,
+      internalUserId: "",
+      waId: waId || null,
+      identifiers: null,
+      source: source || "unknown",
+      errorCode: "ADMIN_USER_REF_REQUIRED",
+      message: "Informe internalUserId/userId ou waId para editar o usuário.",
+      blockSensitiveOps: true,
+      allowProfileEdit: false,
+    };
+  }
+
+  if (!identifiers) {
+    identifiers = await getUserIdentifiers(internalUserId);
+  }
+
+  const pendingConflict = await getPendingIdentityConflictForUser(internalUserId);
+  const hasPendingConflict = Boolean(pendingConflict);
+  const blockSensitiveOps = hasPendingConflict ? pendingConflict.blockSensitiveOps !== false : false;
+
+  return {
+    ok: true,
+    internalUserId,
+    waId: normalizeWaId(identifiers?.waId) || waId || null,
+    identifiers,
+    source,
+    errorCode: "",
+    message: hasPendingConflict
+      ? "Usuário possui conflito de identidade pendente; operações sensíveis devem permanecer bloqueadas."
+      : "Usuário resolvido para edição administrativa.",
+    conflict: hasPendingConflict,
+    conflictId: safeStr(pendingConflict?.conflictId),
+    conflictStatus: safeStr(pendingConflict?.status),
+    conflictRecord: pendingConflict || null,
+    blockSensitiveOps,
+    allowProfileEdit: true,
+  };
+}
+
 export async function getPreferredOutboundRecipient(internalUserId) {
   const identifiers = await getUserIdentifiers(internalUserId);
   if (!identifiers) return null;
