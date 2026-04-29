@@ -413,14 +413,7 @@ app.get("/health-redis", async (req, res) => {
 
 // -------------------- Routers --------------------
 // WhatsApp Cloud API webhook
-// DEBUG TEMPORÁRIO: loga o corpo recebido da Meta antes do router processar.
-// Remover após diagnosticar entrega/status do WhatsApp para evitar logs desnecessários de dados reais.
-app.use("/webhook", (req, res, next) => {
-  if (req.method === "POST") {
-    console.log("WEBHOOK_BODY", JSON.stringify(req.body, null, 2));
-  }
-  return next();
-}, webhookRouter());
+app.use("/webhook", webhookRouter());
 
 // Asaas webhook (token valida dentro do router)
 app.use("/asaas", asaasRouter());
