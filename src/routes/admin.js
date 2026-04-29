@@ -13,6 +13,8 @@ import {
   setLastPrompt, // ✅ TESTE CONTROLADO: forçar setLastPrompt("")
   resetUserAsNew, // 🧹 reset total (número de teste)
   resetUserToTrial,
+  getUserAdminEditableFields,
+  updateUserAdminFields,
 } from "../services/state.js";
 
 import {
@@ -48,6 +50,7 @@ import {
   getPlansHealth,
   listSystemAlerts,
   getSystemAlertsCount,
+  validateAdminUserPlanCode,
 } from "../services/plans.js";
 import {
   listSystemIncidents,
@@ -101,8 +104,10 @@ import {
   delCopyUser,
   DEFAULT_COPY,
 } from "../services/copy.js";
-import { listPayments, getSubscription, cancelSubscription } from "../services/asaas/client.js";
-import { listAsaasEvents } from "../services/asaas/ledger.js";
+import { listPayments, getSubscription, cancelSubscription, getAdminSubscriptionImpact } from "../services/asaas/client.js";
+import { getAsaasWebhookAdminCoherenceWarnings } from "../services/asaas/webhook.js";
+import { listAsaasEvents, recordAdminUserFinancialFieldChanged } from "../services/asaas/ledger.js";
+import { getAdminUserEffectivePricingView } from "../services/pricing.js";
 
 import { redisGet, redisSet, redisDel, getRedisHealthSnapshot } from "../services/redis.js";
 import {
@@ -113,6 +118,7 @@ import {
   listCampaignAuditByCampaign,
   listOperationalAudit,
   getOperationalAuditCount,
+  logUserAdminEditAudit,
 } from "../services/audit.js";
 import {
   listManagedAdmins,
@@ -131,6 +137,7 @@ import {
   listIdentityConflicts,
   getIdentityConflict,
   resolveIdentityConflictDecision,
+  resolveAdminEditableUserRef,
 } from "../services/identity.js";
 
 
@@ -748,6 +755,334 @@ function buildAuditUserSnapshot(user) {
     cardValidUntil: String(u.cardValidUntil || "").trim(),
     cardCanceledAt: String(u.cardCanceledAt || "").trim(),
   };
+}
+
+const CRM_USER_ADMIN_EDIT_STATUS = new Set([
+  "TRIAL",
+  "ACTIVE",
+  "WAIT_NAME",
+  "WAIT_PLAN",
+  "WAIT_PAYMENT",
+  "PAYMENT_PENDING",
+  "WAIT_TEMPLATE_MODE",
+  "WAIT_BILLING_CITY_STATE",
+  "WAIT_BILLING_ADDRESS",
+  "WAIT_COMPANY_PROFILE",
+  "BLOCKED",
+]);
+
+const CRM_USER_ADMIN_EDIT_ALLOWED_FIELDS = new Set([
+  "fullName",
+  "status",
+  "plan",
+  "quotaUsed",
+  "trialUsed",
+  "templateMode",
+  "paymentMethod",
+  "billingCityState",
+  "billingAddress",
+  "doc",
+  "docType",
+  "docLast4",
+  "asaasCustomerId",
+  "asaasSubscriptionId",
+  "cardValidUntil",
+  "cardCanceledAt",
+  "bizProfile",
+  "pendingBizProfile",
+  "activityMeta",
+  "growthMeta",
+  "selectedPlanCode",
+  "selectedBillingCycle",
+  "selectedCouponCode",
+  "pricingQuote",
+  "couponReservationId",
+  "couponReservationCreatedAt",
+  "checkoutCouponStatus",
+  "checkoutDraft",
+  "currentAdSession",
+]);
+
+function normalizeCrmEditString(value) {
+  return String(value ?? "").trim();
+}
+
+function pickCrmUserAdminPatch(rawPatch = {}) {
+  const src = rawPatch && typeof rawPatch === "object" && !Array.isArray(rawPatch) ? rawPatch : {};
+  const patch = {};
+  const rejectedFields = [];
+
+  for (const [key, value] of Object.entries(src)) {
+    if (!CRM_USER_ADMIN_EDIT_ALLOWED_FIELDS.has(key)) {
+      rejectedFields.push({ field: key, reason: "field_not_allowed" });
+      continue;
+    }
+    patch[key] = value;
+  }
+
+  return { patch, rejectedFields };
+}
+
+function validateCrmUserAdminPatch(patch = {}, planMap = new Map()) {
+  const errors = [];
+  const has = (field) => Object.prototype.hasOwnProperty.call(patch, field);
+
+  if (has("status")) {
+    const status = normalizeCrmEditString(patch.status).toUpperCase();
+    if (status && !CRM_USER_ADMIN_EDIT_STATUS.has(status)) errors.push({ field: "status", reason: "invalid_status" });
+  }
+  if (has("templateMode")) {
+    const templateMode = normalizeCrmEditString(patch.templateMode).toUpperCase();
+    if (templateMode && !["FIXED", "FREE"].includes(templateMode)) errors.push({ field: "templateMode", reason: "invalid_template_mode" });
+  }
+  if (has("paymentMethod")) {
+    const paymentMethod = normalizeCrmEditString(patch.paymentMethod).toUpperCase();
+    if (paymentMethod && !["PIX", "CARD"].includes(paymentMethod)) errors.push({ field: "paymentMethod", reason: "invalid_payment_method" });
+  }
+  for (const field of ["quotaUsed", "trialUsed"]) {
+    if (has(field)) {
+      const n = Number(patch[field]);
+      if (!Number.isFinite(n) || Math.trunc(n) < 0) errors.push({ field, reason: "invalid_non_negative_integer" });
+    }
+  }
+  if (has("plan")) {
+    const plan = normalizeCrmEditString(patch.plan).toUpperCase();
+    if (plan && !planMap.has(plan)) errors.push({ field: "plan", reason: "plan_not_found" });
+  }
+  if (has("selectedPlanCode")) {
+    const selectedPlanCode = normalizeCrmEditString(patch.selectedPlanCode).toUpperCase();
+    if (selectedPlanCode && !planMap.has(selectedPlanCode)) errors.push({ field: "selectedPlanCode", reason: "plan_not_found" });
+  }
+  if (has("selectedBillingCycle")) {
+    const selectedBillingCycle = normalizeCrmEditString(patch.selectedBillingCycle).toLowerCase();
+    if (selectedBillingCycle && !["monthly", "annual"].includes(selectedBillingCycle)) errors.push({ field: "selectedBillingCycle", reason: "invalid_billing_cycle" });
+  }
+  const docType = patch?.doc && typeof patch.doc === "object" ? patch.doc.docType : patch.docType;
+  const docLast4 = patch?.doc && typeof patch.doc === "object" ? patch.doc.docLast4 : patch.docLast4;
+  if (has("doc") || has("docType")) {
+    const t = normalizeCrmEditString(docType).toUpperCase();
+    if (t && !["CPF", "CNPJ"].includes(t)) errors.push({ field: "docType", reason: "invalid_doc_type" });
+  }
+  if (has("doc") || has("docLast4")) {
+    const last4 = normalizeCrmEditString(docLast4);
+    if (last4 && !/^\d{4}$/.test(last4)) errors.push({ field: "docLast4", reason: "invalid_doc_last4" });
+  }
+  for (const field of ["cardValidUntil"]) {
+    if (has(field)) {
+      const value = normalizeCrmEditString(patch[field]);
+      if (value && !/^\d{4}-\d{2}-\d{2}$/.test(value)) errors.push({ field, reason: "invalid_date" });
+    }
+  }
+  for (const field of ["cardCanceledAt", "couponReservationCreatedAt"]) {
+    if (has(field)) {
+      const value = normalizeCrmEditString(patch[field]);
+      if (value && Number.isNaN(new Date(value).getTime())) errors.push({ field, reason: "invalid_timestamp" });
+    }
+  }
+
+  return errors;
+}
+
+function buildCrmEditablePlanOptions(plans = []) {
+  return (Array.isArray(plans) ? plans : [])
+    .map((plan) => ({
+      code: String(plan?.code || "").trim().toUpperCase(),
+      name: String(plan?.name || plan?.label || plan?.code || "").trim(),
+      active: plan?.active !== false,
+    }))
+    .filter((plan) => plan.code)
+    .sort((a, b) => a.code.localeCompare(b.code));
+}
+
+function buildCrmUserEditAuditSnapshot(user) {
+  const u = user || {};
+  return {
+    userId: String(u.userId || "").trim(),
+    waId: String(u.waId || "").trim(),
+    status: String(u.status || "").trim(),
+    plan: String(u.plan || "").trim(),
+    fullName: String(u.fullName || "").trim(),
+    templateMode: String(u.templateMode || "").trim(),
+    paymentMethod: String(u.paymentMethod || "").trim(),
+    quotaUsed: Number(u.quotaUsed || 0),
+    trialUsed: Number(u.trialUsed || 0),
+    billingCityState: String(u.billingCityState || "").trim(),
+    billingAddress: String(u.billingAddress || "").trim(),
+    doc: u.doc && typeof u.doc === "object" ? {
+      docType: String(u.doc.docType || "").trim(),
+      docLast4: String(u.doc.docLast4 || "").trim(),
+    } : { docType: "", docLast4: "" },
+    asaasCustomerId: String(u.asaasCustomerId || "").trim(),
+    asaasSubscriptionId: String(u.asaasSubscriptionId || "").trim(),
+    cardValidUntil: String(u.cardValidUntil || "").trim(),
+    cardCanceledAt: String(u.cardCanceledAt || "").trim(),
+    selectedPlanCode: String(u.selectedPlanCode || "").trim(),
+    selectedBillingCycle: String(u.selectedBillingCycle || "").trim(),
+    selectedCouponCode: String(u.selectedCouponCode || "").trim(),
+    checkoutCouponStatus: String(u.checkoutCouponStatus || "").trim(),
+    hasBizProfile: !!u.bizProfile,
+    hasPendingBizProfile: !!u.pendingBizProfile,
+    hasPricingQuote: !!u.pricingQuote,
+    hasCheckoutDraft: !!u.checkoutDraft,
+    hasCurrentAdSession: !!u.currentAdSession,
+  };
+}
+
+const CRM_USER_ADMIN_FINANCIAL_SENSITIVE_FIELDS = new Set([
+  "plan",
+  "paymentMethod",
+  "asaasCustomerId",
+  "asaasSubscriptionId",
+  "cardValidUntil",
+  "cardCanceledAt",
+  "pricingQuote",
+  "selectedPlanCode",
+  "selectedBillingCycle",
+  "selectedCouponCode",
+  "couponReservationId",
+  "couponReservationCreatedAt",
+  "checkoutCouponStatus",
+  "checkoutDraft",
+]);
+
+const CRM_USER_ADMIN_LEDGER_FINANCIAL_FIELDS = new Set([
+  "plan",
+  "paymentMethod",
+  "asaasCustomerId",
+  "asaasSubscriptionId",
+  "cardValidUntil",
+  "cardCanceledAt",
+]);
+
+function normalizeRejectedFieldItem(item) {
+  if (!item || typeof item !== "object") {
+    return { field: String(item || "").trim(), reason: "rejected" };
+  }
+  return {
+    field: String(item.field || item.key || "").trim(),
+    reason: String(item.reason || item.code || item.errorCode || "rejected").trim(),
+    message: String(item.message || item.label || "").trim(),
+  };
+}
+
+function formatRejectedFieldForAudit(item) {
+  const normalized = normalizeRejectedFieldItem(item);
+  return [normalized.field, normalized.reason, normalized.message].filter(Boolean).join(":");
+}
+
+function hasPatchOwn(patch, field) {
+  return !!patch && typeof patch === "object" && Object.prototype.hasOwnProperty.call(patch, field);
+}
+
+function stripConflictBlockedFinancialFields(patch = {}, rejectedFields = []) {
+  const next = { ...(patch && typeof patch === "object" ? patch : {}) };
+  const rejected = Array.isArray(rejectedFields) ? [...rejectedFields] : [];
+  for (const field of CRM_USER_ADMIN_FINANCIAL_SENSITIVE_FIELDS) {
+    if (!hasPatchOwn(next, field)) continue;
+    delete next[field];
+    rejected.push({
+      field,
+      reason: "identity_conflict_sensitive_field_blocked",
+      message: "Campo financeiro sensível bloqueado por conflito de identidade pendente.",
+    });
+  }
+  return { patch: next, rejectedFields: rejected };
+}
+
+function mergeUserSnapshotForAdminPricing(before = {}, patch = {}) {
+  const source = before && typeof before === "object" ? before : {};
+  const updates = patch && typeof patch === "object" ? patch : {};
+  const merged = { ...source, ...updates };
+  if (hasPatchOwn(updates, "doc") && updates.doc && typeof updates.doc === "object") {
+    merged.doc = {
+      ...(source.doc && typeof source.doc === "object" ? source.doc : {}),
+      ...updates.doc,
+    };
+  }
+  return merged;
+}
+
+function summarizeAdminPricingViewForAudit(view = {}) {
+  return {
+    ok: Boolean(view?.ok),
+    valid: Boolean(view?.valid),
+    planCode: String(view?.planCode || ""),
+    billingCycle: String(view?.billingCycle || ""),
+    couponCode: String(view?.couponCode || ""),
+    finalPrice: view?.finalPrice || null,
+    warnings: Array.isArray(view?.warnings) ? view.warnings.slice(0, 10) : [],
+  };
+}
+
+function summarizeAdminAsaasImpactForAudit(impact = {}) {
+  return {
+    ok: Boolean(impact?.ok),
+    readOnly: Boolean(impact?.readOnly),
+    hasAsaasCustomer: Boolean(impact?.hasAsaasCustomer),
+    hasAsaasSubscription: Boolean(impact?.hasAsaasSubscription),
+    changedFields: Array.isArray(impact?.changedFields) ? impact.changedFields : [],
+    requiresManualFinancialAction: Boolean(impact?.impact?.requiresManualFinancialAction || impact?.impact?.requiresAsaasReview),
+    warnings: Array.isArray(impact?.warnings) ? impact.warnings.slice(0, 10) : [],
+  };
+}
+
+function summarizeAdminWebhookWarningsForAudit(warnings = {}) {
+  return {
+    ok: Boolean(warnings?.ok),
+    readOnly: warnings?.readOnly !== false,
+    changedFields: Array.isArray(warnings?.changedFields) ? warnings.changedFields : [],
+    warnings: Array.isArray(warnings?.warnings) ? warnings.warnings.slice(0, 10) : [],
+  };
+}
+
+function pickFinancialSnapshotForLedger(snapshot = {}) {
+  const s = snapshot && typeof snapshot === "object" ? snapshot : {};
+  return {
+    plan: String(s.plan || "").trim(),
+    paymentMethod: String(s.paymentMethod || "").trim(),
+    asaasCustomerId: String(s.asaasCustomerId || "").trim(),
+    asaasSubscriptionId: String(s.asaasSubscriptionId || "").trim(),
+    cardValidUntil: String(s.cardValidUntil || "").trim(),
+    cardCanceledAt: String(s.cardCanceledAt || "").trim(),
+  };
+}
+
+function getChangedLedgerFinancialFields(changedFields = []) {
+  return (Array.isArray(changedFields) ? changedFields : [])
+    .map((field) => String(field || "").trim())
+    .filter((field) => CRM_USER_ADMIN_LEDGER_FINANCIAL_FIELDS.has(field));
+}
+
+async function validateCrmAdminPlanFieldsWithCatalog(patch = {}) {
+  const errors = [];
+  const warnings = [];
+  const nextPatch = { ...(patch && typeof patch === "object" ? patch : {}) };
+
+  if (hasPatchOwn(nextPatch, "plan")) {
+    const validation = await validateAdminUserPlanCode(nextPatch.plan, { allowEmpty: true, allowInactive: true });
+    if (!validation?.ok) {
+      errors.push({ field: "plan", reason: validation?.errorCode || "invalid_plan", message: validation?.message || "Plano inválido." });
+    } else {
+      nextPatch.plan = validation.planCode || "";
+      if (validation.active === false && validation.exists) {
+        warnings.push({ field: "plan", reason: "inactive_plan_allowed", message: validation.message || "Plano inativo permitido por compatibilidade administrativa." });
+      }
+    }
+  }
+
+  if (hasPatchOwn(nextPatch, "selectedPlanCode")) {
+    const validation = await validateAdminUserPlanCode(nextPatch.selectedPlanCode, { allowEmpty: true, allowInactive: true });
+    if (!validation?.ok) {
+      errors.push({ field: "selectedPlanCode", reason: validation?.errorCode || "invalid_selected_plan", message: validation?.message || "Plano selecionado inválido." });
+    } else {
+      nextPatch.selectedPlanCode = validation.planCode || "";
+      if (validation.active === false && validation.exists) {
+        warnings.push({ field: "selectedPlanCode", reason: "inactive_selected_plan_allowed", message: validation.message || "Plano selecionado inativo permitido por compatibilidade administrativa." });
+      }
+    }
+  }
+
+  return { patch: nextPatch, errors, warnings };
 }
 
 function getAdminRequestSession(req) {
@@ -7395,15 +7730,194 @@ router.post("/coupons/:code/delete", async (req, res) => {
 
   router.get("/crm/user", async (req, res) => {
     try {
-      const waId = String(req.query?.waId || "").trim();
-      if (!waId) return res.status(400).json({ ok: false, error: "waId required" });
+      const rawRef = String(req.query?.userId || req.query?.waId || "").trim();
+      if (!rawRef) return res.status(400).json({ ok: false, error: "userId or waId required" });
 
+      const userId = await resolveAdminUserRef(rawRef);
       const plans = await listPlans({ includeInactive: true });
       const planMap = buildPlanMap(plans);
-      const user = await enrichUserForCrm(waId, planMap, nowMs());
-      return res.status(200).json({ ok: true, user });
+      const user = await enrichUserForCrm(userId, planMap, nowMs());
+      const editable = typeof getUserAdminEditableFields === "function"
+        ? await getUserAdminEditableFields(userId).catch(() => null)
+        : null;
+      return res.status(200).json({
+        ok: true,
+        user: {
+          ...user,
+          editableFields: editable || null,
+        },
+        availablePlans: buildCrmEditablePlanOptions(plans),
+      });
     } catch (e) {
       return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  router.post("/crm/user/update", async (req, res) => {
+    try {
+      const session = getAdminRequestSession(req);
+      if (!adminHasPermission(session, "users.edit") && !adminHasPermission(session, "users.manage")) {
+        return res.status(403).json({ ok: false, error: "forbidden", requiredPermission: "users.edit" });
+      }
+
+      const actor = getAdminActor(req);
+      const identity = await resolveAdminEditableUserRef({
+        internalUserId: req.body?.internalUserId,
+        userId: req.body?.userId,
+        waId: req.body?.waId,
+      });
+
+      if (!identity?.ok || !identity?.internalUserId) {
+        return res.status(400).json({
+          ok: false,
+          error: identity?.errorCode || "admin_user_ref_not_resolved",
+          message: identity?.message || "Não foi possível resolver o usuário para edição administrativa.",
+          identity,
+        });
+      }
+
+      const internalUserId = String(identity.internalUserId || "").trim();
+      const rawPatch = req.body?.patch && typeof req.body.patch === "object" ? req.body.patch : req.body || {};
+      const picked = pickCrmUserAdminPatch(rawPatch);
+      const plans = await listPlans({ includeInactive: true });
+      const planMap = buildPlanMap(plans);
+      const localValidationErrors = validateCrmUserAdminPatch(picked.patch, planMap);
+      if (localValidationErrors.length) {
+        return res.status(400).json({
+          ok: false,
+          error: "invalid_user_edit_patch",
+          validationErrors: localValidationErrors,
+          rejectedFields: picked.rejectedFields,
+        });
+      }
+
+      const planValidation = await validateCrmAdminPlanFieldsWithCatalog(picked.patch);
+      if (planValidation.errors.length) {
+        return res.status(400).json({
+          ok: false,
+          error: "invalid_user_plan_patch",
+          validationErrors: planValidation.errors,
+          rejectedFields: [...picked.rejectedFields, ...planValidation.errors],
+          identity,
+        });
+      }
+
+      let finalPatch = planValidation.patch;
+      let rejectedFields = [...picked.rejectedFields, ...planValidation.warnings];
+      if (identity.blockSensitiveOps) {
+        const stripped = stripConflictBlockedFinancialFields(finalPatch, rejectedFields);
+        finalPatch = stripped.patch;
+        rejectedFields = stripped.rejectedFields;
+      }
+
+      const beforeSnapshot = await getUserSnapshot(internalUserId);
+      const predictedSnapshot = mergeUserSnapshotForAdminPricing(beforeSnapshot, finalPatch);
+      const pricingViewBefore = await getAdminUserEffectivePricingView(beforeSnapshot, { source: "admin_crm_user_update_before" }).catch((error) => ({
+        ok: false,
+        valid: false,
+        source: "admin_crm_user_update_before",
+        warnings: [{ code: "pricing_view_before_failed", message: String(error?.message || error), severity: "warn" }],
+      }));
+      const pricingView = await getAdminUserEffectivePricingView(predictedSnapshot, { source: "admin_crm_user_update_after" }).catch((error) => ({
+        ok: false,
+        valid: false,
+        source: "admin_crm_user_update_after",
+        warnings: [{ code: "pricing_view_after_failed", message: String(error?.message || error), severity: "warn" }],
+      }));
+      const asaasImpact = getAdminSubscriptionImpact(beforeSnapshot, finalPatch);
+      const webhookWarnings = getAsaasWebhookAdminCoherenceWarnings(beforeSnapshot, finalPatch);
+
+      const result = await updateUserAdminFields(internalUserId, finalPatch, {
+        source: "admin_crm_user_update",
+        actor,
+      });
+
+      const afterSnapshot = await getUserSnapshot(internalUserId);
+      const changedFields = Array.isArray(result?.changedFields) ? result.changedFields : [];
+      rejectedFields = [
+        ...rejectedFields,
+        ...(Array.isArray(result?.rejectedFields) ? result.rejectedFields : []),
+      ];
+
+      const auditBefore = buildCrmUserEditAuditSnapshot(result?.before || beforeSnapshot || {});
+      const auditAfter = buildCrmUserEditAuditSnapshot(result?.after || afterSnapshot || {});
+      await logUserAdminEditAudit({
+        module: "crm_user_edit",
+        action: "update_user_admin_fields",
+        internalUserId,
+        userId: internalUserId,
+        waId: String(identity.waId || afterSnapshot?.waId || beforeSnapshot?.waId || ""),
+        targetId: internalUserId,
+        targetLabel: String(afterSnapshot?.fullName || afterSnapshot?.waId || identity.waId || internalUserId),
+        summary: `Edição administrativa de usuário: ${changedFields.length} campo(s) alterado(s).`,
+        actor,
+        before: auditBefore,
+        after: auditAfter,
+        changedFields,
+        rejectedFields: rejectedFields.map(formatRejectedFieldForAudit),
+        meta: {
+          source: "admin_crm_user_update",
+          pricingViewBefore: summarizeAdminPricingViewForAudit(pricingViewBefore),
+          pricingView: summarizeAdminPricingViewForAudit(pricingView),
+          asaasImpact: summarizeAdminAsaasImpactForAudit(asaasImpact),
+          webhookWarnings: summarizeAdminWebhookWarningsForAudit(webhookWarnings),
+          identityStatus: {
+            conflict: Boolean(identity.conflict),
+            conflictId: String(identity.conflictId || ""),
+            conflictStatus: String(identity.conflictStatus || ""),
+            blockSensitiveOps: Boolean(identity.blockSensitiveOps),
+            allowProfileEdit: identity.allowProfileEdit !== false,
+            source: String(identity.source || ""),
+          },
+        },
+      });
+
+      const ledgerFinancialFields = getChangedLedgerFinancialFields(changedFields);
+      let ledgerReference = null;
+      if (ledgerFinancialFields.length) {
+        ledgerReference = await recordAdminUserFinancialFieldChanged({
+          userId: internalUserId,
+          waId: String(identity.waId || afterSnapshot?.waId || beforeSnapshot?.waId || ""),
+          actor,
+          changedFields: ledgerFinancialFields,
+          before: pickFinancialSnapshotForLedger(beforeSnapshot),
+          after: pickFinancialSnapshotForLedger(afterSnapshot),
+          summary: "Alteração administrativa de campo financeiro do usuário.",
+          meta: {
+            source: "admin_crm_user_update",
+            doesNotRepresentPayment: true,
+            doesNotChangeSubscription: true,
+            requiresManualAsaasReview: Boolean(asaasImpact?.impact?.requiresManualFinancialAction || asaasImpact?.impact?.requiresAsaasReview),
+          },
+        }).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+      }
+
+      return res.status(200).json({
+        ok: true,
+        userId: internalUserId,
+        internalUserId,
+        changedFields,
+        rejectedFields,
+        snapshot: afterSnapshot,
+        pricingView,
+        asaasImpact,
+        webhookWarnings,
+        identity: {
+          ok: Boolean(identity.ok),
+          internalUserId,
+          waId: identity.waId || null,
+          source: identity.source || "",
+          conflict: Boolean(identity.conflict),
+          conflictId: String(identity.conflictId || ""),
+          conflictStatus: String(identity.conflictStatus || ""),
+          blockSensitiveOps: Boolean(identity.blockSensitiveOps),
+          allowProfileEdit: identity.allowProfileEdit !== false,
+          message: String(identity.message || ""),
+        },
+        ledgerReference,
+      });
+    } catch (e) {
+      return res.status(e?.statusCode || 500).json({ ok: false, error: String(e?.message || e) });
     }
   });
 
@@ -8058,7 +8572,9 @@ router.post("/coupons/:code/delete", async (req, res) => {
       <script>
         document.addEventListener("DOMContentLoaded", function(){
           const state = {
-            lastData: null
+            lastData: null,
+            currentUser: null,
+            currentAvailablePlans: []
           };
 
           const els = {
@@ -8214,6 +8730,264 @@ router.post("/coupons/:code/delete", async (req, res) => {
             }).join("");
           }
 
+          function crmFieldValue(user, field){
+            const source = (user && user.editableFields && typeof user.editableFields === "object") ? user.editableFields : (user || {});
+            if (field.indexOf(".") > -1) {
+              return field.split(".").reduce(function(acc, part){ return acc && typeof acc === "object" ? acc[part] : undefined; }, source);
+            }
+            return source[field];
+          }
+
+          function crmTextInput(id, label, value, type){
+            return '<div><div class="muted" style="font-size:12px;margin-bottom:6px;">' + esc(label) + '</div><input id="' + esc(id) + '" type="' + esc(type || "text") + '" value="' + esc(value || "") + '" /></div>';
+          }
+
+          function crmNumberInput(id, label, value){
+            const n = Number(value || 0);
+            return '<div><div class="muted" style="font-size:12px;margin-bottom:6px;">' + esc(label) + '</div><input id="' + esc(id) + '" type="number" min="0" step="1" value="' + esc(Number.isFinite(n) ? Math.trunc(n) : 0) + '" /></div>';
+          }
+
+          function crmSelectInput(id, label, value, options){
+            const cur = String(value || "").trim();
+            const html = (options || []).map(function(opt){
+              const val = String(opt.value ?? opt).trim();
+              const text = String(opt.label ?? opt).trim();
+              return '<option value="' + esc(val) + '"' + (val === cur ? ' selected' : '') + '>' + esc(text) + '</option>';
+            }).join("");
+            return '<div><div class="muted" style="font-size:12px;margin-bottom:6px;">' + esc(label) + '</div><select id="' + esc(id) + '">' + html + '</select></div>';
+          }
+
+          function crmJsonTextArea(id, label, value){
+            const text = value ? JSON.stringify(value, null, 2) : "";
+            return '<div><div class="muted" style="font-size:12px;margin-bottom:6px;">' + esc(label) + '</div><textarea id="' + esc(id) + '" spellcheck="false" style="min-height:120px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">' + esc(text) + '</textarea></div>';
+          }
+
+          function readJsonField(id, label){
+            const el = document.getElementById(id);
+            const raw = String(el && el.value || "").trim();
+            if (!raw) return { ok: true, value: null };
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return { ok: true, value: parsed };
+              return { ok: false, error: label + " deve ser um objeto JSON ou vazio." };
+            } catch (err) {
+              return { ok: false, error: label + " possui JSON inválido: " + String(err && err.message || err) };
+            }
+          }
+
+          function getInputValue(id){
+            const el = document.getElementById(id);
+            return String(el && el.value || "").trim();
+          }
+
+          function getIntValue(id){
+            const n = Number(getInputValue(id));
+            return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : 0;
+          }
+
+          function buildPlanSelectOptions(user){
+            const seen = new Set();
+            const options = [{ value: "", label: "— sem plano —" }];
+            const current = String(user && user.plan || "").trim().toUpperCase();
+            if (current) {
+              seen.add(current);
+              options.push({ value: current, label: current + " (atual)" });
+            }
+            (state.currentAvailablePlans || []).forEach(function(plan){
+              const code = String(plan && plan.code || "").trim().toUpperCase();
+              if (!code || seen.has(code)) return;
+              seen.add(code);
+              options.push({ value: code, label: code + (plan.name ? " — " + plan.name : "") + (plan.active === false ? " (inativo)" : "") });
+            });
+            return options;
+          }
+
+          function normalizeCrmFeedbackWarnings(list){
+            if (!Array.isArray(list)) return [];
+            return list.map(function(item){
+              if (typeof item === "string") return item;
+              if (item && typeof item === "object") return String(item.message || item.reason || item.code || JSON.stringify(item));
+              return String(item || "");
+            }).filter(Boolean);
+          }
+
+          function renderCrmSaveFeedback(user){
+            const feedback = state.lastSaveFeedback;
+            if (!feedback || !feedback.ok) return "";
+            const currentId = String(user && (user.userId || user.waId) || "");
+            const feedbackId = String(feedback.internalUserId || feedback.userId || "");
+            if (feedbackId && currentId && feedbackId !== currentId && String(user && user.waId || "") !== String(feedback.snapshot && feedback.snapshot.waId || "")) return "";
+            const warnings = [];
+            warnings.push.apply(warnings, normalizeCrmFeedbackWarnings(feedback.pricingView && feedback.pricingView.warnings));
+            warnings.push.apply(warnings, normalizeCrmFeedbackWarnings(feedback.asaasImpact && feedback.asaasImpact.warnings));
+            warnings.push.apply(warnings, normalizeCrmFeedbackWarnings(feedback.webhookWarnings && feedback.webhookWarnings.warnings));
+            if (feedback.identity && feedback.identity.conflict) warnings.push("Conflito de identidade pendente: campos financeiros sensíveis podem ter sido bloqueados.");
+            const rejected = Array.isArray(feedback.rejectedFields) ? feedback.rejectedFields : [];
+            const rejectedHtml = rejected.length
+              ? '<div style="margin-top:8px;"><b>Campos rejeitados/avisos:</b><ul style="margin:6px 0 0 18px;">' + rejected.map(function(item){
+                  if (item && typeof item === "object") return '<li><code>' + esc(item.field || "campo") + '</code> — ' + esc(item.message || item.reason || "rejeitado") + '</li>';
+                  return '<li>' + esc(String(item || "")) + '</li>';
+                }).join("") + '</ul></div>'
+              : '';
+            const warningsHtml = warnings.length
+              ? '<div style="margin-top:8px;"><b>Warnings:</b><ul style="margin:6px 0 0 18px;">' + warnings.map(function(item){ return '<li>' + esc(item) + '</li>'; }).join("") + '</ul></div>'
+              : '';
+            return '' +
+              '<div class="card pad" style="border-color:rgba(16,185,129,.35); background:rgba(16,185,129,.06); margin-bottom:12px;">' +
+                '<span class="badge ok soft">Alterações salvas</span>' +
+                '<span class="muted" style="margin-left:8px;">' + esc((feedback.changedFields || []).length) + ' campo(s) alterado(s).</span>' +
+                warningsHtml +
+                rejectedHtml +
+              '</div>';
+          }
+
+          function renderEditForm(user){
+            if (!user) return;
+            state.currentUser = user;
+            const doc = user.doc || {};
+            const planOptions = buildPlanSelectOptions(user);
+            const statusOptions = ["TRIAL", "ACTIVE", "WAIT_NAME", "WAIT_PLAN", "WAIT_PAYMENT", "PAYMENT_PENDING", "WAIT_TEMPLATE_MODE", "WAIT_BILLING_CITY_STATE", "WAIT_BILLING_ADDRESS", "WAIT_COMPANY_PROFILE", "BLOCKED"].map(function(v){ return { value: v, label: v }; });
+            const templateOptions = [{ value: "FIXED", label: "FIXED" }, { value: "FREE", label: "FREE" }];
+            const paymentOptions = [{ value: "", label: "—" }, { value: "PIX", label: "PIX" }, { value: "CARD", label: "CARD" }];
+            const billingCycleOptions = [{ value: "", label: "—" }, { value: "monthly", label: "monthly" }, { value: "annual", label: "annual" }];
+            const docTypeOptions = [{ value: "", label: "—" }, { value: "CPF", label: "CPF" }, { value: "CNPJ", label: "CNPJ" }];
+
+            els.detail.innerHTML = '' +
+              '<div class="row" style="justify-content:space-between; align-items:flex-start;">' +
+                '<div>' +
+                  '<h3 style="margin:0 0 6px 0;">Editar usuário</h3>' +
+                  '<div class="muted"><code>' + esc(user.userId || user.waId || "") + '</code></div>' +
+                '</div>' +
+                '<div class="row">' +
+                  '<button type="button" class="primary" data-action="save-crm-user-edit">Salvar alterações</button>' +
+                  '<button type="button" data-action="cancel-crm-user-edit">Cancelar</button>' +
+                '</div>' +
+              '</div>' +
+              '<div class="hr"></div>' +
+              '<div class="badge warn soft" style="white-space:normal; line-height:1.5;">Alterações financeiras avançadas, como valor individual de mensalidade, somente serão aplicadas quando também refletidas na assinatura/cobrança correspondente.</div>' +
+              '<div id="crmEditMsg" class="muted" style="margin-top:10px;"></div>' +
+              '<div class="hr"></div>' +
+              '<h4 style="margin:0 0 10px 0;">Conta</h4>' +
+              '<div class="grid cols2">' +
+                crmTextInput("crmEditFullName", "Nome", user.fullName || "") +
+                crmSelectInput("crmEditStatus", "Status", user.status || "TRIAL", statusOptions) +
+                crmSelectInput("crmEditPlan", "Plano", user.plan || "", planOptions) +
+                crmSelectInput("crmEditTemplateMode", "Template", user.templateMode || "FIXED", templateOptions) +
+              '</div>' +
+              '<div class="hr"></div>' +
+              '<h4 style="margin:0 0 10px 0;">Uso</h4>' +
+              '<div class="grid cols2">' +
+                crmNumberInput("crmEditQuotaUsed", "quotaUsed", user.quotaUsed || 0) +
+                crmNumberInput("crmEditTrialUsed", "trialUsed", user.trialUsed || 0) +
+              '</div>' +
+              '<div class="hr"></div>' +
+              '<h4 style="margin:0 0 10px 0;">Cobrança</h4>' +
+              '<div class="grid cols2">' +
+                crmSelectInput("crmEditPaymentMethod", "Pagamento", user.paymentMethod || "", paymentOptions) +
+                crmTextInput("crmEditAsaasCustomerId", "Asaas Customer", user.asaasCustomerId || "") +
+                crmTextInput("crmEditAsaasSubscriptionId", "Asaas Subscription", user.asaasSubscriptionId || "") +
+                crmTextInput("crmEditCardValidUntil", "Válido até", user.cardValidUntil || "", "date") +
+                crmTextInput("crmEditCardCanceledAt", "Cancelado em", user.cardCanceledAt || "") +
+                crmSelectInput("crmEditSelectedBillingCycle", "Ciclo selecionado", user.selectedBillingCycle || "", billingCycleOptions) +
+                crmSelectInput("crmEditSelectedPlanCode", "Plano selecionado", user.selectedPlanCode || "", planOptions) +
+                crmTextInput("crmEditSelectedCouponCode", "Cupom selecionado", user.selectedCouponCode || "") +
+                crmTextInput("crmEditCouponReservationId", "Reserva de cupom", user.couponReservationId || "") +
+                crmTextInput("crmEditCouponReservationCreatedAt", "Reserva criada em", user.couponReservationCreatedAt || "") +
+                crmTextInput("crmEditCheckoutCouponStatus", "Status do cupom no checkout", user.checkoutCouponStatus || "") +
+              '</div>' +
+              '<div class="hr"></div>' +
+              '<h4 style="margin:0 0 10px 0;">Cadastro</h4>' +
+              '<div class="grid cols2">' +
+                crmTextInput("crmEditBillingCityState", "Cidade/UF", user.billingCityState || "") +
+                crmTextInput("crmEditBillingAddress", "Endereço", user.billingAddress || "") +
+                crmSelectInput("crmEditDocType", "Documento - tipo", doc.docType || "", docTypeOptions) +
+                crmTextInput("crmEditDocLast4", "Documento - últimos 4 dígitos", doc.docLast4 || "", "text") +
+              '</div>' +
+              '<div class="hr"></div>' +
+              '<h4 style="margin:0 0 10px 0;">Perfil da empresa</h4>' +
+              '<div class="grid cols2">' +
+                crmJsonTextArea("crmEditBizProfile", "Perfil salvo", user.bizProfile || null) +
+                crmJsonTextArea("crmEditPendingBizProfile", "Perfil pendente", user.pendingBizProfile || null) +
+              '</div>' +
+              '<div class="hr"></div>' +
+              '<h4 style="margin:0 0 10px 0;">Operacional</h4>' +
+              '<div class="grid cols2">' +
+                crmJsonTextArea("crmEditActivityMeta", "activityMeta", user.activityMeta || {}) +
+                crmJsonTextArea("crmEditGrowthMeta", "growthMeta", user.growthMeta || {}) +
+                crmJsonTextArea("crmEditPricingQuote", "pricingQuote", user.pricingQuote || null) +
+                crmJsonTextArea("crmEditCheckoutDraft", "checkoutDraft", user.checkoutDraft || null) +
+                crmJsonTextArea("crmEditCurrentAdSession", "currentAdSession", user.currentAdSession || null) +
+              '</div>';
+          }
+
+          function buildEditPatchFromForm(){
+            const jsonFields = [
+              ["crmEditBizProfile", "Perfil salvo", "bizProfile"],
+              ["crmEditPendingBizProfile", "Perfil pendente", "pendingBizProfile"],
+              ["crmEditActivityMeta", "activityMeta", "activityMeta"],
+              ["crmEditGrowthMeta", "growthMeta", "growthMeta"],
+              ["crmEditPricingQuote", "pricingQuote", "pricingQuote"],
+              ["crmEditCheckoutDraft", "checkoutDraft", "checkoutDraft"],
+              ["crmEditCurrentAdSession", "currentAdSession", "currentAdSession"],
+            ];
+            const patch = {
+              fullName: getInputValue("crmEditFullName"),
+              status: getInputValue("crmEditStatus"),
+              plan: getInputValue("crmEditPlan"),
+              quotaUsed: getIntValue("crmEditQuotaUsed"),
+              trialUsed: getIntValue("crmEditTrialUsed"),
+              templateMode: getInputValue("crmEditTemplateMode"),
+              paymentMethod: getInputValue("crmEditPaymentMethod"),
+              billingCityState: getInputValue("crmEditBillingCityState"),
+              billingAddress: getInputValue("crmEditBillingAddress"),
+              doc: {
+                docType: getInputValue("crmEditDocType"),
+                docLast4: getInputValue("crmEditDocLast4"),
+              },
+              asaasCustomerId: getInputValue("crmEditAsaasCustomerId"),
+              asaasSubscriptionId: getInputValue("crmEditAsaasSubscriptionId"),
+              cardValidUntil: getInputValue("crmEditCardValidUntil"),
+              cardCanceledAt: getInputValue("crmEditCardCanceledAt"),
+              selectedPlanCode: getInputValue("crmEditSelectedPlanCode"),
+              selectedBillingCycle: getInputValue("crmEditSelectedBillingCycle"),
+              selectedCouponCode: getInputValue("crmEditSelectedCouponCode"),
+              couponReservationId: getInputValue("crmEditCouponReservationId"),
+              couponReservationCreatedAt: getInputValue("crmEditCouponReservationCreatedAt"),
+              checkoutCouponStatus: getInputValue("crmEditCheckoutCouponStatus"),
+            };
+            for (const item of jsonFields) {
+              const parsed = readJsonField(item[0], item[1]);
+              if (!parsed.ok) return { ok: false, error: parsed.error };
+              patch[item[2]] = parsed.value;
+            }
+            return { ok: true, patch: patch };
+          }
+
+          async function saveCrmUserEdit(){
+            const msg = document.getElementById("crmEditMsg");
+            const user = state.currentUser || {};
+            const built = buildEditPatchFromForm();
+            if (!built.ok) {
+              if (msg) msg.innerHTML = '<span class="badge danger soft">' + esc(built.error) + '</span>';
+              return;
+            }
+            if (msg) msg.innerHTML = '<span class="badge info soft">Salvando alterações...</span>';
+            const out = await fetchJson("/admin/crm/user/update", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json" },
+              body: JSON.stringify({ userId: user.userId || user.waId || "", waId: user.waId || "", patch: built.patch })
+            });
+            if (!out.response.ok || !out.json.ok) {
+              const err = out.json && (out.json.error || JSON.stringify(out.json.validationErrors || out.json));
+              if (msg) msg.innerHTML = '<span class="badge danger soft">Falha ao salvar: ' + esc(err || "erro desconhecido") + '</span>';
+              return;
+            }
+            state.lastSaveFeedback = out.json;
+            if (msg) msg.innerHTML = '<span class="badge ok soft">Alterações salvas. Recarregando ficha...</span>';
+            await loadCrm();
+            await loadCrmUser(user.waId || user.userId || out.json.userId || "");
+          }
+
           function renderDetail(user){
             if (!user) {
               els.detail.innerHTML = '<div class="muted">Usuário não encontrado.</div>';
@@ -8234,6 +9008,8 @@ router.post("/coupons/:code/delete", async (req, res) => {
                 }).join("") + '</div>'
               : '<span class="badge ok">Sem inconsistências</span>';
 
+            state.currentUser = user;
+
             els.detail.innerHTML = '' +
               '<div class="row" style="justify-content:space-between; align-items:flex-start;">' +
                 '<div>' +
@@ -8241,11 +9017,13 @@ router.post("/coupons/:code/delete", async (req, res) => {
                   '<div class="muted"><code>' + esc(user.waId || "") + '</code></div>' +
                 '</div>' +
                 '<div class="row">' +
+                  '<button type="button" class="primary" data-action="edit-crm-user">Editar</button>' +
                   '<a class="pill" href="/admin/users-ui?waId=' + encodeURIComponent(user.waId || "") + '">Ações</a>' +
                   '<a class="pill" href="/admin/inconsistencies-ui">Inconsistências</a>' +
                 '</div>' +
               '</div>' +
               '<div class="hr"></div>' +
+              renderCrmSaveFeedback(user) +
               '<div class="grid cols2">' +
                 '<div class="kpi">' +
                   '<div class="t">Conta</div>' +
@@ -8314,6 +9092,7 @@ router.post("/coupons/:code/delete", async (req, res) => {
               openDetailModal("Ficha do usuário");
               return;
             }
+            state.currentAvailablePlans = Array.isArray(out.json.availablePlans) ? out.json.availablePlans : [];
             renderDetail(out.json.user);
           }
 
@@ -8348,6 +9127,18 @@ router.post("/coupons/:code/delete", async (req, res) => {
             els.modal.addEventListener("click", function(ev){
               if (ev.target.closest("[data-action='close-crm-modal']")) {
                 closeDetailModal();
+                return;
+              }
+              if (ev.target.closest("[data-action='edit-crm-user']")) {
+                renderEditForm(state.currentUser);
+                return;
+              }
+              if (ev.target.closest("[data-action='cancel-crm-user-edit']")) {
+                renderDetail(state.currentUser);
+                return;
+              }
+              if (ev.target.closest("[data-action='save-crm-user-edit']")) {
+                saveCrmUserEdit();
               }
             });
           }
