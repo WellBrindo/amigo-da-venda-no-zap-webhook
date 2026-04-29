@@ -15,9 +15,26 @@ import {
   redisSRem,
   redisType,
   redisUserKey,
+  redisSafeGet,
+  redisSafeSet,
+  redisSafeIncrBy,
+  redisSafeDel,
+  redisSafeSAdd,
+  redisSafeSMembers,
+  redisSafeSRem,
+  redisSafeType,
+  getRedisHealthSnapshot,
 } from "./redis.js";
-import { trackStateError } from "./metrics.js";
+import {
+  trackStateError,
+  trackRedisDegraded,
+  trackRedisDown,
+  trackRedisFallbackRead,
+  trackRedisCriticalWriteBlocked,
+  trackRedisNoncriticalWriteSkipped,
+} from "./metrics.js";
 import * as audit from "./audit.js";
+import { raiseSystemIncident } from "./alerts.js";
 
 
 const STATE_ERROR_CODE = Object.freeze({
@@ -27,6 +44,15 @@ const STATE_ERROR_CODE = Object.freeze({
   DELETE: "STATE_DELETE_ERROR",
   INDEX: "STATE_INDEX_ERROR",
   RUNTIME: "STATE_RUNTIME_ERROR",
+});
+
+const STATE_OPERATION_POLICY = Object.freeze({
+  READ: "read",
+  WRITE_CRITICAL: "write_critical",
+  WRITE_NONCRITICAL: "write_noncritical",
+  DELETE_CRITICAL: "delete_critical",
+  DELETE_NONCRITICAL: "delete_noncritical",
+  INDEX: "index",
 });
 
 async function logStateOperationalError({
@@ -91,8 +117,41 @@ async function logStateOperationalError({
 
 async function safeStateRedisGet(keyName, { userId = "", step = "", fallback = "" } = {}) {
   try {
-    const value = await redisGet(keyName);
-    return value == null ? fallback : value;
+    const result = await redisSafeGet(keyName, {
+      fallbackValue: fallback,
+      critical: false,
+      module: "state",
+      step,
+      suppressThrow: true,
+    });
+    if (result?.ok) {
+      return result.value == null ? fallback : result.value;
+    }
+
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.READ,
+      error: result?.message || "state_read_degraded",
+      event: "state_read_failed",
+      meta: {
+        degraded: true,
+        fallbackUsed: true,
+        redisStatus: safeStr(result?.status),
+      },
+    });
+    await emitRedisDegradationSignals({
+      userId,
+      step,
+      key: keyName,
+      errorCode: STATE_ERROR_CODE.READ,
+      impact: "state_read_fallback",
+      message: safeStr(result?.message),
+      fallbackUsed: true,
+      severity: "MEDIUM",
+    });
+    return result?.value == null ? fallback : result.value;
   } catch (error) {
     await logStateOperationalError({
       userId,
@@ -101,15 +160,63 @@ async function safeStateRedisGet(keyName, { userId = "", step = "", fallback = "
       errorCode: STATE_ERROR_CODE.READ,
       error,
       event: "state_read_failed",
+      meta: { degraded: true, fallbackUsed: true },
+    });
+    await emitRedisDegradationSignals({
+      userId,
+      step,
+      key: keyName,
+      errorCode: STATE_ERROR_CODE.READ,
+      impact: "state_read_fallback",
+      message: safeStr(error?.message || error),
+      fallbackUsed: true,
+      severity: "MEDIUM",
     });
     return fallback;
   }
 }
 
-async function safeStateRedisSet(keyName, value, { userId = "", step = "" } = {}) {
+async function safeStateRedisSet(keyName, value, { userId = "", step = "", critical = false } = {}) {
   try {
-    await redisSet(keyName, value);
-    return true;
+    const result = await redisSafeSet(keyName, value, {
+      fallbackValue: false,
+      critical,
+      module: "state",
+      step,
+      suppressThrow: !critical,
+    });
+    if (result?.ok) {
+      return true;
+    }
+
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.WRITE,
+      error: result?.message || "state_write_degraded",
+      event: critical ? "state_write_critical_blocked" : "state_write_failed",
+      meta: {
+        degraded: true,
+        criticalBlocked: Boolean(critical),
+        fallbackUsed: !critical,
+        redisStatus: safeStr(result?.status),
+      },
+    });
+    await emitRedisDegradationSignals({
+      userId,
+      step,
+      key: keyName,
+      errorCode: STATE_ERROR_CODE.WRITE,
+      impact: critical ? "critical_state_write_blocked" : "noncritical_state_write_skipped",
+      message: safeStr(result?.message),
+      critical,
+      fallbackUsed: !critical,
+    });
+    if (critical) {
+      throw new Error(safeStr(result?.message) || "Critical state write blocked");
+    }
+    return false;
   } catch (error) {
     await logStateOperationalError({
       userId,
@@ -117,16 +224,69 @@ async function safeStateRedisSet(keyName, value, { userId = "", step = "" } = {}
       step,
       errorCode: STATE_ERROR_CODE.WRITE,
       error,
-      event: "state_write_failed",
+      event: critical ? "state_write_critical_blocked" : "state_write_failed",
+      meta: {
+        degraded: true,
+        criticalBlocked: Boolean(critical),
+        fallbackUsed: !critical,
+      },
     });
-    throw error;
+    await emitRedisDegradationSignals({
+      userId,
+      step,
+      key: keyName,
+      errorCode: STATE_ERROR_CODE.WRITE,
+      impact: critical ? "critical_state_write_blocked" : "noncritical_state_write_failed",
+      message: safeStr(error?.message || error),
+      critical,
+      fallbackUsed: !critical,
+    });
+    if (critical) throw error;
+    return false;
   }
 }
 
-async function safeStateRedisDel(keyName, { userId = "", step = "" } = {}) {
+async function safeStateRedisDel(keyName, { userId = "", step = "", critical = false } = {}) {
   try {
-    await redisDel(keyName);
-    return true;
+    const result = await redisSafeDel(keyName, {
+      fallbackValue: false,
+      critical,
+      module: "state",
+      step,
+      suppressThrow: !critical,
+    });
+    if (result?.ok) {
+      return true;
+    }
+
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.DELETE,
+      error: result?.message || "state_delete_degraded",
+      event: critical ? "state_delete_critical_blocked" : "state_delete_failed",
+      meta: {
+        degraded: true,
+        criticalBlocked: Boolean(critical),
+        fallbackUsed: !critical,
+        redisStatus: safeStr(result?.status),
+      },
+    });
+    await emitRedisDegradationSignals({
+      userId,
+      step,
+      key: keyName,
+      errorCode: STATE_ERROR_CODE.DELETE,
+      impact: critical ? "critical_state_delete_blocked" : "noncritical_state_delete_skipped",
+      message: safeStr(result?.message),
+      critical,
+      fallbackUsed: !critical,
+    });
+    if (critical) {
+      throw new Error(safeStr(result?.message) || "Critical state delete blocked");
+    }
+    return false;
   } catch (error) {
     await logStateOperationalError({
       userId,
@@ -134,15 +294,31 @@ async function safeStateRedisDel(keyName, { userId = "", step = "" } = {}) {
       step,
       errorCode: STATE_ERROR_CODE.DELETE,
       error,
-      event: "state_delete_failed",
+      event: critical ? "state_delete_critical_blocked" : "state_delete_failed",
+      meta: {
+        degraded: true,
+        criticalBlocked: Boolean(critical),
+        fallbackUsed: !critical,
+      },
     });
-    throw error;
+    await emitRedisDegradationSignals({
+      userId,
+      step,
+      key: keyName,
+      errorCode: STATE_ERROR_CODE.DELETE,
+      impact: critical ? "critical_state_delete_blocked" : "noncritical_state_delete_failed",
+      message: safeStr(error?.message || error),
+      critical,
+      fallbackUsed: !critical,
+    });
+    if (critical) throw error;
+    return false;
   }
 }
 
-async function safeStateIndexUser(userRef, step = "index_user") {
+async function safeStateIndexUser(userRef, step = "index_user", { critical = false } = {}) {
   try {
-    return await indexUser(userRef);
+    return await indexUser(userRef, { critical });
   } catch (error) {
     await logStateOperationalError({
       userId: userRef,
@@ -150,11 +326,343 @@ async function safeStateIndexUser(userRef, step = "index_user") {
       step,
       errorCode: STATE_ERROR_CODE.INDEX,
       error,
-      event: "state_index_failed",
+      event: critical ? "state_index_critical_blocked" : "state_index_failed",
+      meta: {
+        degraded: true,
+        criticalBlocked: Boolean(critical),
+      },
     });
-    throw error;
+    await emitRedisDegradationSignals({
+      userId: userRef,
+      step,
+      key: USERS_INDEX_KEY,
+      errorCode: STATE_ERROR_CODE.INDEX,
+      impact: critical ? "critical_index_write_blocked" : "index_write_failed",
+      message: safeStr(error?.message || error),
+      critical,
+    });
+    if (critical) throw error;
+    return false;
   }
 }
+
+
+async function emitRedisDegradationSignals({
+  userId = "",
+  step = "",
+  key = "",
+  errorCode = "",
+  impact = "",
+  message = "",
+  critical = false,
+  fallbackUsed = false,
+  severity = "HIGH",
+} = {}) {
+  const snapshot = typeof getRedisHealthSnapshot === "function"
+    ? getRedisHealthSnapshot()
+    : { status: "DEGRADED" };
+  const status = safeStr(snapshot?.status) || "DEGRADED";
+
+  try {
+    if (status === "DOWN" && typeof trackRedisDown === "function") {
+      await trackRedisDown({
+        userId: safeStr(userId),
+        waId: safeStr(userId),
+        source: "state",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact || key),
+        severity: safeStr(severity),
+      });
+    } else if (status === "DEGRADED" && typeof trackRedisDegraded === "function") {
+      await trackRedisDegraded({
+        userId: safeStr(userId),
+        waId: safeStr(userId),
+        source: "state",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact || key),
+        severity: safeStr(severity),
+      });
+    }
+    if (fallbackUsed && typeof trackRedisFallbackRead === "function") {
+      await trackRedisFallbackRead({
+        userId: safeStr(userId),
+        waId: safeStr(userId),
+        source: "state",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact || key),
+        severity: safeStr(severity),
+      });
+    }
+    if (critical && typeof trackRedisCriticalWriteBlocked === "function") {
+      await trackRedisCriticalWriteBlocked({
+        userId: safeStr(userId),
+        waId: safeStr(userId),
+        source: "state",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact || key),
+        severity: safeStr(severity),
+      });
+    } else if (!critical && typeof trackRedisNoncriticalWriteSkipped === "function" && safeStr(impact)) {
+      await trackRedisNoncriticalWriteSkipped({
+        userId: safeStr(userId),
+        waId: safeStr(userId),
+        source: "state",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact || key),
+        severity: safeStr(severity),
+      });
+    }
+  } catch (_) {}
+
+  try {
+    await raiseSystemIncident({
+      type: "REDIS",
+      severity: critical ? "CRITICAL" : severity,
+      module: "state",
+      step: safeStr(step),
+      errorCode: safeStr(errorCode) || STATE_ERROR_CODE.RUNTIME,
+      message: safeStr(message) || "State Redis degradation detected.",
+      impact: safeStr(impact || (critical ? "critical_state_write_blocked" : "state_fallback_used")),
+      dedupeKey: ["state", safeStr(step), safeStr(key), safeStr(errorCode), critical ? "critical" : "degraded"].filter(Boolean).join("|"),
+      meta: {
+        key: safeStr(key),
+        status,
+        critical,
+        fallbackUsed,
+      },
+    });
+  } catch (_) {}
+}
+
+async function safeStateRedisIncrBy(keyName, delta = 1, { userId = "", step = "", fallback = 0, critical = false } = {}) {
+  try {
+    const result = await redisSafeIncrBy(keyName, delta, {
+      fallbackValue: fallback,
+      critical,
+      module: "state",
+      step,
+      suppressThrow: !critical,
+    });
+    if (result?.ok) {
+      return toInt(result.value, fallback);
+    }
+
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.WRITE,
+      error: result?.message || "state_incr_degraded",
+      event: critical ? "state_incr_critical_blocked" : "state_incr_degraded",
+      meta: {
+        degraded: true,
+        criticalBlocked: Boolean(critical),
+        fallbackUsed: true,
+        redisStatus: safeStr(result?.status),
+      },
+    });
+    await emitRedisDegradationSignals({
+      userId,
+      step,
+      key: keyName,
+      errorCode: STATE_ERROR_CODE.WRITE,
+      impact: critical ? "critical_counter_write_blocked" : "counter_write_skipped",
+      message: safeStr(result?.message),
+      critical,
+      fallbackUsed: !critical,
+    });
+    if (critical) {
+      throw new Error(safeStr(result?.message) || "Critical state counter write blocked");
+    }
+    return toInt(result?.value, fallback);
+  } catch (error) {
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.WRITE,
+      error,
+      event: critical ? "state_incr_critical_blocked" : "state_incr_failed",
+      meta: {
+        degraded: true,
+        criticalBlocked: Boolean(critical),
+        fallbackUsed: !critical,
+      },
+    });
+    await emitRedisDegradationSignals({
+      userId,
+      step,
+      key: keyName,
+      errorCode: STATE_ERROR_CODE.WRITE,
+      impact: critical ? "critical_counter_write_blocked" : "counter_write_failed",
+      message: safeStr(error?.message || error),
+      critical,
+      fallbackUsed: !critical,
+    });
+    if (critical) throw error;
+    return toInt(fallback, 0);
+  }
+}
+
+async function safeStateRedisSAdd(keyName, members, { userId = "", step = "", critical = false } = {}) {
+  const list = Array.isArray(members) ? members : [members];
+  try {
+    if (typeof redisSafeSAdd === "function") {
+      const result = await redisSafeSAdd(keyName, list, {
+        fallbackValue: 0,
+        critical,
+        module: "state",
+        step,
+        suppressThrow: !critical,
+      });
+      if (result?.ok) return Number(result.value || 0);
+      await emitRedisDegradationSignals({
+        userId,
+        step,
+        key: keyName,
+        errorCode: STATE_ERROR_CODE.INDEX,
+        impact: critical ? "critical_index_write_blocked" : "index_write_skipped",
+        message: safeStr(result?.message),
+        critical,
+      });
+      if (critical) throw new Error(safeStr(result?.message) || "state_sadd_failed");
+      return 0;
+    }
+    return await redisSAdd(keyName, list);
+  } catch (error) {
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.INDEX,
+      error,
+      event: critical ? "state_sadd_critical_blocked" : "state_sadd_failed",
+    });
+    if (critical) throw error;
+    return 0;
+  }
+}
+
+async function safeStateRedisSMembers(keyName, { userId = "", step = "", fallback = [] } = {}) {
+  try {
+    if (typeof redisSafeSMembers === "function") {
+      const result = await redisSafeSMembers(keyName, {
+        fallbackValue: fallback,
+        critical: false,
+        module: "state",
+        step,
+        suppressThrow: true,
+      });
+      if (result?.ok) return Array.isArray(result.value) ? result.value : fallback;
+      await emitRedisDegradationSignals({
+        userId,
+        step,
+        key: keyName,
+        errorCode: STATE_ERROR_CODE.READ,
+        impact: "index_read_fallback",
+        message: safeStr(result?.message),
+        critical: false,
+        fallbackUsed: true,
+        severity: "MEDIUM",
+      });
+      return Array.isArray(result?.value) ? result.value : fallback;
+    }
+    const value = await redisSMembers(keyName);
+    return Array.isArray(value) ? value : fallback;
+  } catch (error) {
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.READ,
+      error,
+      event: "state_smembers_failed",
+    });
+    return fallback;
+  }
+}
+
+async function safeStateRedisSRem(keyName, members, { userId = "", step = "", critical = false } = {}) {
+  const list = Array.isArray(members) ? members : [members];
+  try {
+    if (typeof redisSafeSRem === "function") {
+      const result = await redisSafeSRem(keyName, list, {
+        fallbackValue: 0,
+        critical,
+        module: "state",
+        step,
+        suppressThrow: !critical,
+      });
+      if (result?.ok) return Number(result.value || 0);
+      await emitRedisDegradationSignals({
+        userId,
+        step,
+        key: keyName,
+        errorCode: STATE_ERROR_CODE.DELETE,
+        impact: critical ? "critical_index_delete_blocked" : "index_delete_skipped",
+        message: safeStr(result?.message),
+        critical,
+      });
+      if (critical) throw new Error(safeStr(result?.message) || "state_srem_failed");
+      return 0;
+    }
+    return await redisSRem(keyName, list);
+  } catch (error) {
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.DELETE,
+      error,
+      event: critical ? "state_srem_critical_blocked" : "state_srem_failed",
+    });
+    if (critical) throw error;
+    return 0;
+  }
+}
+
+async function safeStateRedisType(keyName, { userId = "", step = "", fallback = "" } = {}) {
+  try {
+    if (typeof redisSafeType === "function") {
+      const result = await redisSafeType(keyName, {
+        fallbackValue: fallback,
+        critical: false,
+        module: "state",
+        step,
+        suppressThrow: true,
+      });
+      if (result?.ok) return safeStr(result.value);
+      await emitRedisDegradationSignals({
+        userId,
+        step,
+        key: keyName,
+        errorCode: STATE_ERROR_CODE.READ,
+        impact: "type_check_fallback",
+        message: safeStr(result?.message),
+        fallbackUsed: true,
+        severity: "MEDIUM",
+      });
+      return safeStr(result?.value || fallback);
+    }
+    return safeStr(await redisType(keyName));
+  } catch (error) {
+    await logStateOperationalError({
+      userId,
+      key: keyName,
+      step,
+      errorCode: STATE_ERROR_CODE.READ,
+      error,
+      event: "state_type_failed",
+    });
+    return safeStr(fallback);
+  }
+}
+
 
 function safeStateJsonParse(raw, fallback = null, { userId = "", key = "", step = "" } = {}) {
   const s = safeStr(raw);
@@ -747,14 +1255,14 @@ function maskDocFromParts(docType, docLast4) {
 
 // ✅ AGORA É EXPORTADA (para window24h.js importar corretamente)
 // ✅ V16.4.1: migração segura do índice users:index quando legado estiver como STRING (ou outro tipo)
-export async function indexUser(userRef) {
+export async function indexUser(userRef, { critical = false } = {}) {
   const id = normalizeUserRef(userRef);
   if (!id) return false;
 
   // Detecta tipo do índice antes de usar SADD (evita WRONGTYPE)
   let t = "";
   try {
-    t = safeStr(await redisType(USERS_INDEX_KEY)).toLowerCase();
+    t = safeStr(await safeStateRedisType(USERS_INDEX_KEY, { userId: id, step: "index_user:type_check", fallback: "" })).toLowerCase();
   } catch (err) {
     // Se TYPE falhar por qualquer razão, não arriscar deletar nada.
     console.warn(
@@ -767,7 +1275,7 @@ export async function indexUser(userRef) {
       })
     );
     // Ainda tenta adicionar (pode falhar se for wrongtype, mas ao menos logamos o motivo)
-    await redisSAdd(USERS_INDEX_KEY, id);
+    await safeStateRedisSAdd(USERS_INDEX_KEY, id, { userId: id, step: "index_user:add_after_type_check", critical });
     return true;
   }
 
@@ -784,10 +1292,10 @@ export async function indexUser(userRef) {
         userRef: id,
       })
     );
-    await redisDel(USERS_INDEX_KEY);
+    await safeStateRedisDel(USERS_INDEX_KEY, { userId: id, step: "index_user:migration_delete", critical });
   }
 
-  await redisSAdd(USERS_INDEX_KEY, id);
+  await safeStateRedisSAdd(USERS_INDEX_KEY, id, { userId: id, step: "index_user:add", critical });
   return true;
 }
 
@@ -796,26 +1304,26 @@ export async function ensureUserExists(userRef) {
   const id = normalizeUserRef(userRef);
   if (!id) throw new Error("userRef required");
 
-  await indexUser(id);
+  await safeStateIndexUser(id, "ensure_user_exists:index", { critical: false });
 
   // status default
-  const curStatus = await redisGet(keyStatus(id));
-  if (!curStatus) await redisSet(keyStatus(id), "TRIAL");
+  const curStatus = await safeStateRedisGet(keyStatus(id), { userId: id, step: "ensure_user_exists:get_status", fallback: "" });
+  if (!curStatus) await safeStateRedisSet(keyStatus(id), "TRIAL", { userId: id, step: "ensure_user_exists:set_status", critical: false });
 
   // template default
-  const curT = await redisGet(keyTemplateMode(id));
-  if (!curT) await redisSet(keyTemplateMode(id), "FIXED");
+  const curT = await safeStateRedisGet(keyTemplateMode(id), { userId: id, step: "ensure_user_exists:get_template_mode", fallback: "" });
+  if (!curT) await safeStateRedisSet(keyTemplateMode(id), "FIXED", { userId: id, step: "ensure_user_exists:set_template_mode", critical: false });
 
   // template prompt default
-  const curTP = await redisGet(keyTemplatePrompted(id));
-  if (!curTP) await redisSet(keyTemplatePrompted(id), "0");
+  const curTP = await safeStateRedisGet(keyTemplatePrompted(id), { userId: id, step: "ensure_user_exists:get_template_prompted", fallback: "" });
+  if (!curTP) await safeStateRedisSet(keyTemplatePrompted(id), "0", { userId: id, step: "ensure_user_exists:set_template_prompted", critical: false });
 
   // counters default
-  const curTrial = await redisGet(keyTrialUsed(id));
-  if (!curTrial) await redisSet(keyTrialUsed(id), "0");
+  const curTrial = await safeStateRedisGet(keyTrialUsed(id), { userId: id, step: "ensure_user_exists:get_trial_used", fallback: "" });
+  if (!curTrial) await safeStateRedisSet(keyTrialUsed(id), "0", { userId: id, step: "ensure_user_exists:set_trial_used", critical: false });
 
-  const curQuota = await redisGet(keyQuotaUsed(id));
-  if (!curQuota) await redisSet(keyQuotaUsed(id), "0");
+  const curQuota = await safeStateRedisGet(keyQuotaUsed(id), { userId: id, step: "ensure_user_exists:get_quota_used", fallback: "" });
+  if (!curQuota) await safeStateRedisSet(keyQuotaUsed(id), "0", { userId: id, step: "ensure_user_exists:set_quota_used", critical: false });
 
   // ✅ IMPORTANTE (V16.4.2):
   // NÃO setar plan/paymentMethod como "".
@@ -830,7 +1338,7 @@ export async function ensureUserExists(userRef) {
 
 // ===================== Users Index =====================
 export async function listUsers() {
-  const ids = await redisSMembers(USERS_INDEX_KEY);
+  const ids = await safeStateRedisSMembers(USERS_INDEX_KEY, { step: "list_users", fallback: [] });
   return Array.isArray(ids) ? ids : [];
 }
 
@@ -894,58 +1402,58 @@ export async function setUserPlan(waId, planCode) {
 
 // ===================== Counters =====================
 export async function getUserQuotaUsed(waId) {
-  const v = await redisGet(keyQuotaUsed(waId));
+  const v = await safeStateRedisGet(keyQuotaUsed(waId), { userId: waId, step: "get_user_quota_used", fallback: "0" });
   return toInt(v, 0);
 }
 
 export async function incUserQuotaUsed(waId, by = 1) {
   await indexUser(waId);
   const inc = toInt(by, 1);
-  const v = await redisIncrBy(keyQuotaUsed(waId), inc);
+  const v = await safeStateRedisIncrBy(keyQuotaUsed(waId), inc, { userId: waId, step: "inc_user_quota_used", fallback: 0, critical: false });
   return toInt(v, 0);
 }
 
 export async function resetUserQuotaUsed(waId) {
   await indexUser(waId);
-  await redisSet(keyQuotaUsed(waId), "0");
+  await safeStateRedisSet(keyQuotaUsed(waId), "0", { userId: waId, step: "reset_user_quota_used", critical: false });
   return 0;
 }
 
 export async function setUserQuotaUsed(waId, value) {
   await indexUser(waId);
   const v = Math.max(0, Number(value) || 0);
-  await redisSet(keyQuotaUsed(waId), String(Math.trunc(v)));
+  await safeStateRedisSet(keyQuotaUsed(waId), String(Math.trunc(v)), { userId: waId, step: "set_user_quota_used", critical: false });
   return Math.trunc(v);
 }
 
 export async function setUserTrialUsed(waId, value) {
   await indexUser(waId);
   const v = Math.max(0, Number(value) || 0);
-  await redisSet(keyTrialUsed(waId), String(Math.trunc(v)));
+  await safeStateRedisSet(keyTrialUsed(waId), String(Math.trunc(v)), { userId: waId, step: "set_user_trial_used", critical: false });
   return Math.trunc(v);
 }
 
 export async function getUserTrialUsed(waId) {
-  const v = await redisGet(keyTrialUsed(waId));
+  const v = await safeStateRedisGet(keyTrialUsed(waId), { userId: waId, step: "get_user_trial_used", fallback: "0" });
   return toInt(v, 0);
 }
 
 export async function incUserTrialUsed(waId, by = 1) {
   await indexUser(waId);
   const inc = toInt(by, 1);
-  const v = await redisIncrBy(keyTrialUsed(waId), inc);
+  const v = await safeStateRedisIncrBy(keyTrialUsed(waId), inc, { userId: waId, step: "inc_user_trial_used", fallback: 0, critical: false });
   return toInt(v, 0);
 }
 
 export async function resetUserTrialUsed(waId) {
   await indexUser(waId);
-  await redisSet(keyTrialUsed(waId), "0");
+  await safeStateRedisSet(keyTrialUsed(waId), "0", { userId: waId, step: "reset_user_trial_used", critical: false });
   return 0;
 }
 
 // ===================== Last Prompt =====================
 export async function getLastPrompt(waId) {
-  const v = await redisGet(keyLastPrompt(waId));
+  const v = await safeStateRedisGet(keyLastPrompt(waId), { userId: waId, step: "get_last_prompt", fallback: "" });
   return safeStr(v);
 }
 
@@ -956,17 +1464,17 @@ export async function setLastPrompt(waId, prompt) {
   // ✅ V16.4.3: Nunca SET vazio (Upstash REST pode interpretar como SET sem value)
   // Vazio => remove a chave
   if (!p) {
-    await redisDel(keyLastPrompt(waId));
+    await safeStateRedisDel(keyLastPrompt(waId), { userId: waId, step: "last_prompt:clear", critical: false });
     return "";
   }
 
-  await redisSet(keyLastPrompt(waId), p);
+  await safeStateRedisSet(keyLastPrompt(waId), p, { userId: waId, step: "set_last_prompt", critical: false });
   return p;
 }
 
 export async function clearLastPrompt(waId) {
   await indexUser(waId);
-  await redisDel(keyLastPrompt(waId));
+  await safeStateRedisDel(keyLastPrompt(waId), { userId: waId, step: "clear_last_prompt", critical: false });
   return true;
 }
 
@@ -977,7 +1485,7 @@ function keyLastAd(userId) {
 }
 
 export async function getLastAd(waId) {
-  const v = await redisGet(keyLastAd(waId));
+  const v = await safeStateRedisGet(keyLastAd(waId), { userId: waId, step: "get_last_ad", fallback: "" });
   return safeStr(v);
 }
 
@@ -987,17 +1495,17 @@ export async function setLastAd(waId, adText) {
 
   // Nunca SET vazio (Upstash REST pode interpretar como SET sem value)
   if (!t) {
-    await redisDel(keyLastAd(waId));
+    await safeStateRedisDel(keyLastAd(waId), { userId: waId, step: "last_ad:clear", critical: false });
     return "";
   }
 
-  await redisSet(keyLastAd(waId), t);
+  await safeStateRedisSet(keyLastAd(waId), t, { userId: waId, step: "set_last_ad", critical: false });
   return t;
 }
 
 export async function clearLastAd(waId) {
   await indexUser(waId);
-  await redisDel(keyLastAd(waId));
+  await safeStateRedisDel(keyLastAd(waId), { userId: waId, step: "clear_last_ad", critical: false });
   return true;
 }
 
@@ -1007,33 +1515,33 @@ function keyRefineCount(userId) {
 }
 
 export async function getRefineCount(waId) {
-  const v = await redisGet(keyRefineCount(waId));
+  const v = await safeStateRedisGet(keyRefineCount(waId), { userId: waId, step: "get_refine_count", fallback: "0" });
   return toInt(v, 0);
 }
 
 export async function setRefineCount(waId, n) {
   await indexUser(waId);
   const v = toInt(n, 0);
-  await redisSet(keyRefineCount(waId), String(v));
+  await safeStateRedisSet(keyRefineCount(waId), String(v), { userId: waId, step: "set_refine_count", critical: false });
   return v;
 }
 
 export async function incRefineCount(waId, by = 1) {
   await indexUser(waId);
   const inc = toInt(by, 1);
-  const v = await redisIncrBy(keyRefineCount(waId), inc);
+  const v = await safeStateRedisIncrBy(keyRefineCount(waId), inc, { userId: waId, step: "inc_refine_count", fallback: 0, critical: false });
   return toInt(v, 0);
 }
 
 export async function clearRefineCount(waId) {
   await indexUser(waId);
-  await redisDel(keyRefineCount(waId));
+  await safeStateRedisDel(keyRefineCount(waId), { userId: waId, step: "clear_refine_count", critical: false });
   return true;
 }
 
 // ===================== Template Mode =====================
 export async function getTemplateMode(waId) {
-  const v = await redisGet(keyTemplateMode(waId));
+  const v = await safeStateRedisGet(keyTemplateMode(waId), { userId: waId, step: "get_template_mode", fallback: "" });
   const t = safeStr(v).toUpperCase();
   return t === "FREE" ? "FREE" : "FIXED";
 }
@@ -1042,13 +1550,13 @@ export async function setTemplateMode(waId, mode) {
   await indexUser(waId);
   const m = safeStr(mode).toUpperCase();
   const v = m === "FREE" ? "FREE" : "FIXED";
-  await redisSet(keyTemplateMode(waId), v);
+  await safeStateRedisSet(keyTemplateMode(waId), v, { userId: waId, step: "set_template_mode", critical: false });
   return v;
 }
 
 // ===================== Template Prompted (only first time) =====================
 export async function getTemplatePrompted(waId) {
-  const v = await redisGet(keyTemplatePrompted(waId));
+  const v = await safeStateRedisGet(keyTemplatePrompted(waId), { userId: waId, step: "get_template_prompted", fallback: "0" });
   const n = toInt(v, 0);
   return n > 0;
 }
@@ -1056,19 +1564,19 @@ export async function getTemplatePrompted(waId) {
 export async function setTemplatePrompted(waId, value) {
   await indexUser(waId);
   const v = value ? 1 : 0;
-  await redisSet(keyTemplatePrompted(waId), String(v));
+  await safeStateRedisSet(keyTemplatePrompted(waId), String(v), { userId: waId, step: "set_template_prompted", critical: false });
   return !!v;
 }
 
 export async function resetTemplatePrompted(waId) {
   await indexUser(waId);
-  await redisSet(keyTemplatePrompted(waId), "0");
+  await safeStateRedisSet(keyTemplatePrompted(waId), "0", { userId: waId, step: "reset_template_prompted", critical: false });
   return false;
 }
 
 // ===================== Full Name =====================
 export async function getUserFullName(waId) {
-  const v = await redisGet(keyFullName(waId));
+  const v = await safeStateRedisGet(keyFullName(waId), { userId: waId, step: "get_user_full_name", fallback: "" });
   return safeStr(v);
 }
 
@@ -1076,10 +1584,10 @@ export async function setUserFullName(waId, fullName) {
   await indexUser(waId);
   const n = normalizePersonName(fullName);
   if (!n) {
-    await redisDel(keyFullName(waId));
+    await safeStateRedisDel(keyFullName(waId), { userId: waId, step: "clear_full_name", critical: false });
     return "";
   }
-  await redisSet(keyFullName(waId), n);
+  await safeStateRedisSet(keyFullName(waId), n, { userId: waId, step: "set_user_full_name", critical: false });
   return n;
 }
 
@@ -1088,8 +1596,8 @@ export async function getUserDocMasked(waId) {
   await migrateLegacyDocIfNeeded(waId);
 
   const [t, l4] = await Promise.all([
-    redisGet(keyDocType(waId)),
-    redisGet(keyDocLast4(waId)),
+    safeStateRedisGet(keyDocType(waId), { userId: waId, step: "get_user_doc_masked:type", fallback: "" }),
+    safeStateRedisGet(keyDocLast4(waId), { userId: waId, step: "get_user_doc_masked:last4", fallback: "" }),
   ]);
 
   return maskDocFromParts(t, l4);
@@ -1101,29 +1609,29 @@ export async function setUserDocMasked(waId, docType, docLast4) {
   const l4 = safeStr(docLast4);
 
   if (!t || !l4) {
-    await Promise.all([redisDel(keyDocType(waId)), redisDel(keyDocLast4(waId))]);
+    await Promise.all([safeStateRedisDel(keyDocType(waId), { userId: waId, step: "set_user_doc_masked:clear_type", critical: false }), safeStateRedisDel(keyDocLast4(waId), { userId: waId, step: "set_user_doc_masked:clear_last4", critical: false })]);
     return { docType: "", docLast4: "" };
   }
 
-  await Promise.all([redisSet(keyDocType(waId), t), redisSet(keyDocLast4(waId), l4)]);
+  await Promise.all([safeStateRedisSet(keyDocType(waId), t, { userId: waId, step: "set_user_doc_masked:type", critical: false }), safeStateRedisSet(keyDocLast4(waId), l4, { userId: waId, step: "set_user_doc_masked:last4", critical: false })]);
   // garantir que legado está removido
-  await redisDel(keyDocLegacy(waId));
+  await safeStateRedisDel(keyDocLegacy(waId), { userId: waId, step: "clear_legacy_doc", critical: false });
   return { docType: t, docLast4: l4 };
 }
 
 export async function clearUserDoc(waId) {
   await indexUser(waId);
   await Promise.all([
-    redisDel(keyDocType(waId)),
-    redisDel(keyDocLast4(waId)),
-    redisDel(keyDocLegacy(waId)),
+    safeStateRedisDel(keyDocType(waId), { userId: waId, step: "clear_user_doc:type", critical: false }),
+    safeStateRedisDel(keyDocLast4(waId), { userId: waId, step: "clear_user_doc:last4", critical: false }),
+    safeStateRedisDel(keyDocLegacy(waId), { userId: waId, step: "clear_user_doc:legacy", critical: false }),
   ]);
   return true;
 }
 
 // Migração: se existir docDigits (legado), migrar para docType/docLast4 e apagar
 async function migrateLegacyDocIfNeeded(waId) {
-  const legacy = await redisGet(keyDocLegacy(waId));
+  const legacy = await safeStateRedisGet(keyDocLegacy(waId), { userId: waId, step: "migrate_legacy_doc:read", fallback: "" });
   const digits = safeStr(legacy).replace(/\D/g, "");
   if (!digits) return false;
 
@@ -1131,9 +1639,9 @@ async function migrateLegacyDocIfNeeded(waId) {
   const docLast4 = digits.slice(-4);
 
   await Promise.all([
-    redisSet(keyDocType(waId), docType),
-    redisSet(keyDocLast4(waId), docLast4),
-    redisDel(keyDocLegacy(waId)),
+    safeStateRedisSet(keyDocType(waId), docType, { userId: waId, step: "migrate_legacy_doc:type", critical: false }),
+    safeStateRedisSet(keyDocLast4(waId), docLast4, { userId: waId, step: "migrate_legacy_doc:last4", critical: false }),
+    safeStateRedisDel(keyDocLegacy(waId), { userId: waId, step: "clear_user_doc:legacy", critical: false }),
   ]);
 
   return true;
@@ -1176,7 +1684,7 @@ export async function setPaymentMethod(waId, method) {
 
 export async function clearPaymentMethod(waId) {
   await indexUser(waId);
-  await redisDel(keyPaymentMethod(waId));
+  await safeStateRedisDel(keyPaymentMethod(waId), { userId: waId, step: "clear_payment_method", critical: false });
   return true;
 }
 
@@ -1210,7 +1718,7 @@ export async function setBillingCityState(waId, value) {
 
 export async function clearBillingCityState(waId) {
   await indexUser(waId);
-  await redisDel(keyBillingCityState(waId));
+  await safeStateRedisDel(keyBillingCityState(waId), { userId: waId, step: "clear_billing_city_state", critical: false });
   return true;
 }
 
@@ -1243,7 +1751,7 @@ export async function setBillingAddress(waId, value) {
 
 export async function clearBillingAddress(waId) {
   await indexUser(waId);
-  await redisDel(keyBillingAddress(waId));
+  await safeStateRedisDel(keyBillingAddress(waId), { userId: waId, step: "clear_billing_address", critical: false });
   return true;
 }
 
@@ -1308,21 +1816,21 @@ export async function setMenuPrevStatus(waId, prevStatus) {
   await indexUser(waId);
   const s = safeStr(prevStatus).toUpperCase();
   if (!s) {
-    await redisDel(keyMenuPrevStatus(waId));
+    await safeStateRedisDel(keyMenuPrevStatus(waId), { userId: waId, step: "clear_menu_prev_status", critical: false });
     return "";
   }
-  await redisSet(keyMenuPrevStatus(waId), s);
+  await safeStateRedisSet(keyMenuPrevStatus(waId), s, { userId: waId, step: "set_menu_prev_status", critical: false });
   return s;
 }
 
 export async function getMenuPrevStatus(waId) {
-  const v = await redisGet(keyMenuPrevStatus(waId));
+  const v = await safeStateRedisGet(keyMenuPrevStatus(waId), { userId: waId, step: "get_menu_prev_status", fallback: "" });
   return safeStr(v).toUpperCase();
 }
 
 export async function clearMenuPrevStatus(waId) {
   await indexUser(waId);
-  await redisDel(keyMenuPrevStatus(waId));
+  await safeStateRedisDel(keyMenuPrevStatus(waId), { userId: waId, step: "clear_menu_prev_status", critical: false });
   return true;
 }
 
@@ -1370,21 +1878,21 @@ export async function setPrevStatus(waId, prevStatus) {
   await indexUser(waId);
   const s = safeStr(prevStatus).toUpperCase();
   if (!s) {
-    await redisDel(keyPrevStatus(waId));
+    await safeStateRedisDel(keyPrevStatus(waId), { userId: waId, step: "clear_prev_status", critical: false });
     return "";
   }
-  await redisSet(keyPrevStatus(waId), s);
+  await safeStateRedisSet(keyPrevStatus(waId), s, { userId: waId, step: "set_prev_status", critical: false });
   return s;
 }
 
 export async function getPrevStatus(waId) {
-  const v = await redisGet(keyPrevStatus(waId));
+  const v = await safeStateRedisGet(keyPrevStatus(waId), { userId: waId, step: "get_prev_status", fallback: "" });
   return safeStr(v).toUpperCase();
 }
 
 export async function clearPrevStatus(waId) {
   await indexUser(waId);
-  await redisDel(keyPrevStatus(waId));
+  await safeStateRedisDel(keyPrevStatus(waId), { userId: waId, step: "clear_prev_status", critical: false });
   return true;
 }
 
@@ -1518,12 +2026,14 @@ export async function setCheckoutDraft(waId, draftObj) {
     await safeStateRedisDel(keyCheckoutDraft(waId), {
       userId: waId,
       step: "set_checkout_draft:clear",
+    critical: true,
     });
     return null;
   }
   await safeStateRedisSet(keyCheckoutDraft(waId), safeJsonStringify(normalized), {
     userId: waId,
     step: "set_checkout_draft",
+    critical: true,
   });
   return normalized;
 }
@@ -1652,12 +2162,14 @@ export async function setPricingQuote(waId, pricingQuote) {
     await safeStateRedisDel(keyPricingQuote(waId), {
       userId: waId,
       step: "set_pricing_quote:clear",
+    critical: true,
     });
     return null;
   }
   await safeStateRedisSet(keyPricingQuote(waId), safeJsonStringify(normalized), {
     userId: waId,
     step: "set_pricing_quote",
+    critical: true,
   });
   return normalized;
 }
@@ -1684,12 +2196,14 @@ export async function setCouponReservationId(waId, reservationId) {
     await safeStateRedisDel(keyCouponReservationId(waId), {
       userId: waId,
       step: "set_coupon_reservation_id:clear",
+    critical: true,
     });
     return "";
   }
   await safeStateRedisSet(keyCouponReservationId(waId), normalized, {
     userId: waId,
     step: "set_coupon_reservation_id",
+    critical: true,
   });
   return normalized;
 }
@@ -1715,6 +2229,7 @@ export async function setCouponReservationCreatedAt(waId, isoTs) {
   await safeStateRedisSet(keyCouponReservationCreatedAt(waId), normalized, {
     userId: waId,
     step: "set_coupon_reservation_created_at",
+    critical: true,
   });
   return normalized;
 }
@@ -1741,12 +2256,14 @@ export async function setCheckoutCouponStatus(waId, status) {
     await safeStateRedisDel(keyCheckoutCouponStatus(waId), {
       userId: waId,
       step: "set_checkout_coupon_status:clear",
+    critical: true,
     });
     return "";
   }
   await safeStateRedisSet(keyCheckoutCouponStatus(waId), normalized, {
     userId: waId,
     step: "set_checkout_coupon_status",
+    critical: true,
   });
   return normalized;
 }
@@ -2326,10 +2843,10 @@ export async function resetUserAsNew(waId) {
   ];
 
   // best-effort: apaga todas as chaves conhecidas
-  await Promise.allSettled(keys.map((k) => redisDel(k)));
+  await Promise.allSettled(keys.map((k) => safeStateRedisDel(k, { userId: id, step: "reset_user_as_new:delete_key", critical: false })));
 
   // remove do índice para que o usuário só volte a existir quando reentrar no fluxo
-  await redisSRem(USERS_INDEX_KEY, id).catch(() => null);
+  await safeStateRedisSRem(USERS_INDEX_KEY, id, { userId: id, step: "reset_user_as_new:remove_index", critical: false }).catch(() => null);
 
   return { ok: true, userId: id, waId: id, deletedKeys: keys.length };
 }
