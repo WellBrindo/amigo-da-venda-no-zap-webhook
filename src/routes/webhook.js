@@ -7,12 +7,15 @@ import { sendWhatsAppText } from "../services/meta/whatsapp.js";
 import { handleInboundText } from "../services/flow.js";
 import { resolveOrCreateUserFromInbound } from "../services/identity.js";
 import { processPendingForWaId } from "../services/broadcast.js";
-import { redisGet, redisSet, redisExpire } from "../services/redis.js";
+import { redisGet, redisSet, redisExpire, redisSafeGet, redisSafeSet, getRedisHealthSnapshot } from "../services/redis.js";
 import * as audit from "../services/audit.js";
+import { raiseSystemIncident } from "../services/alerts.js";
 import {
   trackWebhookError,
   trackFlowError,
   trackWhatsappSendError,
+  trackRedisDegraded,
+  trackRedisDown,
 } from "../services/metrics.js";
 
 const WEBHOOK_ERROR = Object.freeze({
@@ -187,13 +190,121 @@ async function reportWebhookSuppressed({
   });
 }
 
+
+async function reportWebhookDegraded({
+  event = "webhook_degraded",
+  errorCode = WEBHOOK_ERROR.RUNTIME_ERROR,
+  message = "",
+  step = "",
+  userId = "",
+  waId = "",
+  deliveryId = "",
+  messageId = "",
+  internalUserId = "",
+  impact = "",
+  severity = "HIGH",
+  extra = {},
+} = {}) {
+  const snapshot = typeof getRedisHealthSnapshot === "function"
+    ? getRedisHealthSnapshot()
+    : { status: "DEGRADED" };
+  const redisStatus = safeStr(snapshot?.status) || "DEGRADED";
+
+  try {
+    if (redisStatus === "DOWN" && typeof trackRedisDown === "function") {
+      await trackRedisDown({
+        userId: safeStr(userId || internalUserId || waId),
+        waId: safeStr(waId || deliveryId),
+        source: "webhook_route",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    } else if (typeof trackRedisDegraded === "function") {
+      await trackRedisDegraded({
+        userId: safeStr(userId || internalUserId || waId),
+        waId: safeStr(waId || deliveryId),
+        source: "webhook_route",
+        step: safeStr(step),
+        errorCode: safeStr(errorCode),
+        impact: safeStr(impact),
+        severity: safeStr(severity),
+      });
+    }
+  } catch {}
+
+  try {
+    await raiseSystemIncident({
+      type: "REDIS",
+      severity: safeStr(severity) || "HIGH",
+      module: "webhook_route",
+      step: safeStr(step),
+      errorCode: safeStr(errorCode),
+      message: safeStr(message),
+      impact: safeStr(impact),
+      dedupeKey: ["webhook_route", safeStr(step), safeStr(errorCode), safeStr(impact)].filter(Boolean).join("|"),
+      meta: {
+        redisStatus,
+        messageId: safeStr(messageId),
+        deliveryId: safeStr(deliveryId),
+        waId: safeStr(waId),
+        internalUserId: safeStr(internalUserId || userId),
+        ...((extra && typeof extra === "object") ? extra : {}),
+      },
+    });
+  } catch {}
+
+  await logWebhookEvent("warn", safeStr(event) || "webhook_degraded", {
+    errorCode: safeStr(errorCode),
+    message: safeStr(message),
+    step: safeStr(step),
+    messageId: safeStr(messageId),
+    waId: safeStr(waId),
+    deliveryId: safeStr(deliveryId),
+    internalUserId: safeStr(internalUserId || userId),
+    status: "degraded",
+    meta: {
+      impact: safeStr(impact),
+      redisStatus,
+      ...((extra && typeof extra === "object") ? extra : {}),
+    },
+  });
+}
+
 async function markMessageSeen(messageId) {
   const dedupeKey = `wa:msg:${messageId}`;
-  const seen = await redisGet(dedupeKey);
-  if (seen) return true;
-  await redisSet(dedupeKey, "1");
-  await redisExpire(dedupeKey, 60 * 60 * 24 * 2);
-  return false;
+
+  const seenResult = await redisSafeGet(dedupeKey, {
+    fallbackValue: "",
+    critical: false,
+    module: "webhook_route",
+    step: "message_dedupe:read",
+    suppressThrow: true,
+  });
+
+  if (seenResult?.ok && seenResult.value) return true;
+
+  if (!seenResult?.ok) {
+    return { degraded: true, seen: false, dedupePersisted: false };
+  }
+
+  const writeResult = await redisSafeSet(dedupeKey, "1", {
+    fallbackValue: false,
+    critical: false,
+    module: "webhook_route",
+    step: "message_dedupe:write",
+    suppressThrow: true,
+  });
+
+  if (writeResult?.ok) {
+    try {
+      await redisExpire(dedupeKey, 60 * 60 * 24 * 2);
+    } catch {}
+    return { degraded: false, seen: false, dedupePersisted: true };
+  }
+
+  return { degraded: true, seen: false, dedupePersisted: false };
 }
 
 async function sendReplies({ replies = [], deliveryId = "", inboundWaId = "", inboundBsuid = "", internalUserId = "", messageId = "" } = {}) {
@@ -318,10 +429,25 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
 
   if (messageId) {
     try {
-      const seen = await markMessageSeen(messageId);
-      if (seen) return;
+      const dedupe = await markMessageSeen(messageId);
+      if (dedupe === true || (dedupe && dedupe.seen)) return;
+      if (dedupe && dedupe.degraded) {
+        await reportWebhookDegraded({
+          event: "webhook_dedupe_degraded",
+          errorCode: WEBHOOK_ERROR.DEDUPE_ERROR,
+          message: "Redis degraded during webhook message dedupe; processing continued with caution.",
+          step: "message_dedupe",
+          waId: inboundWaId,
+          deliveryId,
+          messageId,
+          internalUserId,
+          impact: "dedupe_fallback_processing",
+          severity: "HIGH",
+        });
+      }
     } catch (err) {
-      await reportWebhookError({
+      await reportWebhookDegraded({
+        event: "webhook_dedupe_degraded",
         errorCode: WEBHOOK_ERROR.DEDUPE_ERROR,
         message: err?.message || String(err),
         step: "message_dedupe",
@@ -329,6 +455,8 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
         deliveryId,
         messageId,
         internalUserId,
+        impact: "dedupe_fallback_processing",
+        severity: "HIGH",
       });
       // fallback explícito: processa a mensagem mesmo sem dedupe confirmado
     }
@@ -338,7 +466,8 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
     try {
       await touch24hWindow(inboundWaId);
     } catch (err) {
-      await reportWebhookError({
+      await reportWebhookDegraded({
+        event: "webhook_window24h_degraded",
         errorCode: WEBHOOK_ERROR.WINDOW24H_ERROR,
         message: err?.message || String(err),
         step: "touch_24h_window",
@@ -346,6 +475,8 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
         deliveryId,
         messageId,
         internalUserId,
+        impact: "window24h_touch_skipped",
+        severity: "MEDIUM",
       });
     }
   }
@@ -444,7 +575,8 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
       try {
         await processPendingForWaId(inboundWaId);
       } catch (err) {
-        await reportWebhookError({
+        await reportWebhookDegraded({
+          event: "webhook_pending_processing_degraded",
           errorCode: WEBHOOK_ERROR.PENDING_PROCESS_ERROR,
           message: err?.message || String(err),
           step: "process_pending_campaigns",
@@ -452,6 +584,8 @@ async function processInboundMessage({ value = {}, msg = {} } = {}) {
           deliveryId,
           messageId,
           internalUserId,
+          impact: "pending_campaign_processing_skipped",
+          severity: "HIGH",
           extra: {
             bsuid: safeStr(inboundBsuid),
           },
