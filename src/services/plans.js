@@ -260,6 +260,86 @@ export async function getPlan(code) {
   }
 }
 
+
+
+export async function validateAdminUserPlanCode(planCode, options = {}) {
+  const allowEmpty = options.allowEmpty !== false;
+  const raw = safeStr(planCode);
+  const normalized = raw.toUpperCase();
+
+  if (!normalized) {
+    if (allowEmpty) {
+      return {
+        ok: true,
+        planCode: "",
+        exists: false,
+        active: false,
+        plan: null,
+        errorCode: "",
+        message: "Plano vazio permitido para edição administrativa.",
+      };
+    }
+
+    return {
+      ok: false,
+      planCode: "",
+      exists: false,
+      active: false,
+      plan: null,
+      errorCode: "PLAN_REQUIRED",
+      message: "Informe um plano válido para o usuário.",
+    };
+  }
+
+  if (!/^[A-Z0-9_]{3,40}$/.test(normalized)) {
+    return {
+      ok: false,
+      planCode: normalized,
+      exists: false,
+      active: false,
+      plan: null,
+      errorCode: "INVALID_PLAN_CODE",
+      message: "Código de plano inválido. Use apenas A-Z, 0-9 e underscore, com 3 a 40 caracteres.",
+    };
+  }
+
+  const plan = await getPlan(normalized);
+  if (!plan) {
+    return {
+      ok: false,
+      planCode: normalized,
+      exists: false,
+      active: false,
+      plan: null,
+      errorCode: "PLAN_NOT_FOUND",
+      message: "Plano não encontrado no catálogo atual.",
+    };
+  }
+
+  const active = Boolean(plan.active);
+  if (!active && options.allowInactive !== true) {
+    return {
+      ok: false,
+      planCode: normalized,
+      exists: true,
+      active: false,
+      plan,
+      errorCode: "PLAN_INACTIVE",
+      message: "Plano encontrado, mas está inativo no catálogo atual.",
+    };
+  }
+
+  return {
+    ok: true,
+    planCode: normalized,
+    exists: true,
+    active,
+    plan,
+    errorCode: active ? "" : "PLAN_INACTIVE_ALLOWED",
+    message: active ? "Plano válido para edição administrativa." : "Plano inativo permitido explicitamente para edição administrativa.",
+  };
+}
+
 export async function upsertPlan(input) {
   const code = normalizeCode(input?.code);
   const name = String(input?.name || "").trim();
