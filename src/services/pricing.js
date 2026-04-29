@@ -951,3 +951,163 @@ export function summarizePricingQuote(quote = {}) {
     calculation,
   };
 }
+
+// -------------------------
+// Admin helpers: leitura segura de precificação efetiva do usuário
+// -------------------------
+function normalizeAdminPricingSnapshot(userSnapshot = {}) {
+  const snap = userSnapshot && typeof userSnapshot === "object" ? userSnapshot : {};
+  const quote = snap.pricingQuote && typeof snap.pricingQuote === "object" ? snap.pricingQuote : null;
+  const checkoutDraft = snap.checkoutDraft && typeof snap.checkoutDraft === "object" ? snap.checkoutDraft : null;
+
+  const planCode = normalizePlanCode(
+    snap.selectedPlanCode ||
+      quote?.planCode ||
+      checkoutDraft?.selectedPlanCode ||
+      checkoutDraft?.planCode ||
+      snap.plan ||
+      ""
+  );
+
+  let billingCycle = "monthly";
+  try {
+    billingCycle = normalizeBillingCycle(
+      snap.selectedBillingCycle ||
+        quote?.billingCycle ||
+        checkoutDraft?.selectedBillingCycle ||
+        checkoutDraft?.billingCycle ||
+        "monthly",
+      { fallback: "monthly" }
+    );
+  } catch (_) {
+    billingCycle = "monthly";
+  }
+
+  const couponCode = normalizeCouponCode(
+    snap.selectedCouponCode ||
+      quote?.couponCode ||
+      checkoutDraft?.selectedCouponCode ||
+      checkoutDraft?.couponCode ||
+      ""
+  );
+
+  return {
+    userId: safeStr(snap.userId || snap.internalUserId || snap.waId),
+    internalUserId: safeStr(snap.internalUserId || snap.userId || snap.waId),
+    planCode,
+    billingCycle,
+    couponCode,
+    pricingQuote: quote,
+    checkoutDraft,
+  };
+}
+
+function buildAdminPricingMoneyView(cents) {
+  const valueCents = normalizeCurrencyCents(cents);
+  return {
+    cents: valueCents,
+    label: formatBRLFromCents(valueCents),
+  };
+}
+
+function buildAdminPricingWarning(code, message, severity = "warn") {
+  return {
+    code: safeStr(code) || "admin_pricing_warning",
+    message: safeStr(message) || "Aviso de precificação administrativa.",
+    severity: safeStr(severity) || "warn",
+  };
+}
+
+export async function getAdminUserEffectivePricingView(userSnapshot = {}, options = {}) {
+  const normalized = normalizeAdminPricingSnapshot(userSnapshot);
+  const warnings = [];
+  const source = safeStr(options.source || "admin_pricing_view");
+
+  warnings.push(buildAdminPricingWarning(
+    "individual_price_not_supported_without_financial_sync",
+    "Preço individual não suportado sem integração financeira correspondente.",
+    "warn"
+  ));
+
+  if (!normalized.planCode) {
+    return {
+      ok: true,
+      valid: false,
+      planCode: "",
+      billingCycle: normalized.billingCycle,
+      couponCode: normalized.couponCode,
+      basePrice: buildAdminPricingMoneyView(0),
+      discount: buildAdminPricingMoneyView(0),
+      finalPrice: buildAdminPricingMoneyView(0),
+      source,
+      pricingSource: "none",
+      warnings: [
+        ...warnings,
+        buildAdminPricingWarning("missing_plan", "Usuário sem plano definido para leitura de preço efetivo.", "info"),
+      ],
+      quote: null,
+    };
+  }
+
+  const quote = await buildPricingQuote({
+    internalUserId: normalized.internalUserId,
+    planCode: normalized.planCode,
+    billingCycle: normalized.billingCycle,
+    couponCode: normalized.couponCode,
+    trackMetrics: false,
+    trackingMode: PRICING_TRACKING_MODE.INTERNAL,
+    source,
+  });
+
+  if (!quote?.ok) {
+    return {
+      ok: true,
+      valid: false,
+      planCode: normalized.planCode,
+      billingCycle: normalized.billingCycle,
+      couponCode: normalized.couponCode,
+      basePrice: buildAdminPricingMoneyView(0),
+      discount: buildAdminPricingMoneyView(0),
+      finalPrice: buildAdminPricingMoneyView(0),
+      source,
+      pricingSource: "pricing_engine_error",
+      warnings: [
+        ...warnings,
+        buildAdminPricingWarning(
+          safeStr(quote?.code) || "pricing_quote_invalid",
+          safeStr(quote?.reason) || "Não foi possível calcular a visão de preço efetivo pelo motor central.",
+          "danger"
+        ),
+      ],
+      quote,
+    };
+  }
+
+  const calculation = cloneCalculation(quote.calculation || {});
+  const summarized = summarizePricingQuote(quote);
+  const storedQuote = normalized.pricingQuote;
+
+  if (storedQuote) {
+    warnings.push(buildAdminPricingWarning(
+      "stored_pricing_quote_is_historical",
+      "Há pricingQuote salvo no usuário; ele é tratado como histórico/rascunho e não como mensalidade individual editável.",
+      "info"
+    ));
+  }
+
+  return {
+    ok: true,
+    valid: true,
+    planCode: normalized.planCode,
+    billingCycle: normalized.billingCycle,
+    couponCode: normalized.couponCode,
+    basePrice: buildAdminPricingMoneyView(calculation.basePriceCents),
+    discount: buildAdminPricingMoneyView(calculation.discountAmountCents),
+    finalPrice: buildAdminPricingMoneyView(calculation.finalPriceCents),
+    source,
+    pricingSource: normalized.couponCode ? "pricing_engine_plan_coupon" : "pricing_engine_plan",
+    warnings,
+    summary: summarized,
+    quote,
+  };
+}
