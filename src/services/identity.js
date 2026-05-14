@@ -299,7 +299,10 @@ async function safeIdentityRead(action, fallback, context = {}) {
   try {
     const result = await action();
 
-    if (context.critical && (result === null || result === undefined || result === fallback)) {
+    const criticalEmptyAllowed = Boolean(context.allowEmptyCritical);
+    const returnedEmptyCriticalValue = result === null || result === undefined || result === fallback;
+
+    if (context.critical && returnedEmptyCriticalValue && !criticalEmptyAllowed) {
       await reportIdentityRedisIncident({
         step: safeStr(context.step || "identity_read"),
         errorCode: safeStr(context.errorCode || "IDENTITY_CRITICAL_READ_UNCERTAIN"),
@@ -677,6 +680,10 @@ export async function getInternalUserIdByWaId(waId, options = {}) {
       impact: critical ? "identity_alias_lookup_critical_blocked" : "identity_alias_lookup_fallback",
       severity: critical ? "CRITICAL" : "MEDIUM",
       critical,
+      allowEmptyCritical: true,
+      meta: {
+        emptyAliasIsValidMiss: true,
+      },
     }
   );
   return toNullable(value);
@@ -707,6 +714,10 @@ export async function getInternalUserIdByBsuid(bsuid, options = {}) {
       impact: critical ? "identity_alias_lookup_critical_blocked" : "identity_alias_lookup_fallback",
       severity: critical ? "CRITICAL" : "MEDIUM",
       critical,
+      allowEmptyCritical: true,
+      meta: {
+        emptyAliasIsValidMiss: true,
+      },
     }
   );
   return toNullable(value);
