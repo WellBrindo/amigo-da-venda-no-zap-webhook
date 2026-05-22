@@ -594,6 +594,245 @@ async function getCampaignStats(campaignId) {
   };
 }
 
+function limitPreview(value, max = 240) {
+  const text = safeStr(value).replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const lim = Math.max(40, Math.min(Number(max || 240), 1000));
+  return text.length > lim ? `${text.slice(0, lim)}…` : text;
+}
+
+function safeJsonParse(value, fallback = null) {
+  try {
+    return JSON.parse(String(value || ""));
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeDiagnosticCampaignRecord({
+  campaignId = "",
+  campaign = null,
+  runtimeMeta = {},
+  stats = {},
+  pendingMembership = false,
+  sentMembership = false,
+  errorItems = [],
+} = {}) {
+  const definition = campaign && typeof campaign === "object" ? campaign : {};
+  const meta = runtimeMeta && typeof runtimeMeta === "object" ? runtimeMeta : {};
+  const id = safeStr(campaignId || definition.id);
+  return {
+    campaignId: id,
+    campaignCode: safeStr(definition.code),
+    name: safeStr(definition.name),
+    category: safeStr(definition.category),
+    triggerType: safeStr(definition.triggerType),
+    messageMode: safeStr(definition.messageMode),
+    copyKey: safeStr(definition.copyKey),
+    inlineTextPreview: limitPreview(definition.inlineText, 240),
+    subject: safeStr(meta.subject),
+    textPreview: limitPreview(meta.text || definition.inlineText, 240),
+    runtimeCreatedAt: safeStr(meta.createdAt),
+    stats: stats && typeof stats === "object" ? stats : {},
+    pendingMembership: Boolean(pendingMembership),
+    sentMembership: Boolean(sentMembership),
+    errorItems: Array.isArray(errorItems) ? errorItems : [],
+  };
+}
+
+function normalizeLifecycleDiagnosticEvaluation(item = {}) {
+  const evaluation = item && typeof item === "object" ? item : {};
+  const campaign = evaluation.campaign && typeof evaluation.campaign === "object" ? evaluation.campaign : {};
+  return {
+    campaignId: safeStr(campaign.id || evaluation.campaignId),
+    campaignCode: safeStr(campaign.code || evaluation.campaignCode),
+    name: safeStr(campaign.name),
+    category: safeStr(campaign.category),
+    triggerType: safeStr(campaign.triggerType),
+    eligible: Boolean(evaluation.eligible),
+    action: safeStr(evaluation.action),
+    reason: safeStr(evaluation.reason),
+    primaryReason: safeStr(evaluation.primaryReason),
+    blockReason: safeStr(evaluation.blockReason),
+    cooldownUntil: safeStr(evaluation.cooldownUntil),
+    evaluatedAt: safeStr(evaluation.evaluatedAt),
+  };
+}
+
+async function resolveUserIdForCampaignDiagnostics(userRef) {
+  const inputRef = safeStr(userRef);
+  if (!inputRef) return { inputRef, userId: "" };
+  if (/^usr_\d+$/i.test(inputRef)) return { inputRef, userId: inputRef };
+  const mapped = await redisBestEffort(
+    () => getInternalUserIdByWaId(inputRef),
+    "",
+    { userId: inputRef, recipient: inputRef, step: "diagnostics_resolve_user" }
+  );
+  return { inputRef, userId: safeStr(mapped || inputRef) };
+}
+
+async function readCampaignDiagnosticsRecord(campaignId, userId) {
+  const id = safeStr(campaignId);
+  const user = safeStr(userId);
+  if (!id || !user) return null;
+
+  const [coreResult, runtimeMeta, stats, pendingMembership, sentMembership, rawErrors] = await Promise.all([
+    getCampaignCore(id).catch(() => null),
+    readRuntimeMeta(id).catch(() => normalizeRuntimeMeta({})),
+    getCampaignStats(id).catch(() => ({ sent: 0, pending: 0, errors: 0 })),
+    redisBestEffort(
+      () => redisSIsMember(campaignKeyPending(id), user),
+      0,
+      { campaignId: id, userId: user, step: "diagnostics_pending_membership" }
+    ),
+    redisBestEffort(
+      () => redisSIsMember(campaignKeySent(id), user),
+      0,
+      { campaignId: id, userId: user, step: "diagnostics_sent_membership" }
+    ),
+    redisBestEffort(
+      () => redisLRange(campaignKeyErrors(id), 0, 199),
+      [],
+      { campaignId: id, userId: user, step: "diagnostics_error_items" }
+    ),
+  ]);
+
+  const errorItems = (Array.isArray(rawErrors) ? rawErrors : [])
+    .map((item) => safeJsonParse(item, null))
+    .filter((item) => {
+      const ref = safeStr(item?.userRef || item?.userId || item?.waId);
+      return !ref || ref === user;
+    })
+    .slice(0, 20)
+    .map((item) => ({
+      ts: safeStr(item?.ts),
+      userRef: safeStr(item?.userRef || item?.userId || item?.waId),
+      error: limitPreview(item?.error || item?.message, 240),
+    }));
+
+  return normalizeDiagnosticCampaignRecord({
+    campaignId: id,
+    campaign: coreResult?.campaign || null,
+    runtimeMeta,
+    stats,
+    pendingMembership: Number(pendingMembership || 0) > 0,
+    sentMembership: Number(sentMembership || 0) > 0,
+    errorItems,
+  });
+}
+
+async function listAllDiagnosticCampaignIds() {
+  const legacyIds = await redisBestEffort(
+    () => redisLRange(CAMPAIGNS_LIST_KEY, 0, CAMPAIGNS_MAX_LIST - 1),
+    [],
+    { step: "diagnostics_list_legacy_campaigns" }
+  );
+  const managed = await listCampaignsCore({ includeInactive: true, limit: 1000 }).catch(() => ({ campaigns: [] }));
+  const managedIds = (Array.isArray(managed?.campaigns) ? managed.campaigns : [])
+    .map((campaign) => safeStr(campaign?.id))
+    .filter(Boolean);
+
+  return Array.from(new Set([
+    ...(Array.isArray(legacyIds) ? legacyIds : []).map((id) => safeStr(id)).filter(Boolean),
+    ...managedIds,
+  ]));
+}
+
+export async function getUserCampaignDiagnostics(userRef, options = {}) {
+  const { inputRef, userId } = await resolveUserIdForCampaignDiagnostics(userRef);
+  const generatedAt = new Date().toISOString();
+
+  const base = {
+    ok: true,
+    inputRef,
+    userId,
+    generatedAt,
+    summary: {
+      pendingCount: 0,
+      sentCount: 0,
+      errorCount: 0,
+      lifecycleEvaluatedCount: 0,
+      lifecycleEligibleCount: 0,
+      hasLifecycleWinner: false,
+    },
+    pending: [],
+    sent: [],
+    errors: [],
+    lifecycle: {
+      status: "",
+      context: {},
+      evaluations: [],
+      eligible: [],
+      winner: null,
+    },
+  };
+
+  if (!userId) return base;
+
+  const pendingCampaignIds = await redisBestEffort(
+    () => redisSMembers(PENDING_CAMPAIGNS_SET),
+    [],
+    { userId, step: "diagnostics_pending_campaigns_set" }
+  );
+
+  const pendingIds = Array.from(new Set((Array.isArray(pendingCampaignIds) ? pendingCampaignIds : [])
+    .map((id) => safeStr(id))
+    .filter(Boolean)));
+
+  for (const campaignId of pendingIds) {
+    const isPending = await redisBestEffort(
+      () => redisSIsMember(campaignKeyPending(campaignId), userId),
+      0,
+      { campaignId, userId, step: "diagnostics_pending_user_membership" }
+    );
+    if (!Number(isPending || 0)) continue;
+
+    const row = await readCampaignDiagnosticsRecord(campaignId, userId);
+    if (row) base.pending.push(row);
+  }
+
+  const allCampaignIds = await listAllDiagnosticCampaignIds();
+  for (const campaignId of allCampaignIds) {
+    const row = await readCampaignDiagnosticsRecord(campaignId, userId);
+    if (!row) continue;
+
+    if (row.sentMembership) base.sent.push(row);
+    if (row.errorItems.length) base.errors.push(row);
+  }
+
+  const nowTs = Number(options?.nowMs || nowMs());
+  const lifecycle = await evaluateLifecycleCandidatesForUser(userId, nowTs).catch((error) => ({
+    status: "",
+    context: {},
+    evaluations: [],
+    error: extractErrorMessage(error),
+  }));
+
+  const evaluations = Array.isArray(lifecycle?.evaluations) ? lifecycle.evaluations : [];
+  const eligibleRaw = evaluations.filter((item) => item?.eligible);
+  const resolved = eligibleRaw.length ? resolveCampaignConflict(eligibleRaw) : { winner: null };
+
+  base.lifecycle = {
+    status: safeStr(lifecycle?.status),
+    context: lifecycle?.context && typeof lifecycle.context === "object" ? lifecycle.context : {},
+    evaluations: evaluations.map(normalizeLifecycleDiagnosticEvaluation),
+    eligible: eligibleRaw.map(normalizeLifecycleDiagnosticEvaluation),
+    winner: resolved?.winner ? normalizeLifecycleDiagnosticEvaluation(resolved.winner) : null,
+  };
+
+  base.summary = {
+    pendingCount: base.pending.length,
+    sentCount: base.sent.length,
+    errorCount: base.errors.reduce((acc, item) => acc + (Array.isArray(item.errorItems) ? item.errorItems.length : 0), 0),
+    lifecycleEvaluatedCount: base.lifecycle.evaluations.length,
+    lifecycleEligibleCount: base.lifecycle.eligible.length,
+    hasLifecycleWinner: Boolean(base.lifecycle.winner?.campaignId),
+  };
+
+  return base;
+}
+
+
 function isCheckoutLikeStatus(status) {
   const s = safeStr(status).toUpperCase();
   return [
