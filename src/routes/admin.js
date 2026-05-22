@@ -73,6 +73,7 @@ import {
   listCampaigns as listBroadcastCampaigns,
   getCampaign as getBroadcastCampaign,
   reprocessCampaignForActiveWindow,
+  getUserCampaignDiagnostics,
 } from "../services/broadcast.js";
 
 import {
@@ -7737,14 +7738,25 @@ router.post("/coupons/:code/delete", async (req, res) => {
       const plans = await listPlans({ includeInactive: true });
       const planMap = buildPlanMap(plans);
       const user = await enrichUserForCrm(userId, planMap, nowMs());
-      const editable = typeof getUserAdminEditableFields === "function"
-        ? await getUserAdminEditableFields(userId).catch(() => null)
-        : null;
+      const [editable, campaignDiagnostics] = await Promise.all([
+        typeof getUserAdminEditableFields === "function"
+          ? getUserAdminEditableFields(userId).catch(() => null)
+          : Promise.resolve(null),
+        typeof getUserCampaignDiagnostics === "function"
+          ? getUserCampaignDiagnostics(userId).catch((error) => ({
+              ok: false,
+              inputRef: userId,
+              userId,
+              error: String(error?.message || error),
+            }))
+          : Promise.resolve(null),
+      ]);
       return res.status(200).json({
         ok: true,
         user: {
           ...user,
           editableFields: editable || null,
+          campaignDiagnostics: campaignDiagnostics || null,
         },
         availablePlans: buildCrmEditablePlanOptions(plans),
       });
@@ -8988,6 +9000,161 @@ router.post("/coupons/:code/delete", async (req, res) => {
             await loadCrmUser(user.waId || user.userId || out.json.userId || "");
           }
 
+
+          function fmtAnyTs(value){
+            if (!value) return "—";
+            const raw = String(value || "").trim();
+            const asNumber = Number(raw);
+            const d = Number.isFinite(asNumber) && asNumber > 0 ? new Date(asNumber) : new Date(raw);
+            if (Number.isNaN(d.getTime())) return raw || "—";
+            return d.toLocaleString("pt-BR");
+          }
+
+          function renderCampaignSummaryCards(diag){
+            const summary = diag && diag.summary ? diag.summary : {};
+            return '' +
+              '<div class="grid cols3">' +
+                '<div class="kpi"><div class="t">Pendentes</div><div class="v">' + esc(summary.pendingCount || 0) + '</div></div>' +
+                '<div class="kpi"><div class="t">Enviadas</div><div class="v">' + esc(summary.sentCount || 0) + '</div></div>' +
+                '<div class="kpi"><div class="t">Erros</div><div class="v">' + esc(summary.errorCount || 0) + '</div></div>' +
+              '</div>' +
+              '<div class="grid cols3" style="margin-top:10px;">' +
+                '<div class="kpi"><div class="t">Lifecycle avaliadas</div><div class="v">' + esc(summary.lifecycleEvaluatedCount || 0) + '</div></div>' +
+                '<div class="kpi"><div class="t">Lifecycle elegíveis</div><div class="v">' + esc(summary.lifecycleEligibleCount || 0) + '</div></div>' +
+                '<div class="kpi"><div class="t">Vencedora atual</div><div class="v">' + (summary.hasLifecycleWinner ? '<span class="badge warn">SIM</span>' : '<span class="badge ok">NÃO</span>') + '</div></div>' +
+              '</div>';
+          }
+
+          function renderCampaignTable(rows, kind){
+            const list = Array.isArray(rows) ? rows : [];
+            if (!list.length) return '<div class="muted">Nenhum registro encontrado.</div>';
+            return '' +
+              '<div style="overflow:auto;">' +
+                '<table>' +
+                  '<thead><tr>' +
+                    '<th>Campanha</th>' +
+                    '<th>Tipo</th>' +
+                    '<th>Mensagem</th>' +
+                    '<th>Registro</th>' +
+                  '</tr></thead>' +
+                  '<tbody>' +
+                    list.map(function(row){
+                      const stats = row.stats || {};
+                      const errors = Array.isArray(row.errorItems) ? row.errorItems : [];
+                      const membership = [];
+                      if (row.pendingMembership) membership.push('<span class="badge warn soft">pendente</span>');
+                      if (row.sentMembership) membership.push('<span class="badge ok soft">enviada</span>');
+                      if (errors.length) membership.push('<span class="badge danger soft">' + esc(errors.length) + ' erro(s)</span>');
+                      const messagePreview = row.textPreview || row.inlineTextPreview || '';
+                      const errorHtml = errors.length
+                        ? '<details style="margin-top:8px;"><summary>Erros</summary><ul style="margin:6px 0 0 18px;">' + errors.map(function(err){
+                            return '<li><b>' + esc(fmtAnyTs(err.ts)) + '</b> — ' + esc(err.error || 'erro') + '</li>';
+                          }).join('') + '</ul></details>'
+                        : '';
+                      return '<tr>' +
+                        '<td>' +
+                          '<div><b>' + esc(row.name || row.campaignCode || row.campaignId || '—') + '</b></div>' +
+                          '<div class="muted"><code>' + esc(row.campaignId || '—') + '</code></div>' +
+                          '<div class="muted">Code: <code>' + esc(row.campaignCode || '—') + '</code></div>' +
+                        '</td>' +
+                        '<td>' +
+                          '<div>' + esc(row.category || '—') + '</div>' +
+                          '<div class="muted">' + esc(row.triggerType || '—') + ' · ' + esc(row.messageMode || '—') + '</div>' +
+                          '<div class="muted">copyKey: <code>' + esc(row.copyKey || '—') + '</code></div>' +
+                        '</td>' +
+                        '<td>' +
+                          '<div class="muted">Assunto: <b>' + esc(row.subject || '—') + '</b></div>' +
+                          '<div style="margin-top:6px;">' + esc(messagePreview || '—') + '</div>' +
+                        '</td>' +
+                        '<td>' +
+                          '<div class="row" style="gap:6px;">' + (membership.join('') || '<span class="badge soft">sem marcação</span>') + '</div>' +
+                          '<div class="muted" style="margin-top:8px;">Criada: <b>' + esc(fmtAnyTs(row.runtimeCreatedAt)) + '</b></div>' +
+                          '<div class="muted">Stats: sent ' + esc(stats.sent || 0) + ' · pending ' + esc(stats.pending || 0) + ' · errors ' + esc(stats.errors || 0) + '</div>' +
+                          errorHtml +
+                        '</td>' +
+                      '</tr>';
+                    }).join('') +
+                  '</tbody>' +
+                '</table>' +
+              '</div>';
+          }
+
+          function renderLifecycleDiagnostics(diag){
+            const lifecycle = diag && diag.lifecycle ? diag.lifecycle : {};
+            const winner = lifecycle.winner || null;
+            const evaluations = Array.isArray(lifecycle.evaluations) ? lifecycle.evaluations : [];
+            const eligible = Array.isArray(lifecycle.eligible) ? lifecycle.eligible : [];
+            const winnerHtml = winner
+              ? '<div class="card pad" style="margin-top:10px; border-color:rgba(245,158,11,.35); background:rgba(245,158,11,.08);">' +
+                  '<div><b>Campanha vencedora atual</b></div>' +
+                  '<div style="margin-top:6px;"><b>' + esc(winner.name || winner.campaignCode || winner.campaignId || '—') + '</b></div>' +
+                  '<div class="muted">ID: <code>' + esc(winner.campaignId || '—') + '</code> · Code: <code>' + esc(winner.campaignCode || '—') + '</code></div>' +
+                  '<div class="muted">Motivo: ' + esc(winner.primaryReason || winner.reason || '—') + '</div>' +
+                '</div>'
+              : '<div class="muted" style="margin-top:10px;">Nenhuma campanha vencedora no momento.</div>';
+
+            const evalHtml = evaluations.length
+              ? '<div style="overflow:auto; margin-top:10px;"><table>' +
+                  '<thead><tr><th>Campanha</th><th>Elegível</th><th>Motivo</th><th>Avaliada em</th></tr></thead>' +
+                  '<tbody>' +
+                    evaluations.map(function(item){
+                      return '<tr>' +
+                        '<td><b>' + esc(item.name || item.campaignCode || item.campaignId || '—') + '</b><div class="muted"><code>' + esc(item.campaignId || '—') + '</code></div></td>' +
+                        '<td>' + (item.eligible ? '<span class="badge ok">SIM</span>' : '<span class="badge soft">NÃO</span>') + '</td>' +
+                        '<td>' +
+                          '<div>' + esc(item.primaryReason || item.reason || item.blockReason || '—') + '</div>' +
+                          '<div class="muted">' + esc(item.action || '—') + ' · cooldown: ' + esc(fmtAnyTs(item.cooldownUntil)) + '</div>' +
+                        '</td>' +
+                        '<td>' + esc(fmtAnyTs(item.evaluatedAt)) + '</td>' +
+                      '</tr>';
+                    }).join('') +
+                  '</tbody>' +
+                '</table></div>'
+              : '<div class="muted" style="margin-top:10px;">Nenhuma avaliação lifecycle retornada.</div>';
+
+            return '' +
+              '<div class="grid cols2">' +
+                '<div class="kpi">' +
+                  '<div class="t">Status avaliado</div>' +
+                  '<div style="font-size:18px; font-weight:800; margin-top:6px;">' + esc(lifecycle.status || '—') + '</div>' +
+                '</div>' +
+                '<div class="kpi">' +
+                  '<div class="t">Elegíveis agora</div>' +
+                  '<div style="font-size:18px; font-weight:800; margin-top:6px;">' + esc(eligible.length || 0) + '</div>' +
+                '</div>' +
+              '</div>' +
+              winnerHtml +
+              '<details style="margin-top:10px;"><summary><b>Contexto usado na avaliação</b></summary><pre style="white-space:pre-wrap;">' + esc(JSON.stringify(lifecycle.context || {}, null, 2)) + '</pre></details>' +
+              '<details style="margin-top:10px;" open><summary><b>Avaliações lifecycle</b></summary>' + evalHtml + '</details>';
+          }
+
+          function renderCampaignDiagnostics(user){
+            const diag = user && user.campaignDiagnostics ? user.campaignDiagnostics : null;
+            if (!diag) {
+              return '<details><summary><b>📣 Campanhas e automações</b></summary><div class="muted">Diagnóstico de campanhas não disponível.</div></details>';
+            }
+            if (diag.ok === false) {
+              return '<details open><summary><b>📣 Campanhas e automações</b></summary><div class="badge danger soft">Falha ao carregar diagnóstico de campanhas</div><div class="muted" style="margin-top:8px;">' + esc(diag.error || 'erro desconhecido') + '</div></details>';
+            }
+
+            return '' +
+              '<details open><summary><b>📣 Campanhas e automações</b></summary>' +
+                '<div class="muted" style="margin:8px 0 12px 0;">Leitura somente para diagnóstico. Não envia mensagens, não remove pendências e não altera campanhas.</div>' +
+                renderCampaignSummaryCards(diag) +
+                '<div class="hr"></div>' +
+                '<details open><summary><b>Pendentes para este usuário</b></summary>' + renderCampaignTable(diag.pending, 'pending') + '</details>' +
+                '<div class="hr"></div>' +
+                '<details><summary><b>Já enviadas / marcadas como sent</b></summary>' + renderCampaignTable(diag.sent, 'sent') + '</details>' +
+                '<div class="hr"></div>' +
+                '<details><summary><b>Erros registrados</b></summary>' + renderCampaignTable(diag.errors, 'errors') + '</details>' +
+                '<div class="hr"></div>' +
+                '<details open><summary><b>Lifecycle atual</b></summary>' + renderLifecycleDiagnostics(diag) + '</details>' +
+                '<div class="hr"></div>' +
+                '<details><summary><b>JSON completo do diagnóstico</b></summary><pre style="white-space:pre-wrap;">' + esc(JSON.stringify(diag, null, 2)) + '</pre></details>' +
+              '</details>';
+          }
+
+
           function renderDetail(user){
             if (!user) {
               els.detail.innerHTML = '<div class="muted">Usuário não encontrado.</div>';
@@ -9064,6 +9231,8 @@ router.post("/coupons/:code/delete", async (req, res) => {
               '<details open><summary><b>Perfil da empresa salvo</b></summary>' + bizProfile + '</details>' +
               '<div class="hr"></div>' +
               '<details><summary><b>Perfil da empresa pendente</b></summary>' + pendingBiz + '</details>' +
+              '<div class="hr"></div>' +
+              renderCampaignDiagnostics(user) +
               '<div class="hr"></div>' +
               '<details><summary><b>JSON completo</b></summary><pre style="white-space:pre-wrap;">' + esc(JSON.stringify(user.snapshot || {}, null, 2)) + '</pre></details>';
 
